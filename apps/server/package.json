@@ -1,0 +1,21 @@
+{
+  "name": "@flanterminal/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsc -b --watch --preserveWatchOutput",
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run --config ../../vitest.config.ts --root . --passWithNoTests"
+  },
+  "dependencies": {
+    "@flanterminal/shared": "*",
+    "express": "5.2.1",
+    "helmet": "8.2.0",
+    "node-pty": "1.1.0",
+    "pino": "10.3.1",
+    "ws": "8.21.0",
+    "zod": "4.4.3"
+  }
+}
