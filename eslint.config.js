@@ -19,10 +19,6 @@ export default tseslint.config(
   {
     files: ['**/*.{ts,tsx}'],
     languageOptions: {
-      globals: {
-        ...globals.browser,
-        ...globals.node,
-      },
       parserOptions: {
         ecmaFeatures: {
           jsx: true,
@@ -31,7 +27,10 @@ export default tseslint.config(
     },
   },
   {
-    files: ['apps/client/**/*.{ts,tsx}'],
+    files: ['apps/client/src/**/*.{ts,tsx}'],
+    languageOptions: {
+      globals: globals.browser,
+    },
     plugins: {
       'react-hooks': reactHooks,
       'react-refresh': reactRefresh,
@@ -42,6 +41,18 @@ export default tseslint.config(
         'warn',
         { allowConstantExport: true },
       ],
+    },
+  },
+  {
+    files: ['apps/server/src/**/*.{ts,tsx}'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+  {
+    files: ['*.config.{js,ts}', 'eslint.config.js', 'apps/*/*.config.ts'],
+    languageOptions: {
+      globals: globals.node,
     },
   },
 );

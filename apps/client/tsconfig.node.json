@@ -9,5 +9,5 @@
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.node.tsbuildinfo",
     "types": ["node"]
   },
-  "files": []
+  "include": ["vite.config.ts"]
 }
