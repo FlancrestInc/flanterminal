@@ -56,10 +56,12 @@ export function createApp(options: CreateAppOptions): Express {
   );
 
   app.use((request, response, next) => {
-    if (isUnsafePath(request)) {
+    const pathname = canonicalPath(request);
+    if (pathname === undefined || isUnsafePath(pathname)) {
       response.sendStatus(404);
       return;
     }
+    response.locals.canonicalPath = pathname;
     next();
   });
 
@@ -73,16 +75,17 @@ export function createApp(options: CreateAppOptions): Express {
     }),
   );
 
-  app.use((request, response, next) => {
-    if (isReservedPath(request.path, options.config.basePath)) {
+  app.use((_request, response, next) => {
+    const pathname = response.locals.canonicalPath as string;
+    if (isReservedPath(pathname, options.config.basePath)) {
       response.status(404).json({ error: 'not_found' });
       return;
     }
     next();
   });
 
-  app.get('*path', (request, response) => {
-    const pathname = request.path;
+  app.get('*path', (_request, response) => {
+    const pathname = response.locals.canonicalPath as string;
     if (
       !isWithinBase(pathname, options.config.basePath) ||
       pathname === apiPrefix ||
@@ -129,13 +132,17 @@ function hasExtension(pathname: string): boolean {
   return extname(segment) !== '';
 }
 
-function isUnsafePath(request: Request): boolean {
-  let pathname: string;
+function canonicalPath(request: Request): string | undefined {
+  const rawPathname = request.originalUrl.split('?', 1)[0] ?? '';
+  if (/%(?:2f|5c)/i.test(rawPathname)) return undefined;
   try {
-    pathname = decodeURIComponent(request.originalUrl.split('?', 1)[0] ?? '');
+    return decodeURIComponent(rawPathname);
   } catch {
-    return true;
+    return undefined;
   }
+}
+
+function isUnsafePath(pathname: string): boolean {
   if (pathname.includes('\\') || pathname.includes('\0')) return true;
   const segments = pathname.toLowerCase().split('/').filter(Boolean);
   return segments.some(

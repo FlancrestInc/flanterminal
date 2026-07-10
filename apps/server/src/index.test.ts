@@ -1,4 +1,5 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { createServer } from 'node:http';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -21,12 +22,43 @@ describe('server lifecycle', () => {
     expect(lifecycle.isReady()).toBe(false);
     await lifecycle.start('127.0.0.1', 4321);
 
-    expect(httpServer.listen).toHaveBeenCalledWith(
-      4321,
-      '127.0.0.1',
-      expect.any(Function),
-    );
+    expect(httpServer.listen).toHaveBeenCalledWith(4321, '127.0.0.1');
     expect(lifecycle.isReady()).toBe(true);
+  });
+
+  it('rejects a real listen collision promptly and rolls back all initialized resources', async () => {
+    const occupied = createServer();
+    occupied.listen(0, '127.0.0.1');
+    await once(occupied, 'listening');
+    const address = occupied.address();
+    if (address === null || typeof address === 'string')
+      throw new Error('listen failed');
+    const httpServer = createServer();
+    const websocket = fakeWebsocket();
+    const registry = { closeAll: vi.fn(async () => undefined) };
+    const lifecycle = createServerLifecycle({
+      httpServer,
+      websocket,
+      registry,
+      closeTimeoutMs: 100,
+    });
+
+    await expect(lifecycle.start('127.0.0.1', address.port)).rejects.toThrow(
+      'Server startup failed',
+    );
+
+    expect(lifecycle.isReady()).toBe(false);
+    expect(websocket.stopAccepting).toHaveBeenCalledOnce();
+    expect(websocket.stopHeartbeat).toHaveBeenCalledOnce();
+    expect(websocket.closeClients).toHaveBeenCalledOnce();
+    expect(registry.closeAll).toHaveBeenCalledOnce();
+    expect(
+      httpServer.listeners('error').map((listener) => listener.name),
+    ).not.toContain('onError');
+    expect(
+      httpServer.listeners('listening').map((listener) => listener.name),
+    ).not.toContain('onListening');
+    await new Promise<void>((resolve) => occupied.close(() => resolve()));
   });
 
   it('shuts down once in order and continues cleanup after errors', async () => {
@@ -84,7 +116,7 @@ describe('server lifecycle', () => {
   it('routes repeated termination signals through one shutdown', async () => {
     const signals = new EventEmitter();
     const shutdown = vi.fn(async () => undefined);
-    const dispose = registerShutdownSignals({ shutdown }, signals);
+    const dispose = registerShutdownSignals({ shutdown }, { signals });
 
     signals.emit('SIGTERM');
     signals.emit('SIGINT');
@@ -93,6 +125,28 @@ describe('server lifecycle', () => {
     dispose();
     expect(signals.listenerCount('SIGTERM')).toBe(0);
     expect(signals.listenerCount('SIGINT')).toBe(0);
+  });
+
+  it('logs a bounded signal shutdown failure and sets a failing exit code', async () => {
+    const signals = new EventEmitter();
+    const shutdown = vi.fn(async () => {
+      throw new Error('secret cleanup detail');
+    });
+    const logger = { error: vi.fn() };
+    const processPort: { exitCode?: number } = {};
+    registerShutdownSignals(
+      { shutdown },
+      { signals, logger, process: processPort },
+    );
+
+    signals.emit('SIGTERM');
+
+    await vi.waitFor(() => expect(logger.error).toHaveBeenCalledOnce());
+    expect(logger.error).toHaveBeenCalledWith('shutdown_failed', {
+      category: 'cleanup_failed',
+    });
+    expect(processPort.exitCode).toBe(1);
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('secret');
   });
 
   it('checks shell, tmux, and ssh executability without exposing paths', async () => {
@@ -117,9 +171,10 @@ describe('server lifecycle', () => {
 });
 
 function fakeHttpServer(calls: string[] = []) {
+  const events = new EventEmitter();
   const server = {
-    listen: vi.fn((_port: number, _host: string, callback: () => void) => {
-      callback();
+    listen: vi.fn(() => {
+      queueMicrotask(() => events.emit('listening'));
       return server;
     }),
     close: vi.fn((callback?: (error?: Error) => void) => {
@@ -128,6 +183,8 @@ function fakeHttpServer(calls: string[] = []) {
       return server;
     }),
     closeAllConnections: vi.fn(),
+    once: events.once.bind(events),
+    off: events.off.bind(events),
   };
   return server;
 }

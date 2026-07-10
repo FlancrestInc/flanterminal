@@ -118,6 +118,42 @@ describe('createApp', () => {
     },
   );
 
+  it.each([
+    ['/terminal/%61pi/unknown', '/terminal'],
+    ['/terminal/%61ssets/missing', '/terminal'],
+    ['/terminal/%73tatic/missing', '/terminal'],
+    ['/terminal/%77s/unknown', '/terminal'],
+    ['/terminal/missing%2ejs', '/terminal'],
+    ['/%61pi/unknown', '/'],
+    ['/%61ssets/missing', '/'],
+    ['/%73tatic/missing', '/'],
+    ['/%77s/unknown', '/'],
+    ['/missing%2ejs', '/'],
+    ['/terminal/%zz', '/terminal'],
+    ['/%zz', '/'],
+  ])(
+    'never serves SPA fallback for encoded non-navigation path %s',
+    async (path, basePath) => {
+      const response = await request(path, { basePath });
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain('terminal app');
+    },
+  );
+
+  it.each([
+    ['/terminal/assets%2fmissing', '/terminal'],
+    ['/terminal/assets%5cmissing', '/terminal'],
+    ['/assets%2fmissing', '/'],
+    ['/assets%5cmissing', '/'],
+  ])(
+    'rejects encoded path separators without double decoding: %s',
+    async (path, basePath) => {
+      const response = await request(path, { basePath });
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain('terminal app');
+    },
+  );
+
   it.each(['/assets/missing', '/assets/nested/missing'])(
     'returns JSON 404 for an unknown extensionless asset under the root base: %s',
     async (path) => {

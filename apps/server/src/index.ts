@@ -22,9 +22,13 @@ const TMUX_EXECUTABLE = '/usr/bin/tmux';
 const SSH_EXECUTABLE = '/usr/bin/ssh';
 
 export interface LifecycleHttpServer {
-  listen(port: number, host: string, callback: () => void): unknown;
+  listen(port: number, host: string): unknown;
   close(callback?: (error?: Error) => void): unknown;
   closeAllConnections(): void;
+  once(event: 'error', listener: (error: Error) => void): unknown;
+  once(event: 'listening', listener: () => void): unknown;
+  off(event: 'error', listener: (error: Error) => void): unknown;
+  off(event: 'listening', listener: () => void): unknown;
 }
 
 export type ServerLifecycleOptions = Readonly<{
@@ -49,21 +53,55 @@ export function createServerLifecycle(
   let ready = false;
   let shutdownPromise: Promise<void> | undefined;
 
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise !== undefined) return shutdownPromise;
+    ready = false;
+    shutdownPromise = performShutdown(options);
+    return shutdownPromise;
+  };
+
   return {
     isReady: () => ready,
     async start(host, port) {
-      await new Promise<void>((resolveStart) => {
-        options.httpServer.listen(port, host, resolveStart);
-      });
-      ready = true;
+      try {
+        await listenHttpServer(options.httpServer, host, port);
+        ready = true;
+      } catch {
+        await shutdown().catch(() => undefined);
+        throw new Error('Server startup failed');
+      }
     },
-    shutdown() {
-      if (shutdownPromise !== undefined) return shutdownPromise;
-      ready = false;
-      shutdownPromise = performShutdown(options);
-      return shutdownPromise;
-    },
+    shutdown,
   };
+}
+
+function listenHttpServer(
+  server: LifecycleHttpServer,
+  host: string,
+  port: number,
+): Promise<void> {
+  return new Promise((resolveListen, rejectListen) => {
+    const cleanup = (): void => {
+      server.off('error', onError);
+      server.off('listening', onListening);
+    };
+    const onError = (): void => {
+      cleanup();
+      rejectListen(new Error('Server startup failed'));
+    };
+    const onListening = (): void => {
+      cleanup();
+      resolveListen();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    try {
+      server.listen(port, host);
+    } catch {
+      cleanup();
+      rejectListen(new Error('Server startup failed'));
+    }
+  });
 }
 
 async function performShutdown(options: ServerLifecycleOptions): Promise<void> {
@@ -125,15 +163,29 @@ export type SignalSource = Readonly<{
   off(signal: 'SIGTERM' | 'SIGINT', listener: () => void): unknown;
 }>;
 
+export type ShutdownSignalOptions = Readonly<{
+  signals?: SignalSource;
+  logger?: Readonly<{
+    error(event: string, metadata: Readonly<Record<string, unknown>>): void;
+  }>;
+  process?: { exitCode?: number };
+}>;
+
 export function registerShutdownSignals(
   lifecycle: Pick<ServerLifecycle, 'shutdown'>,
-  signals: SignalSource = process,
+  options: ShutdownSignalOptions = {},
 ): () => void {
+  const signals = options.signals ?? process;
+  const logger = options.logger ?? { error: () => undefined };
+  const processPort = options.process ?? process;
   let requested = false;
   const shutdown = (): void => {
     if (requested) return;
     requested = true;
-    void lifecycle.shutdown().catch(() => undefined);
+    void lifecycle.shutdown().catch(() => {
+      logger.error('shutdown_failed', { category: 'cleanup_failed' });
+      processPort.exitCode = 1;
+    });
   };
   signals.on('SIGTERM', shutdown);
   signals.on('SIGINT', shutdown);
@@ -221,7 +273,7 @@ export async function startProductionServer(
   });
   runtime.lifecycle = lifecycle;
   await lifecycle.start(config.bindHost, config.port);
-  registerShutdownSignals(lifecycle);
+  registerShutdownSignals(lifecycle, { logger });
   logger.info('server_started', {
     bindHost: config.bindHost,
     port: config.port,
