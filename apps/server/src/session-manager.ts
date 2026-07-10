@@ -23,6 +23,7 @@ export type ManagedBridgeOptions = Readonly<{
 }>;
 
 export interface ManagedBridgeFactory {
+  /** Takes ownership of the PTY immediately, including when creation throws. */
   create(options: ManagedBridgeOptions): BridgeOwner;
 }
 
@@ -91,21 +92,11 @@ export class SessionManager {
 
       await this.options.registry.close(request.sessionId);
       const pty = this.options.ptyFactory.spawn(spec, request.dimensions);
-      let bridge: BridgeOwner;
-      try {
-        bridge = this.options.bridgeFactory.create({
-          sessionId: request.sessionId,
-          socket: request.socket,
-          pty,
-        });
-      } catch (error) {
-        try {
-          pty.kill();
-        } catch {
-          // Preserve the bridge-construction failure.
-        }
-        throw error;
-      }
+      const bridge = this.options.bridgeFactory.create({
+        sessionId: request.sessionId,
+        socket: request.socket,
+        pty,
+      });
       try {
         await this.options.registry.replace(request.sessionId, bridge);
       } catch (error) {

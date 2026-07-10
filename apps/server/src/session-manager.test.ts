@@ -4,6 +4,7 @@ import { BridgeRegistry } from './bridge-registry.js';
 import type { PtyFactory, PtyProcess } from './pty.js';
 import {
   SessionManager,
+  TerminalBridgeFactory,
   type ManagedBridgeFactory,
 } from './session-manager.js';
 import type { BridgeOwner, SocketPort } from './terminal-bridge.js';
@@ -107,6 +108,43 @@ describe('SessionManager', () => {
     expect(harness.registry.get('phase-1-main')).toBeUndefined();
     await expect(harness.manager.connect(request())).resolves.toBeDefined();
     expect(harness.preparer.prepare).toHaveBeenCalledTimes(2);
+  });
+
+  it('hands PTY cleanup to the bridge factory once creation begins', async () => {
+    const failingPty = fakePty();
+    failingPty.onExit = vi.fn(() => {
+      throw new Error('subscription setup failed');
+    });
+    const healthyPty = fakePty();
+    const ptyFactory: PtyFactory = {
+      spawn: vi
+        .fn<PtyFactory['spawn']>()
+        .mockReturnValueOnce(failingPty)
+        .mockReturnValueOnce(healthyPty),
+    };
+    const registry = new BridgeRegistry();
+    const bridgeFactory = new TerminalBridgeFactory(
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      1024,
+    );
+    const manager = new SessionManager({
+      preparer: { prepare: vi.fn(async () => attachSpec) },
+      ptyFactory,
+      registry,
+      bridgeFactory,
+    });
+
+    await expect(manager.connect(request())).rejects.toThrow(
+      'Terminal bridge setup failed',
+    );
+
+    expect(failingPty.kill).toHaveBeenCalledOnce();
+    expect(registry.get('phase-1-main')).toBeUndefined();
+
+    await expect(manager.connect(request())).resolves.toBeDefined();
+    expect(registry.get('phase-1-main')).toBeDefined();
+    await registry.closeAll();
+    expect(healthyPty.kill).toHaveBeenCalledOnce();
   });
 
   it('rolls back a new bridge when registration fails and releases the mutex', async () => {
