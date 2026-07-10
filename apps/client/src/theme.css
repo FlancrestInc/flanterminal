@@ -1,0 +1,270 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  background: #101112;
+  color: #dddcd7;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+  background: #101112;
+}
+
+button {
+  font: inherit;
+}
+
+.app-shell {
+  display: flex;
+  width: 100%;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: #101112;
+}
+
+.top-bar {
+  display: flex;
+  min-width: 0;
+  min-height: calc(38px + env(safe-area-inset-top));
+  flex: 0 0 calc(38px + env(safe-area-inset-top));
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  padding: env(safe-area-inset-top) max(8px, env(safe-area-inset-right)) 0
+    max(8px, env(safe-area-inset-left));
+  border-bottom: 1px solid #2c2e2f;
+  background: #191b1c;
+}
+
+.tab-strip {
+  display: flex;
+  min-width: 0;
+  height: 37px;
+  align-items: stretch;
+}
+
+.terminal-tab {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  padding: 0 8px;
+  border-bottom: 2px solid #b88732;
+  color: #e2e0da;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.connection-controls {
+  display: flex;
+  min-width: 0;
+  height: 37px;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.connection-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: #9fa09d;
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border: 1px solid #767875;
+  border-radius: 50%;
+  background: #565957;
+}
+
+.status-connected .status-dot {
+  border-color: #c19642;
+  background: #b88732;
+}
+
+.status-connecting .status-dot,
+.status-reconnecting .status-dot {
+  border-color: #a17b36;
+  background: #78602f;
+}
+
+.status-error .status-dot {
+  border-color: #e0716b;
+  background: #c84e49;
+}
+
+.icon-button {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #aaa9a4;
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) {
+  border-color: #3b3d3d;
+  background: #242627;
+  color: #e2e0da;
+}
+
+.icon-button:disabled {
+  color: #656764;
+  cursor: default;
+}
+
+.icon-button:focus-visible,
+.terminal-host:focus-visible {
+  outline: 2px solid #c19642;
+  outline-offset: -2px;
+}
+
+.reconnect-icon.is-active {
+  animation: reconnect-rotation 1.2s linear infinite;
+}
+
+.terminal-panel,
+.terminal-host {
+  min-width: 0;
+  min-height: 0;
+}
+
+.terminal-panel {
+  display: flex;
+  flex: 1 1 auto;
+  overflow: hidden;
+  background: #101112;
+}
+
+.terminal-host {
+  width: 100%;
+  height: 100%;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+.startup-state {
+  display: flex;
+  width: 100%;
+  height: 100dvh;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  background: #101112;
+  color: #aaa9a4;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.startup-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #b88732;
+}
+
+.startup-error {
+  color: #e0716b;
+}
+
+@keyframes reconnect-rotation {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (pointer: coarse) {
+  .top-bar {
+    min-height: calc(46px + env(safe-area-inset-top));
+    flex-basis: calc(46px + env(safe-area-inset-top));
+  }
+
+  .tab-strip,
+  .connection-controls {
+    height: 45px;
+  }
+
+  .icon-button {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+  }
+}
+
+@media (max-width: 360px) {
+  .top-bar {
+    gap: 4px;
+  }
+
+  .status-text {
+    display: none;
+  }
+
+  .connection-controls {
+    gap: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reconnect-icon.is-active {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .top-bar,
+  .icon-button,
+  .status-dot {
+    border-color: CanvasText;
+  }
+
+  .terminal-tab {
+    border-bottom-color: Highlight;
+  }
+
+  .status-dot,
+  .startup-indicator {
+    background: CanvasText;
+  }
+}
