@@ -137,6 +137,32 @@ describe('BridgeRegistry', () => {
     expect(rejected.close).not.toHaveBeenCalled();
     expect(registry.get('session-a')).toBe(recovered);
   });
+
+  it('seals synchronously when closeAll races a later replacement', async () => {
+    let finishClose: (() => void) | undefined;
+    const current = owner(
+      new Promise<void>((resolve) => {
+        finishClose = resolve;
+      }),
+    );
+    const replacement = owner();
+    const registry = new BridgeRegistry();
+    await registry.replace('session-a', current);
+
+    const closing = registry.closeAll();
+    const replacing = registry.replace('session-a', replacement);
+    await vi.waitFor(() => expect(current.close).toHaveBeenCalledOnce());
+
+    expect(replacement.close).not.toHaveBeenCalled();
+    finishClose?.();
+    await expect(closing).resolves.toBeUndefined();
+    await expect(replacing).rejects.toThrow('Bridge registry is shutting down');
+
+    expect(current.close).toHaveBeenCalledOnce();
+    expect(replacement.close).toHaveBeenCalledOnce();
+    expect(replacement.close).toHaveBeenCalledWith(1001, 'server_shutdown');
+    expect(registry.get('session-a')).toBeUndefined();
+  });
 });
 
 function owner(result: Promise<void> = Promise.resolve()): BridgeOwner {

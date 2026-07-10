@@ -198,6 +198,28 @@ describe('SessionManager', () => {
     expect(ptys[1]?.kill).not.toHaveBeenCalled();
   });
 
+  it('does not leak or double-kill a bridge rejected during registry shutdown', async () => {
+    const registry = new BridgeRegistry();
+    await registry.closeAll();
+    const pty = fakePty();
+    const manager = new SessionManager({
+      preparer: { prepare: vi.fn(async () => attachSpec) },
+      ptyFactory: { spawn: vi.fn(() => pty) },
+      registry,
+      bridgeFactory: new TerminalBridgeFactory(
+        { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        1024,
+      ),
+    });
+
+    await expect(manager.connect(request())).rejects.toThrow(
+      'Bridge registry is shutting down',
+    );
+
+    expect(pty.kill).toHaveBeenCalledOnce();
+    expect(registry.get('phase-1-main')).toBeUndefined();
+  });
+
   it.each([
     { sessionId: 'other', dimensions: { cols: 80, rows: 24 } },
     { sessionId: 'phase-1-main', dimensions: { cols: 1, rows: 24 } },
