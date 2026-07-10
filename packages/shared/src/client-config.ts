@@ -3,14 +3,31 @@ import { z } from 'zod';
 import { basePathSchema } from './base-path.js';
 import { FIXED_SESSION_ID } from './protocol.js';
 
+export const MIN_FONT_SIZE = 8;
+export const MAX_FONT_SIZE = 32;
+export const MIN_SCROLLBACK = 0;
+export const MAX_SCROLLBACK = 100_000;
+export const MIN_RESIZE_DEBOUNCE_MS = 25;
+export const MAX_RESIZE_DEBOUNCE_MS = 1_000;
+export const MIN_RECONNECT_SECONDS = 1;
+export const MAX_RECONNECT_SECONDS = 60;
+
 export const clientConfigSchema = z
   .object({
     basePath: basePathSchema,
     sessionId: z.literal(FIXED_SESSION_ID),
-    fontSize: z.number().int().min(8).max(32),
-    scrollback: z.number().int().min(0).max(100_000),
-    resizeDebounceMs: z.number().int().min(25).max(1_000),
-    reconnectMaxSeconds: z.number().int().min(1).max(60),
+    fontSize: z.number().int().min(MIN_FONT_SIZE).max(MAX_FONT_SIZE),
+    scrollback: z.number().int().min(MIN_SCROLLBACK).max(MAX_SCROLLBACK),
+    resizeDebounceMs: z
+      .number()
+      .int()
+      .min(MIN_RESIZE_DEBOUNCE_MS)
+      .max(MAX_RESIZE_DEBOUNCE_MS),
+    reconnectMaxSeconds: z
+      .number()
+      .int()
+      .min(MIN_RECONNECT_SECONDS)
+      .max(MAX_RECONNECT_SECONDS),
   })
   .strict();
 

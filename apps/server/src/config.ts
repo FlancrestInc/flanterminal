@@ -1,12 +1,20 @@
 import {
   FIXED_SESSION_ID,
+  MAX_FONT_SIZE,
+  MAX_RECONNECT_SECONDS,
+  MAX_RESIZE_DEBOUNCE_MS,
+  MAX_SCROLLBACK,
+  MIN_FONT_SIZE,
+  MIN_RECONNECT_SECONDS,
+  MIN_RESIZE_DEBOUNCE_MS,
+  MIN_SCROLLBACK,
   basePathSchema,
   parseClientConfig,
   type ClientConfig,
 } from '@flanterminal/shared';
 import { z } from 'zod';
 
-const MAX_WS_BUFFER_BYTES = 1_073_741_824;
+const MAX_WS_BUFFER_BYTES = 1_048_576;
 const logLevels = [
   'trace',
   'debug',
@@ -62,13 +70,19 @@ const envSchema = z
     APP_BASE_PATH: basePathSchema,
     APP_PUBLIC_URL: publicUrlSchema,
     DEFAULT_SHELL: absolutePathSchema,
-    DEFAULT_FONT_SIZE: integerString(8, 32),
-    XTERM_SCROLLBACK: clampedIntegerString(0, 100_000),
+    DEFAULT_FONT_SIZE: integerString(MIN_FONT_SIZE, MAX_FONT_SIZE),
+    XTERM_SCROLLBACK: clampedIntegerString(MIN_SCROLLBACK, MAX_SCROLLBACK),
     TMUX_HISTORY_LIMIT: integerString(0, 1_000_000),
     WS_HEARTBEAT_SECONDS: integerString(5, 300),
     WS_MAX_BUFFER_BYTES: integerString(65_536, MAX_WS_BUFFER_BYTES),
-    RESIZE_DEBOUNCE_MS: integerString(25, 1_000),
-    RECONNECT_MAX_SECONDS: integerString(1, 60),
+    RESIZE_DEBOUNCE_MS: integerString(
+      MIN_RESIZE_DEBOUNCE_MS,
+      MAX_RESIZE_DEBOUNCE_MS,
+    ),
+    RECONNECT_MAX_SECONDS: integerString(
+      MIN_RECONNECT_SECONDS,
+      MAX_RECONNECT_SECONDS,
+    ),
     LOG_LEVEL: z.enum(logLevels),
     HOME_DIR: absolutePathSchema,
   })

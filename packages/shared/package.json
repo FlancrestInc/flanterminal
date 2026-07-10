@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "dev": "tsc -b --watch --preserveWatchOutput",
-    "build": "tsc -b",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run --config ../../vitest.config.ts --root . --passWithNoTests"
   },

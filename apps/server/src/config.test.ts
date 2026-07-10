@@ -73,6 +73,7 @@ describe('loadConfig', () => {
     ['WS_HEARTBEAT_SECONDS', '4'],
     ['WS_HEARTBEAT_SECONDS', '301'],
     ['WS_MAX_BUFFER_BYTES', '65535'],
+    ['WS_MAX_BUFFER_BYTES', '1048577'],
     ['WS_MAX_BUFFER_BYTES', '1073741825'],
     ['RESIZE_DEBOUNCE_MS', '24'],
     ['RESIZE_DEBOUNCE_MS', '1001'],
@@ -112,5 +113,22 @@ describe('loadConfig', () => {
         reconnectMaxSeconds: 15,
       },
     );
+  });
+
+  it.each([
+    {
+      DEFAULT_FONT_SIZE: '8',
+      XTERM_SCROLLBACK: '0',
+      RESIZE_DEBOUNCE_MS: '25',
+      RECONNECT_MAX_SECONDS: '1',
+    },
+    {
+      DEFAULT_FONT_SIZE: '32',
+      XTERM_SCROLLBACK: '100000',
+      RESIZE_DEBOUNCE_MS: '1000',
+      RECONNECT_MAX_SECONDS: '60',
+    },
+  ])('projects successful boundary configuration to the client', (env) => {
+    expect(() => toClientConfig(loadConfig(env))).not.toThrow();
   });
 });
