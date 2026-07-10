@@ -316,6 +316,7 @@ function fakeSocket(): SocketPort {
     bufferedAmount: 0,
     send: vi.fn(),
     close: vi.fn(),
+    onMessage: vi.fn(() => ({ dispose: vi.fn() })),
     onClose: vi.fn(() => ({ dispose: vi.fn() })),
     onError: vi.fn(() => ({ dispose: vi.fn() })),
   };

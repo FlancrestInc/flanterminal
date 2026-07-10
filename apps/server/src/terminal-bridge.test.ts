@@ -279,9 +279,16 @@ class FakeSocket implements SocketPort {
   throwOnErrorRegistration = false;
   private closeListeners: Array<() => void> = [];
   private errorListeners: Array<() => void> = [];
+  private messageListeners: Array<(data: unknown, isBinary: boolean) => void> =
+    [];
 
   send = vi.fn((data: string) => this.sent.push(data));
   close = vi.fn();
+
+  onMessage(listener: (data: unknown, isBinary: boolean) => void): Disposable {
+    this.messageListeners.push(listener);
+    return this.disposable();
+  }
 
   onClose(listener: () => void): Disposable {
     if (this.throwOnCloseRegistration)

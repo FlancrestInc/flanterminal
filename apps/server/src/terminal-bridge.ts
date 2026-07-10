@@ -4,6 +4,7 @@ import {
   FIXED_SESSION_ID,
   PROTOCOL_VERSION,
   isSessionId,
+  parseClientMessage,
   type ServerMessage,
 } from '@flanterminal/shared';
 
@@ -19,6 +20,7 @@ export interface SocketPort {
   readonly bufferedAmount: number;
   send(data: string): void;
   close(code: number, reason: string): void;
+  onMessage(listener: (data: unknown, isBinary: boolean) => void): Disposable;
   onClose(listener: () => void): Disposable;
   onError(listener: () => void): Disposable;
 }
@@ -54,6 +56,11 @@ export class TerminalBridge implements BridgeOwner {
     );
 
     try {
+      this.disposables.push(
+        options.socket.onMessage((data, isBinary) =>
+          this.handleMessage(data, isBinary),
+        ),
+      );
       this.disposables.push(
         options.pty.onData((data) => this.handleOutput(data)),
       );
@@ -119,6 +126,24 @@ export class TerminalBridge implements BridgeOwner {
 
   async close(code = 1000, reason = 'terminal_closed'): Promise<void> {
     this.shutdown(code, reason, true);
+  }
+
+  private handleMessage(data: unknown, isBinary: boolean): void {
+    if (this.closed) return;
+    const parsed = parseClientMessage(data, isBinary);
+    if (!parsed.success) {
+      this.options.logger.warn('protocol_message_rejected', {
+        sessionId: this.options.sessionId,
+        category: parsed.error.code,
+      });
+      this.shutdown(1008, 'invalid_message', true);
+      return;
+    }
+    if (parsed.data.type === 'input') {
+      this.write(parsed.data.data);
+    } else {
+      this.resize(parsed.data.cols, parsed.data.rows);
+    }
   }
 
   private handleOutput(data: string): void {
