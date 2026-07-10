@@ -153,7 +153,10 @@ describe('SessionManager', () => {
     await registry.replace('phase-1-main', prior);
     const originalReplace = registry.replace.bind(registry);
     vi.spyOn(registry, 'replace')
-      .mockRejectedValueOnce(new Error('registration failed'))
+      .mockImplementationOnce(async (_sessionId, bridge) => {
+        await bridge.close(1011, 'registration_failed');
+        throw new Error('registration failed');
+      })
       .mockImplementation((sessionId, bridge) =>
         originalReplace(sessionId, bridge),
       );
@@ -216,6 +219,29 @@ describe('SessionManager', () => {
       'Bridge registry is shutting down',
     );
 
+    expect(pty.kill).toHaveBeenCalledOnce();
+    expect(registry.get('phase-1-main')).toBeUndefined();
+  });
+
+  it('calls an arbitrary rejected bridge owner close exactly once', async () => {
+    const registry = new BridgeRegistry();
+    await registry.closeAll();
+    const pty = fakePty();
+    const bridge: BridgeOwner = {
+      close: vi.fn(async () => pty.kill()),
+    };
+    const manager = new SessionManager({
+      preparer: { prepare: vi.fn(async () => attachSpec) },
+      ptyFactory: { spawn: vi.fn(() => pty) },
+      registry,
+      bridgeFactory: { create: vi.fn(() => bridge) },
+    });
+
+    await expect(manager.connect(request())).rejects.toThrow(
+      'Bridge registry is shutting down',
+    );
+
+    expect(bridge.close).toHaveBeenCalledOnce();
     expect(pty.kill).toHaveBeenCalledOnce();
     expect(registry.get('phase-1-main')).toBeUndefined();
   });

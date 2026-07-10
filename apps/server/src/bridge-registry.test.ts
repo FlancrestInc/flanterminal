@@ -134,7 +134,8 @@ describe('BridgeRegistry', () => {
     await expect(failed).rejects.toThrow('close failed');
     await expect(retry).resolves.toBeUndefined();
     expect(prior.close).toHaveBeenCalledTimes(2);
-    expect(rejected.close).not.toHaveBeenCalled();
+    expect(rejected.close).toHaveBeenCalledOnce();
+    expect(rejected.close).toHaveBeenCalledWith(1011, 'registration_failed');
     expect(registry.get('session-a')).toBe(recovered);
   });
 

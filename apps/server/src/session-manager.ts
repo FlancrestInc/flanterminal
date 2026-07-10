@@ -97,18 +97,7 @@ export class SessionManager {
         socket: request.socket,
         pty,
       });
-      try {
-        await this.options.registry.replace(request.sessionId, bridge);
-      } catch (error) {
-        try {
-          await bridge.close(1011, 'registration_failed');
-        } catch {
-          // Preserve the registration failure after best-effort rollback.
-        } finally {
-          await this.options.registry.remove(request.sessionId, bridge);
-        }
-        throw error;
-      }
+      await this.options.registry.replace(request.sessionId, bridge);
       return bridge;
     });
   }

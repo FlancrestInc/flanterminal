@@ -16,24 +16,26 @@ export class BridgeRegistry {
     return this.owners.get(sessionId);
   }
 
+  /** Takes ownership of owner and closes it before any rejected result. */
   replace(sessionId: string, owner: BridgeOwner): Promise<void> {
     if (this.shuttingDown) {
       return this.serialize(async () => {
-        try {
-          await owner.close(1001, 'server_shutdown');
-        } catch {
-          // Reject with a stable lifecycle error after best-effort disposal.
-        }
+        await this.closeRejectedOwner(owner, 1001, 'server_shutdown');
         throw new BridgeRegistryShuttingDownError();
       });
     }
     return this.serialize(async () => {
-      const prior = this.owners.get(sessionId);
-      if (prior !== undefined && prior !== owner) {
-        await prior.close(4001, 'session_replaced');
-      }
-      if (this.owners.get(sessionId) === prior) {
-        this.owners.set(sessionId, owner);
+      try {
+        const prior = this.owners.get(sessionId);
+        if (prior !== undefined && prior !== owner) {
+          await prior.close(4001, 'session_replaced');
+        }
+        if (this.owners.get(sessionId) === prior) {
+          this.owners.set(sessionId, owner);
+        }
+      } catch (error) {
+        await this.closeRejectedOwner(owner, 1011, 'registration_failed');
+        throw error;
       }
     });
   }
@@ -79,5 +81,17 @@ export class BridgeRegistry {
       () => undefined,
     );
     return result;
+  }
+
+  private async closeRejectedOwner(
+    owner: BridgeOwner,
+    code: number,
+    reason: string,
+  ): Promise<void> {
+    try {
+      await owner.close(code, reason);
+    } catch {
+      // Preserve the registry failure after best-effort owner disposal.
+    }
   }
 }
