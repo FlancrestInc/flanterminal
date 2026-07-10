@@ -46,6 +46,18 @@ describe('loadConfig', () => {
   });
 
   it.each([
+    '/terminal/./admin',
+    '/terminal/%2e%2e/admin',
+    '/terminal/%2Fadmin',
+    '/terminal/%5cadmin',
+    '/terminal/%zz/admin',
+  ])('rejects ambiguous or encoded server base path %s', (basePath) => {
+    expect(() => loadConfig({ APP_BASE_PATH: basePath })).toThrow(
+      'Invalid server configuration',
+    );
+  });
+
+  it.each([
     ['APP_PORT', '0'],
     ['APP_PORT', '65536'],
     ['APP_PORT', '1.5'],

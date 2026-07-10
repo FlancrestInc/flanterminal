@@ -1,5 +1,6 @@
 import {
   FIXED_SESSION_ID,
+  basePathSchema,
   parseClientConfig,
   type ClientConfig,
 } from '@flanterminal/shared';
@@ -33,28 +34,6 @@ function clampedIntegerString(minimum: number, maximum: number) {
     .pipe(z.number().int().finite())
     .transform((value) => Math.min(maximum, Math.max(minimum, value)));
 }
-
-function isSafeBasePath(value: string): boolean {
-  if (
-    !value.startsWith('/') ||
-    value.includes('?') ||
-    value.includes('#') ||
-    value.includes('\\')
-  ) {
-    return false;
-  }
-
-  const normalized = value.replace(/\/+$/, '') || '/';
-  if (normalized !== '/' && normalized.includes('//')) return false;
-  return normalized
-    .split('/')
-    .every((segment) => segment !== '.' && segment !== '..');
-}
-
-const basePathSchema = z
-  .string()
-  .refine(isSafeBasePath)
-  .transform((value) => value.replace(/\/+$/, '') || '/');
 
 const publicUrlSchema = z.string().transform((value, context) => {
   try {

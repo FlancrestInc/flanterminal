@@ -33,6 +33,16 @@ describe('parseClientConfig', () => {
     expect(() => parseClientConfig({ ...validConfig, basePath })).toThrow();
   });
 
+  it.each([
+    '/terminal/./admin',
+    '/terminal/%2e%2e/admin',
+    '/terminal/%2Fadmin',
+    '/terminal/%5cadmin',
+    '/terminal/%zz/admin',
+  ])('rejects ambiguous or encoded base path %s', (basePath) => {
+    expect(() => parseClientConfig({ ...validConfig, basePath })).toThrow();
+  });
+
   it('requires the fixed session id', () => {
     expect(() =>
       parseClientConfig({ ...validConfig, sessionId: 'other' }),

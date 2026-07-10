@@ -1,33 +1,11 @@
 import { z } from 'zod';
 
+import { basePathSchema } from './base-path.js';
 import { FIXED_SESSION_ID } from './protocol.js';
-
-function isSafeBasePath(value: string): boolean {
-  if (
-    !value.startsWith('/') ||
-    value.includes('?') ||
-    value.includes('#') ||
-    value.includes('\\')
-  ) {
-    return false;
-  }
-
-  const withoutTrailingSlashes = value.replace(/\/+$/, '') || '/';
-  if (withoutTrailingSlashes !== '/' && withoutTrailingSlashes.includes('//')) {
-    return false;
-  }
-
-  return withoutTrailingSlashes
-    .split('/')
-    .every((segment) => segment !== '.' && segment !== '..');
-}
 
 export const clientConfigSchema = z
   .object({
-    basePath: z
-      .string()
-      .refine(isSafeBasePath)
-      .transform((value) => value.replace(/\/+$/, '') || '/'),
+    basePath: basePathSchema,
     sessionId: z.literal(FIXED_SESSION_ID),
     fontSize: z.number().int().min(8).max(32),
     scrollback: z.number().int().min(0).max(100_000),

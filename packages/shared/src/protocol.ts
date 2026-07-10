@@ -78,6 +78,66 @@ export function isSessionId(value: unknown): value is typeof FIXED_SESSION_ID {
   return value === FIXED_SESSION_ID;
 }
 
+export type WebSocketTextData =
+  string | ArrayBuffer | ArrayBufferView | readonly ArrayBufferView[];
+
+function asBytes(raw: unknown): Uint8Array | undefined {
+  if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+  if (ArrayBuffer.isView(raw)) {
+    return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+  }
+  return undefined;
+}
+
+function isBytes(value: Uint8Array | undefined): value is Uint8Array {
+  return value !== undefined;
+}
+
+function decodeTextFrame(raw: unknown):
+  | {
+      readonly success: true;
+      readonly text: string;
+      readonly byteLength: number;
+    }
+  | { readonly success: false; readonly tooLarge: true }
+  | { readonly success: false } {
+  if (typeof raw === 'string') {
+    return {
+      success: true,
+      text: raw,
+      byteLength: utf8Encoder.encode(raw).byteLength,
+    };
+  }
+
+  const singleView = asBytes(raw);
+  const views =
+    singleView === undefined && Array.isArray(raw)
+      ? raw.map(asBytes)
+      : [singleView];
+  if (!views.every(isBytes)) return { success: false };
+
+  const byteLength = views.reduce((total, view) => total + view.byteLength, 0);
+  if (byteLength > MAX_WS_PAYLOAD_BYTES) {
+    return { success: false, tooLarge: true };
+  }
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const view of views) {
+    bytes.set(view, offset);
+    offset += view.byteLength;
+  }
+
+  try {
+    return {
+      success: true,
+      text: new TextDecoder('utf-8', { fatal: true }).decode(bytes),
+      byteLength,
+    };
+  } catch {
+    return { success: false };
+  }
+}
+
 function parseMessage<T>(
   input: unknown,
   schema: z.ZodType<T>,
@@ -104,9 +164,22 @@ function parseMessage<T>(
 }
 
 export function parseClientMessage(
-  input: unknown,
+  raw: unknown,
+  isBinary: boolean,
 ): ProtocolParseResult<ClientMessage> {
-  return parseMessage(input, clientMessageSchema);
+  if (isBinary) return { success: false, error: { code: 'binary_payload' } };
+
+  const decoded = decodeTextFrame(raw);
+  if (!decoded.success) {
+    if ('tooLarge' in decoded) {
+      return { success: false, error: { code: 'payload_too_large' } };
+    }
+    return { success: false, error: { code: 'invalid_message' } };
+  }
+  if (decoded.byteLength > MAX_WS_PAYLOAD_BYTES) {
+    return { success: false, error: { code: 'payload_too_large' } };
+  }
+  return parseMessage(decoded.text, clientMessageSchema);
 }
 
 export function parseServerMessage(

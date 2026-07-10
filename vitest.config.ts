@@ -11,6 +11,7 @@ export default defineConfig({
     },
   },
   test: {
+    exclude: ['**/node_modules/**', '**/.git/**', '**/dist/**'],
     coverage: {
       reporter: ['text', 'html'],
     },
