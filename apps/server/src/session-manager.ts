@@ -105,7 +105,7 @@ export class SessionManager {
         } catch {
           // Preserve the registration failure after best-effort rollback.
         } finally {
-          this.options.registry.remove(request.sessionId, bridge);
+          await this.options.registry.remove(request.sessionId, bridge);
         }
         throw error;
       }

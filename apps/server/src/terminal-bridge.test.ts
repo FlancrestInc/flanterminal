@@ -74,6 +74,65 @@ describe('TerminalBridge', () => {
     expect(socket.close).toHaveBeenCalledWith(4002, 'terminal_backpressure');
   });
 
+  it('closes when the existing socket buffer is exactly at the limit', () => {
+    const socket = new FakeSocket();
+    socket.bufferedAmount = 100;
+    const pty = new FakePty();
+    createBridge(socket, pty, undefined, 100);
+
+    pty.emitData('output');
+
+    expect(socket.sent).toEqual([]);
+    expect(socket.close).toHaveBeenCalledWith(4002, 'terminal_backpressure');
+  });
+
+  it.each([
+    ['equals', 0],
+    ['crosses', -1],
+  ] as const)(
+    'closes when buffered bytes plus the encoded output frame %s the limit',
+    (_case, offset) => {
+      const data = 'é"\n';
+      const frame = JSON.stringify({
+        v: 1,
+        type: 'output',
+        sessionId: 'phase-1-main',
+        data,
+      });
+      const frameBytes = new TextEncoder().encode(frame).byteLength;
+      const socket = new FakeSocket();
+      socket.bufferedAmount = 7;
+      const pty = new FakePty();
+      createBridge(socket, pty, undefined, 7 + frameBytes + offset);
+
+      pty.emitData(data);
+
+      expect(frameBytes).toBeGreaterThan(frame.length);
+      expect(socket.sent).toEqual([]);
+      expect(socket.close).toHaveBeenCalledWith(4002, 'terminal_backpressure');
+    },
+  );
+
+  it('sends JSON-escaped multibyte output when the encoded frame stays below the limit', () => {
+    const data = 'é"\n';
+    const frame = JSON.stringify({
+      v: 1,
+      type: 'output',
+      sessionId: 'phase-1-main',
+      data,
+    });
+    const frameBytes = new TextEncoder().encode(frame).byteLength;
+    const socket = new FakeSocket();
+    socket.bufferedAmount = 7;
+    const pty = new FakePty();
+    createBridge(socket, pty, undefined, 7 + frameBytes + 1);
+
+    pty.emitData(data);
+
+    expect(socket.sent).toEqual([frame]);
+    expect(socket.close).not.toHaveBeenCalled();
+  });
+
   it('reports a bounded lifecycle error and closes when the PTY exits', () => {
     const socket = new FakeSocket();
     const pty = new FakePty();

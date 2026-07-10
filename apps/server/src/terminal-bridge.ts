@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer';
+
 import {
   FIXED_SESSION_ID,
   PROTOCOL_VERSION,
@@ -121,7 +123,17 @@ export class TerminalBridge implements BridgeOwner {
 
   private handleOutput(data: string): void {
     if (this.closed || !this.socketIsOpen()) return;
-    if (this.options.socket.bufferedAmount > this.maxBufferedBytes) {
+    const message: ServerMessage = {
+      v: PROTOCOL_VERSION,
+      type: 'output',
+      sessionId: FIXED_SESSION_ID,
+      data,
+    };
+    const serialized = JSON.stringify(message);
+    const pendingBytes =
+      this.options.socket.bufferedAmount +
+      Buffer.byteLength(serialized, 'utf8');
+    if (pendingBytes >= this.maxBufferedBytes) {
       this.options.logger.warn('terminal_backpressure', {
         sessionId: this.options.sessionId,
         bufferedAmount: this.options.socket.bufferedAmount,
@@ -130,14 +142,8 @@ export class TerminalBridge implements BridgeOwner {
       return;
     }
 
-    const message: ServerMessage = {
-      v: PROTOCOL_VERSION,
-      type: 'output',
-      sessionId: FIXED_SESSION_ID,
-      data,
-    };
     try {
-      this.options.socket.send(JSON.stringify(message));
+      this.options.socket.send(serialized);
     } catch {
       this.options.logger.error('terminal_send_failed', {
         sessionId: this.options.sessionId,

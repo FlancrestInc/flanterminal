@@ -17,7 +17,9 @@ describe('BridgeRegistry', () => {
 
     const replacing = registry.replace('session-a', next);
 
-    expect(prior.close).toHaveBeenCalledWith(4001, 'session_replaced');
+    await vi.waitFor(() =>
+      expect(prior.close).toHaveBeenCalledWith(4001, 'session_replaced'),
+    );
     expect(registry.get('session-a')).toBe(prior);
     finishClose?.();
     await replacing;
@@ -42,9 +44,9 @@ describe('BridgeRegistry', () => {
     const current = owner();
     await registry.replace('session-a', current);
 
-    registry.remove('session-a', owner());
+    await registry.remove('session-a', owner());
     expect(registry.get('session-a')).toBe(current);
-    registry.remove('session-a', current);
+    await registry.remove('session-a', current);
     expect(registry.get('session-a')).toBeUndefined();
   });
 
@@ -62,6 +64,78 @@ describe('BridgeRegistry', () => {
     expect(second.close).toHaveBeenCalledWith(1001, 'server_shutdown');
     expect(registry.get('session-a')).toBeUndefined();
     expect(registry.get('session-b')).toBeUndefined();
+  });
+
+  it('serializes concurrent replacements without leaking an owner', async () => {
+    let finishPriorClose: (() => void) | undefined;
+    const prior = owner(
+      new Promise<void>((resolve) => {
+        finishPriorClose = resolve;
+      }),
+    );
+    const first = owner();
+    const second = owner();
+    const registry = new BridgeRegistry();
+    await registry.replace('session-a', prior);
+
+    const firstReplacement = registry.replace('session-a', first);
+    const secondReplacement = registry.replace('session-a', second);
+    await vi.waitFor(() => expect(prior.close).toHaveBeenCalledOnce());
+
+    expect(registry.get('session-a')).toBe(prior);
+    finishPriorClose?.();
+    await Promise.all([firstReplacement, secondReplacement]);
+
+    expect(prior.close).toHaveBeenCalledOnce();
+    expect(first.close).toHaveBeenCalledOnce();
+    expect(first.close).toHaveBeenCalledWith(4001, 'session_replaced');
+    expect(second.close).not.toHaveBeenCalled();
+    expect(registry.get('session-a')).toBe(second);
+  });
+
+  it('serializes closeAll behind an in-flight replacement', async () => {
+    let finishPriorClose: (() => void) | undefined;
+    const prior = owner(
+      new Promise<void>((resolve) => {
+        finishPriorClose = resolve;
+      }),
+    );
+    const replacement = owner();
+    const registry = new BridgeRegistry();
+    await registry.replace('session-a', prior);
+
+    const replacing = registry.replace('session-a', replacement);
+    const closing = registry.closeAll();
+    await vi.waitFor(() => expect(prior.close).toHaveBeenCalledOnce());
+    finishPriorClose?.();
+    await Promise.all([replacing, closing]);
+
+    expect(prior.close).toHaveBeenCalledOnce();
+    expect(replacement.close).toHaveBeenCalledOnce();
+    expect(replacement.close).toHaveBeenCalledWith(1001, 'server_shutdown');
+    expect(registry.get('session-a')).toBeUndefined();
+  });
+
+  it('releases its operation queue after a replacement rejection', async () => {
+    const prior: BridgeOwner = {
+      close: vi
+        .fn<BridgeOwner['close']>()
+        .mockRejectedValueOnce(new Error('close failed'))
+        .mockResolvedValueOnce(),
+    };
+    const rejected = owner();
+    const recovered = owner();
+    const registry = new BridgeRegistry();
+    await registry.replace('session-a', prior);
+
+    const failed = registry.replace('session-a', rejected);
+    const retry = registry.replace('session-a', recovered);
+
+    await expect(failed).rejects.toThrow('close failed');
+    await expect(retry).resolves.toBeUndefined();
+    expect(prior.close).toHaveBeenCalledTimes(2);
+    expect(rejected.close).not.toHaveBeenCalled();
+    expect(registry.get('session-a')).toBe(recovered);
   });
 });
 
