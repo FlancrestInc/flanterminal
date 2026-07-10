@@ -44,6 +44,27 @@ describe('authorizeUpgrade', () => {
   );
 
   it.each([
+    ' http://example.test',
+    'http://example.test ',
+    'http://exa\tmple.test',
+    'http://example.test\t',
+    'http://exa\rmple.test',
+    'http://example.test\r',
+    'http://exa\nmple.test',
+    'http://example.test\n',
+    'http://example.test\u0000',
+    'http://example.test\u001f',
+    'http://example.test\u007f',
+  ])('rejects ASCII whitespace or controls in Origin: %j', (origin) => {
+    expect(
+      authorizeUpgrade(
+        { origin, requestUrl: '/terminal/ws/sessions/phase-1-main' },
+        { publicOrigin: 'http://example.test', basePath: '/terminal' },
+      ),
+    ).toEqual({ allowed: false, status: 403 });
+  });
+
+  it.each([
     '/ws/sessions/phase-1-main',
     '/terminal/sessions/phase-1-main',
     '/terminal/ws/sessions/other',

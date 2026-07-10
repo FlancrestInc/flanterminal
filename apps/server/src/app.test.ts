@@ -1,5 +1,5 @@
 import { once } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -17,6 +17,8 @@ beforeEach(async () => {
   await writeFile(join(clientDist, 'index.html'), '<main>terminal app</main>');
   await writeFile(join(clientDist, 'app.js'), 'console.log("app")');
   await writeFile(join(clientDist, '.ssh'), 'private');
+  await mkdir(join(clientDist, 'assets'));
+  await writeFile(join(clientDist, 'assets', 'manifest'), 'asset manifest');
 });
 
 afterEach(async () => {
@@ -103,6 +105,55 @@ describe('createApp', () => {
     ).toContain('terminal app');
     expect((await request('/missing.css', { basePath: '/' })).status).toBe(404);
   });
+
+  it.each(['/terminal/assets/missing', '/terminal/assets/nested/missing'])(
+    'returns JSON 404 for an unknown extensionless asset under a nonroot base: %s',
+    async (path) => {
+      const response = await request(path);
+      expect(response.status).toBe(404);
+      expect(response.headers.get('content-type')).toContain(
+        'application/json',
+      );
+      expect(await response.json()).toEqual({ error: 'not_found' });
+    },
+  );
+
+  it.each(['/assets/missing', '/assets/nested/missing'])(
+    'returns JSON 404 for an unknown extensionless asset under the root base: %s',
+    async (path) => {
+      const response = await request(path, { basePath: '/' });
+      expect(response.status).toBe(404);
+      expect(response.headers.get('content-type')).toContain(
+        'application/json',
+      );
+      expect(await response.json()).toEqual({ error: 'not_found' });
+    },
+  );
+
+  it('serves an existing extensionless asset before the reserved namespace fallback', async () => {
+    const response = await request('/terminal/assets/manifest');
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('asset manifest');
+  });
+
+  it.each([
+    ['/terminal/api/unknown', '/terminal'],
+    ['/api/unknown', '/'],
+    ['/terminal/static/missing', '/terminal'],
+    ['/static/missing', '/'],
+    ['/terminal/ws/unknown', '/terminal'],
+    ['/ws/unknown', '/'],
+  ])(
+    'returns JSON 404 for an unknown reserved route: %s',
+    async (path, basePath) => {
+      const response = await request(path, { basePath });
+      expect(response.status).toBe(404);
+      expect(response.headers.get('content-type')).toContain(
+        'application/json',
+      );
+      expect(await response.json()).toEqual({ error: 'not_found' });
+    },
+  );
 });
 
 async function request(

@@ -73,6 +73,14 @@ export function createApp(options: CreateAppOptions): Express {
     }),
   );
 
+  app.use((request, response, next) => {
+    if (isReservedPath(request.path, options.config.basePath)) {
+      response.status(404).json({ error: 'not_found' });
+      return;
+    }
+    next();
+  });
+
   app.get('*path', (request, response) => {
     const pathname = request.path;
     if (
@@ -100,6 +108,19 @@ function isWithinBase(pathname: string, basePath: string): boolean {
     basePath === '/' ||
     pathname === basePath ||
     pathname.startsWith(`${basePath}/`)
+  );
+}
+
+function isReservedPath(pathname: string, basePath: string): boolean {
+  if (!isWithinBase(pathname, basePath)) return false;
+  const relative =
+    basePath === '/' ? pathname : pathname.slice(basePath.length);
+  const namespace = relative.split('/').filter(Boolean)[0];
+  return (
+    namespace === 'api' ||
+    namespace === 'assets' ||
+    namespace === 'static' ||
+    namespace === 'ws'
   );
 }
 

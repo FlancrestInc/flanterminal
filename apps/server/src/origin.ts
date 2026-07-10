@@ -37,6 +37,7 @@ function isExactOrigin(
   configured: string,
 ): boolean {
   if (candidate === undefined || candidate === 'null') return false;
+  if (hasAsciiControlOrWhitespace(candidate)) return false;
   if (!/^https?:\/\/[^/?#]+$/i.test(candidate)) return false;
   try {
     const actual = new URL(candidate);
@@ -49,6 +50,14 @@ function isExactOrigin(
   } catch {
     return false;
   }
+}
+
+function hasAsciiControlOrWhitespace(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x20 || code === 0x7f) return true;
+  }
+  return false;
 }
 
 function isHttpOrigin(url: URL): boolean {
