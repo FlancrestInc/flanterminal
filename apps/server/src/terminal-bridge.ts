@@ -51,23 +51,43 @@ export class TerminalBridge implements BridgeOwner {
       MAX_BUFFER_BYTES,
     );
 
-    this.disposables.push(
-      options.pty.onData((data) => this.handleOutput(data)),
-      options.pty.onExit((event) => {
-        options.logger.warn('terminal_exited', {
-          sessionId: options.sessionId,
-          exitCode: event.exitCode,
-          signal: event.signal,
-        });
-        this.sendLifecycleError();
-        this.shutdown(1011, 'terminal_exited', true);
-      }),
-      options.socket.onClose(() => this.shutdown(1000, 'socket_closed', false)),
-      options.socket.onError(() => {
-        options.logger.warn('socket_error', { sessionId: options.sessionId });
-        this.shutdown(1011, 'socket_error', false);
-      }),
-    );
+    try {
+      this.disposables.push(
+        options.pty.onData((data) => this.handleOutput(data)),
+      );
+      this.disposables.push(
+        options.pty.onExit((event) => {
+          if (this.closed) return;
+          options.logger.warn('terminal_exited', {
+            sessionId: options.sessionId,
+            exitCode: event.exitCode,
+            signal: event.signal,
+          });
+          this.sendLifecycleError();
+          this.shutdown(1011, 'terminal_exited', true);
+        }),
+      );
+      this.disposables.push(
+        options.socket.onClose(() =>
+          this.shutdown(1000, 'socket_closed', false),
+        ),
+      );
+      this.disposables.push(
+        options.socket.onError(() => {
+          if (this.closed) return;
+          options.logger.warn('socket_error', {
+            sessionId: options.sessionId,
+          });
+          this.shutdown(1011, 'socket_error', false);
+        }),
+      );
+    } catch {
+      options.logger.error('terminal_setup_failed', {
+        sessionId: options.sessionId,
+      });
+      this.shutdown(1011, 'terminal_setup_failed', true);
+      throw new Error('Terminal bridge setup failed');
+    }
     options.logger.info('terminal_opened', { sessionId: options.sessionId });
   }
 

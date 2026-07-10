@@ -106,7 +106,18 @@ export class SessionManager {
         }
         throw error;
       }
-      await this.options.registry.replace(request.sessionId, bridge);
+      try {
+        await this.options.registry.replace(request.sessionId, bridge);
+      } catch (error) {
+        try {
+          await bridge.close(1011, 'registration_failed');
+        } catch {
+          // Preserve the registration failure after best-effort rollback.
+        } finally {
+          this.options.registry.remove(request.sessionId, bridge);
+        }
+        throw error;
+      }
       return bridge;
     });
   }

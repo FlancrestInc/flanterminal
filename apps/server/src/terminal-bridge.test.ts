@@ -155,6 +155,33 @@ describe('TerminalBridge', () => {
 
     expectDisposedOnce(bridge, socket, pty);
   });
+
+  it.each(['ptyExit', 'socketClose', 'socketError'] as const)(
+    'rolls back earlier subscriptions when %s registration throws',
+    (registration) => {
+      const socket = new FakeSocket();
+      const pty = new FakePty();
+      if (registration === 'ptyExit') pty.throwOnExitRegistration = true;
+      if (registration === 'socketClose')
+        socket.throwOnCloseRegistration = true;
+      if (registration === 'socketError')
+        socket.throwOnErrorRegistration = true;
+
+      let caught: unknown;
+      try {
+        createBridge(socket, pty);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(pty.kill).toHaveBeenCalledOnce();
+      expect(socket.close).toHaveBeenCalledWith(1011, 'terminal_setup_failed');
+      for (const disposable of [...socket.disposables, ...pty.disposables]) {
+        expect(disposable.dispose).toHaveBeenCalledOnce();
+      }
+      expect(String(caught)).toBe('Error: Terminal bridge setup failed');
+    },
+  );
 });
 
 function createBridge(
@@ -189,6 +216,8 @@ class FakeSocket implements SocketPort {
   bufferedAmount = 0;
   sent: string[] = [];
   disposables: FakeDisposable[] = [];
+  throwOnCloseRegistration = false;
+  throwOnErrorRegistration = false;
   private closeListeners: Array<() => void> = [];
   private errorListeners: Array<() => void> = [];
 
@@ -196,11 +225,15 @@ class FakeSocket implements SocketPort {
   close = vi.fn();
 
   onClose(listener: () => void): Disposable {
+    if (this.throwOnCloseRegistration)
+      throw new Error('close registration failed');
     this.closeListeners.push(listener);
     return this.disposable();
   }
 
   onError(listener: () => void): Disposable {
+    if (this.throwOnErrorRegistration)
+      throw new Error('error registration failed');
     this.errorListeners.push(listener);
     return this.disposable();
   }
@@ -221,6 +254,7 @@ class FakeSocket implements SocketPort {
 
 class FakePty implements PtyProcess {
   disposables: FakeDisposable[] = [];
+  throwOnExitRegistration = false;
   private dataListeners: Array<(data: string) => void> = [];
   private exitListeners: Array<(event: PtyExit) => void> = [];
 
@@ -234,6 +268,8 @@ class FakePty implements PtyProcess {
   }
 
   onExit(listener: (event: PtyExit) => void): Disposable {
+    if (this.throwOnExitRegistration)
+      throw new Error('exit registration failed');
     this.exitListeners.push(listener);
     return this.disposable();
   }

@@ -109,6 +109,57 @@ describe('SessionManager', () => {
     expect(harness.preparer.prepare).toHaveBeenCalledTimes(2);
   });
 
+  it('rolls back a new bridge when registration fails and releases the mutex', async () => {
+    const registry = new BridgeRegistry();
+    const prior = owner();
+    await registry.replace('phase-1-main', prior);
+    const originalReplace = registry.replace.bind(registry);
+    vi.spyOn(registry, 'replace')
+      .mockRejectedValueOnce(new Error('registration failed'))
+      .mockImplementation((sessionId, bridge) =>
+        originalReplace(sessionId, bridge),
+      );
+    const ptys = [fakePty(), fakePty()];
+    const ptyFactory: PtyFactory = {
+      spawn: vi
+        .fn<PtyFactory['spawn']>()
+        .mockReturnValueOnce(ptys[0]!)
+        .mockReturnValueOnce(ptys[1]!),
+    };
+    const bridges: BridgeOwner[] = [];
+    const bridgeFactory: ManagedBridgeFactory = {
+      create: vi.fn(({ pty }) => {
+        const bridge: BridgeOwner = {
+          close: vi.fn(async () => pty.kill()),
+        };
+        bridges.push(bridge);
+        return bridge;
+      }),
+    };
+    const manager = new SessionManager({
+      preparer: { prepare: vi.fn(async () => attachSpec) },
+      ptyFactory,
+      registry,
+      bridgeFactory,
+    });
+
+    await expect(manager.connect(request())).rejects.toThrow(
+      'registration failed',
+    );
+
+    expect(prior.close).toHaveBeenCalledOnce();
+    expect(bridges[0]?.close).toHaveBeenCalledOnce();
+    expect(bridges[0]?.close).toHaveBeenCalledWith(1011, 'registration_failed');
+    expect(ptys[0]?.kill).toHaveBeenCalledOnce();
+    expect(registry.get('phase-1-main')).toBeUndefined();
+
+    const retried = await manager.connect(request());
+    expect(retried).toBe(bridges[1]);
+    expect(registry.get('phase-1-main')).toBe(bridges[1]);
+    expect(prior.close).toHaveBeenCalledOnce();
+    expect(ptys[1]?.kill).not.toHaveBeenCalled();
+  });
+
   it.each([
     { sessionId: 'other', dimensions: { cols: 80, rows: 24 } },
     { sessionId: 'phase-1-main', dimensions: { cols: 1, rows: 24 } },
