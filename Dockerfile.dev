@@ -5,11 +5,26 @@ ARG PGID=1000
 RUN apt-get update \
   && apt-get install -y --no-install-recommends build-essential openssh-client python3 tini tmux \
   && rm -rf /var/lib/apt/lists/* \
-  && groupmod -n webterm node \
-  && usermod -l webterm -d /home/webterm -m node \
-  && groupmod -g "$PGID" webterm \
-  && usermod -u "$PUID" -g "$PGID" webterm \
-  && install -d -o webterm -g webterm -m 0700 /home/webterm/.ssh
+  && set -eu; \
+    groupmod -n webterm node; \
+    usermod -l webterm -d /home/webterm -m node; \
+    existing_group="$(getent group "$PGID" | cut -d: -f1 || true)"; \
+    if [ -n "$existing_group" ] && [ "$existing_group" != webterm ]; then \
+      echo "Requested PGID $PGID is already used by $existing_group" >&2; exit 1; \
+    fi; \
+    existing_user="$(getent passwd "$PUID" | cut -d: -f1 || true)"; \
+    if [ -n "$existing_user" ] && [ "$existing_user" != webterm ]; then \
+      echo "Requested PUID $PUID is already used by $existing_user" >&2; exit 1; \
+    fi; \
+    current_gid="$(id -g webterm)"; \
+    [ "$current_gid" = "$PGID" ] || groupmod -g "$PGID" webterm; \
+    current_uid="$(id -u webterm)"; \
+    [ "$current_uid" = "$PUID" ] || usermod -u "$PUID" -g "$PGID" webterm; \
+    install -d -o webterm -g webterm -m 0755 /home/webterm; \
+    install -d -o webterm -g webterm -m 0700 /home/webterm/.ssh; \
+    install -d -o webterm -g webterm -m 0755 /home/webterm/scripts; \
+    touch /home/webterm/.bash_history; \
+    chown webterm:webterm /home/webterm/.bash_history
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/client/package.json apps/client/package.json

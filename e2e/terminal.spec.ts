@@ -13,6 +13,27 @@ async function sendCommand(page: Page, command: string): Promise<void> {
   await page.keyboard.press('Enter');
 }
 
+async function readTerminalSize(
+  page: Page,
+  phase: 'BEFORE' | 'AFTER',
+): Promise<{ rows: number; cols: number }> {
+  const sentinel = `${phase}_SIZE_${marker}`;
+  const end = `${sentinel}_END`;
+  await sendCommand(
+    page,
+    `printf '${sentinel} '; stty size; printf '${end}\\n'`,
+  );
+  await expect.poll(() => terminalText(page)).toContain(end);
+  const matches = [
+    ...(await terminalText(page)).matchAll(
+      new RegExp(`${sentinel}\\s+(\\d+)\\s+(\\d+)\\s+${end}`, 'g'),
+    ),
+  ];
+  const match = matches.at(-1);
+  expect(match, `${phase} terminal size output`).toBeDefined();
+  return { rows: Number(match?.[1]), cols: Number(match?.[2]) };
+}
+
 test('production workspace keeps its terminal session across resize and reconnect', async ({
   page,
 }, testInfo) => {
@@ -56,7 +77,9 @@ test('production workspace keeps its terminal session across resize and reconnec
       .evaluate((element) => getComputedStyle(element).fontFamily),
   ).toMatch(/^['"]?JetBrainsMono Nerd Font/);
   expect(fontResponses).toHaveLength(1);
-  expect(new URL(fontResponses[0]).origin).toBe(new URL(page.url()).origin);
+  const fontUrl = new URL(fontResponses[0]);
+  expect(fontUrl.origin).toBe(new URL(page.url()).origin);
+  expect(fontUrl.pathname.startsWith(workspacePath)).toBe(true);
 
   const output = `OUTPUT_${marker}`;
   await sendCommand(
@@ -65,22 +88,14 @@ test('production workspace keeps its terminal session across resize and reconnec
   );
   await expect.poll(() => terminalText(page)).toContain(output);
 
+  const before = await readTerminalSize(page, 'BEFORE');
   await page.setViewportSize({ width: 768, height: 640 });
-  const sizeSentinel = `SIZE_${marker}`;
-  await sendCommand(
-    page,
-    `printf '${sizeSentinel} '; stty size; printf '${sizeSentinel}_END\\n'`,
-  );
-  await expect.poll(() => terminalText(page)).toContain(`${sizeSentinel}_END`);
-  const sizeText = await terminalText(page);
-  const match = sizeText.match(new RegExp(`${sizeSentinel} (\\d+) (\\d+)`));
-  expect(match).not.toBeNull();
-  const rows = Number(match?.[1]);
-  const cols = Number(match?.[2]);
-  expect(rows).toBeGreaterThanOrEqual(2);
-  expect(rows).toBeLessThanOrEqual(200);
-  expect(cols).toBeGreaterThanOrEqual(2);
-  expect(cols).toBeLessThanOrEqual(500);
+  const after = await readTerminalSize(page, 'AFTER');
+  expect(after.rows !== before.rows || after.cols !== before.cols).toBe(true);
+  expect(after.rows).toBeGreaterThanOrEqual(2);
+  expect(after.rows).toBeLessThanOrEqual(200);
+  expect(after.cols).toBeGreaterThanOrEqual(2);
+  expect(after.cols).toBeLessThanOrEqual(500);
 
   await page.getByRole('button', { name: 'Reconnect terminal' }).click();
   await expect(page.getByRole('status', { name: 'Connected' })).toBeVisible();

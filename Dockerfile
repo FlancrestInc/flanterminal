@@ -27,6 +27,7 @@ RUN npm prune --omit=dev
 FROM node:24-bookworm-slim AS runtime
 ARG PUID=1000
 ARG PGID=1000
+ARG APP_PORT=3000
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
@@ -62,14 +63,13 @@ COPY --from=build /build/apps/client/package.json apps/client/package.json
 COPY --from=build /build/apps/client/dist apps/client/dist
 COPY --from=build /build/packages/shared/package.json packages/shared/package.json
 COPY --from=build /build/packages/shared/dist packages/shared/dist
-RUN chmod -R a-w /app
 
 ENV HOME=/home/webterm \
     USER=webterm \
     LOGNAME=webterm \
     TERM=xterm-256color
 USER webterm
-EXPOSE 3000
+EXPOSE ${APP_PORT}
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=6 \
   CMD node -e "fetch('http://127.0.0.1:' + (process.env.APP_PORT || '3000') + '/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 ENTRYPOINT ["/usr/bin/tini", "--"]

@@ -17,7 +17,7 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc -b packages/shared apps/client apps/server --pretty false",
     "test": "npm run test --workspaces --if-present",
-    "test:e2e": "docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from e2e",
+    "test:e2e": "scripts/run-e2e.sh",
     "test:e2e:run": "playwright test",
     "verify:dist": "node scripts/verify-production-dist.mjs"
   },

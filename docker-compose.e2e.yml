@@ -5,6 +5,7 @@ services:
       args:
         PUID: 1000
         PGID: 1000
+        APP_PORT: 3000
     environment:
       APP_PORT: 3000
       APP_BIND_HOST: 0.0.0.0
@@ -54,9 +55,6 @@ services:
       app:
         condition: service_healthy
     network_mode: service:app
-    volumes:
-      - ./test-results:/work/test-results
-      - ./playwright-report:/work/playwright-report
 
 volumes:
   e2e-home:
