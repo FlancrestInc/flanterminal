@@ -73,6 +73,20 @@ describe('TabStore', () => {
     expect(readDocument(fs).tabs).toHaveLength(2);
   });
 
+  it('rejects tab metadata containing invalid UTF-8', async () => {
+    const bytes = Buffer.from(
+      JSON.stringify(document([record(IDS[0], 0, 'X')], 1)),
+    );
+    const displayNameOffset =
+      bytes.indexOf('"displayName":"X"') + Buffer.byteLength('"displayName":"');
+    bytes[displayNameOffset] = 0x80;
+    const fs = new MemoryFileSystem({ '/data/tabs.json': bytes });
+
+    await expect(makeStore(fs).initialize()).rejects.toThrow(
+      'Invalid tab store document',
+    );
+  });
+
   it('returns immutable snapshots and records detached from internal state', async () => {
     const store = makeStore(new MemoryFileSystem());
     await store.initialize();
@@ -440,11 +454,16 @@ function makeStore(
 function readDocument(fs: MemoryFileSystem) {
   const entry = fs.entry('/data/tabs.json');
   if (!entry || entry.kind !== 'file') throw new Error('primary missing');
-  return JSON.parse(entry.content) as { tabs: { displayName: string }[] };
+  return JSON.parse(Buffer.from(entry.content).toString()) as {
+    tabs: { displayName: string }[];
+  };
 }
 
-type Entry = { kind: 'file' | 'symlink' | 'directory'; content: string };
-type InitialEntry = string | Entry;
+type Entry = {
+  kind: 'file' | 'symlink' | 'directory';
+  content: string | Uint8Array;
+};
+type InitialEntry = string | Uint8Array | Entry;
 
 class MemoryFileSystem implements TabStoreFileSystem {
   readonly operations: string[] = [];
@@ -471,7 +490,7 @@ class MemoryFileSystem implements TabStoreFileSystem {
     for (const [path, value] of Object.entries(initial)) {
       this.entries.set(
         path,
-        typeof value === 'string'
+        typeof value === 'string' || value instanceof Uint8Array
           ? { kind: 'file', content: value }
           : { ...value },
       );

@@ -2,6 +2,7 @@ import { randomUUID as nodeRandomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import * as fs from 'node:fs/promises';
 import { join } from 'node:path';
+import { TextDecoder } from 'node:util';
 
 import {
   TAB_DOCUMENT_FORMAT_VERSION,
@@ -296,7 +297,7 @@ export class TabStore {
     }
     try {
       const document = parseDocument(
-        JSON.parse(Buffer.from(bytes).toString('utf8')),
+        JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
       );
       if (document.tabs.length > this.options.sessionMaxCount) {
         throw new Error('session limit exceeded');
