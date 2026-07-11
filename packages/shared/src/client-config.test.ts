@@ -12,6 +12,8 @@ const validConfig = {
   reconnectMaxSeconds: 15,
 };
 
+const OTHER_SESSION_ID = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
 describe('parseClientConfig', () => {
   it('returns only the approved normalized client fields', () => {
     expect(parseClientConfig(validConfig)).toEqual({
@@ -43,7 +45,11 @@ describe('parseClientConfig', () => {
     expect(() => parseClientConfig({ ...validConfig, basePath })).toThrow();
   });
 
-  it('requires the fixed session id', () => {
+  it('requires a canonical session tab ID', () => {
+    expect(
+      parseClientConfig({ ...validConfig, sessionId: OTHER_SESSION_ID })
+        .sessionId,
+    ).toBe(OTHER_SESSION_ID);
     expect(() =>
       parseClientConfig({ ...validConfig, sessionId: 'other' }),
     ).toThrow();

@@ -15,6 +15,8 @@ import {
   type ServerMessage,
 } from './protocol.js';
 
+const OTHER_SESSION_ID = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
 describe('terminal protocol', () => {
   it('parses valid direction-specific messages', () => {
     const clientMessages: ClientMessage[] = [
@@ -226,13 +228,23 @@ describe('terminal protocol', () => {
     ).toBe(true);
   });
 
-  it('only accepts the fixed phase-one session id', () => {
-    expect(FIXED_SESSION_ID).toBe('phase-1-main');
+  it('accepts canonical tab IDs while retaining a canonical compatibility ID', () => {
+    expect(FIXED_SESSION_ID).toBe('550e8400-e29b-41d4-a716-446655440000');
     expect(isSessionId(FIXED_SESSION_ID)).toBe(true);
-    expect(isSessionId('phase-1-other')).toBe(false);
+    expect(isSessionId(OTHER_SESSION_ID)).toBe(true);
     expect(
       parseServerMessage(
-        JSON.stringify({ v: 1, type: 'ready', sessionId: '../phase-1-main' }),
+        JSON.stringify({ v: 1, type: 'ready', sessionId: OTHER_SESSION_ID }),
+      ).success,
+    ).toBe(true);
+    expect(isSessionId('phase-1-main')).toBe(false);
+    expect(
+      parseServerMessage(
+        JSON.stringify({
+          v: 1,
+          type: 'ready',
+          sessionId: `../${FIXED_SESSION_ID}`,
+        }),
       ),
     ).toEqual({ success: false, error: { code: 'invalid_message' } });
   });

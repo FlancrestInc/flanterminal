@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { basePathSchema } from './base-path.js';
-import { FIXED_SESSION_ID } from './protocol.js';
+import { tabIdSchema } from './tabs.js';
 
 export const MIN_FONT_SIZE = 8;
 export const MAX_FONT_SIZE = 32;
@@ -15,7 +15,7 @@ export const MAX_RECONNECT_SECONDS = 60;
 export const clientConfigSchema = z
   .object({
     basePath: basePathSchema,
-    sessionId: z.literal(FIXED_SESSION_ID),
+    sessionId: tabIdSchema,
     fontSize: z.number().int().min(MIN_FONT_SIZE).max(MAX_FONT_SIZE),
     scrollback: z.number().int().min(MIN_SCROLLBACK).max(MAX_SCROLLBACK),
     resizeDebounceMs: z

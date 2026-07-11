@@ -1,7 +1,9 @@
 import { z } from 'zod';
 
+import { tabIdSchema } from './tabs.js';
+
 export const PROTOCOL_VERSION = 1 as const;
-export const FIXED_SESSION_ID = 'phase-1-main' as const;
+export const FIXED_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000' as const;
 export const MAX_WS_PAYLOAD_BYTES = 65_536;
 export const MAX_INPUT_BYTES = 16_384;
 export const MIN_COLS = 2;
@@ -9,7 +11,7 @@ export const MAX_COLS = 500;
 export const MIN_ROWS = 2;
 export const MAX_ROWS = 200;
 
-const sessionIdSchema = z.literal(FIXED_SESSION_ID);
+const sessionIdSchema = tabIdSchema;
 const utf8Encoder = new TextEncoder();
 const inputDataSchema = z
   .string()
@@ -74,8 +76,8 @@ export type ProtocolParseResult<T> =
       readonly error: { readonly code: ProtocolParseErrorCode };
     };
 
-export function isSessionId(value: unknown): value is typeof FIXED_SESSION_ID {
-  return value === FIXED_SESSION_ID;
+export function isSessionId(value: unknown): value is string {
+  return tabIdSchema.safeParse(value).success;
 }
 
 export type WebSocketTextData =
