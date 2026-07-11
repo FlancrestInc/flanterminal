@@ -1,0 +1,62 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        PUID: 1000
+        PGID: 1000
+    environment:
+      APP_PORT: 3000
+      APP_BIND_HOST: 0.0.0.0
+      APP_BASE_PATH: ${E2E_APP_BASE_PATH:-/}
+      APP_PUBLIC_URL: http://localhost:3000
+      DEFAULT_SHELL: /bin/bash
+      DEFAULT_FONT_SIZE: 14
+      XTERM_SCROLLBACK: 10000
+      TMUX_HISTORY_LIMIT: 20000
+      WS_HEARTBEAT_SECONDS: 5
+      WS_MAX_BUFFER_BYTES: 1048576
+      RESIZE_DEBOUNCE_MS: 50
+      RECONNECT_MAX_SECONDS: 2
+      LOG_LEVEL: info
+      TZ: UTC
+      HOME_DIR: /home/webterm
+    volumes:
+      - e2e-home:/home/webterm
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+      - /run:rw,noexec,nosuid,nodev,size=1m,mode=0755,uid=1000,gid=1000
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    environment:
+      E2E_BASE_URL: http://localhost:3000/
+      E2E_BASE_PATH: ${E2E_WORKSPACE_PATH:-/}
+    depends_on:
+      app:
+        condition: service_healthy
+    network_mode: service:app
+    volumes:
+      - ./test-results:/work/test-results
+      - ./playwright-report:/work/playwright-report
+
+volumes:
+  e2e-home:

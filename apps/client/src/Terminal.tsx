@@ -87,8 +87,8 @@ const defaultDependencies: TerminalDependencies = {
       if (frame !== null) cancelAnimationFrame(frame);
     };
   },
-  setTimer: setTimeout,
-  clearTimer: clearTimeout,
+  setTimer: (callback, delay, ...args) => setTimeout(callback, delay, ...args),
+  clearTimer: (timer) => clearTimeout(timer),
 };
 
 export interface TerminalProps {

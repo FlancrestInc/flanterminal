@@ -12,12 +12,13 @@
   ],
   "scripts": {
     "dev": "concurrently --kill-others-on-fail --names shared,client,server \"npm run dev -w @flanterminal/shared\" \"npm run dev -w @flanterminal/client\" \"npm run dev -w @flanterminal/server\"",
-    "build": "npm run build -w @flanterminal/client && npm run build -w @flanterminal/shared && npm run build -w @flanterminal/server && npm run verify:dist",
+    "build": "npm run build -w @flanterminal/shared && npm run build -w @flanterminal/client && npm run build -w @flanterminal/server && npm run verify:dist",
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "typecheck": "tsc -b packages/shared apps/client apps/server --pretty false",
     "test": "npm run test --workspaces --if-present",
-    "test:e2e": "playwright test",
+    "test:e2e": "docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from e2e",
+    "test:e2e:run": "playwright test",
     "verify:dist": "node scripts/verify-production-dist.mjs"
   },
   "devDependencies": {

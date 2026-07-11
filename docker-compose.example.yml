@@ -1,0 +1,13 @@
+services:
+  app:
+    extends:
+      file: docker-compose.yml
+      service: app
+    environment:
+      APP_BASE_PATH: /terminal
+      APP_PUBLIC_URL: https://terminal.example.com
+    volumes:
+      # Prepare first: mkdir -p data/home && chown 1000:1000 data/home
+      - ./data/home:/home/webterm
+
+volumes: {}

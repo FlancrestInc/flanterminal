@@ -1,7 +1,15 @@
+@font-face {
+  font-family: 'JetBrainsMono Nerd Font';
+  src: url('./assets/fonts/JetBrainsMonoNerdFont-Regular.ttf')
+    format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
   font-family:
-    Inter,
     ui-sans-serif,
     system-ui,
     -apple-system,
@@ -182,6 +190,9 @@ button {
 
 .terminal-host .xterm {
   height: 100%;
+  font-family:
+    'JetBrainsMono Nerd Font', ui-monospace, 'Noto Sans Mono',
+    'Symbols Nerd Font', 'Noto Color Emoji', monospace;
 }
 
 .startup-state {
@@ -215,7 +226,7 @@ button {
   }
 }
 
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 768px) {
   .top-bar {
     min-height: calc(46px + env(safe-area-inset-top));
     flex-basis: calc(46px + env(safe-area-inset-top));

@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1.7
+FROM node:24-bookworm-slim
+ARG PUID=1000
+ARG PGID=1000
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends build-essential openssh-client python3 tini tmux \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupmod -n webterm node \
+  && usermod -l webterm -d /home/webterm -m node \
+  && groupmod -g "$PGID" webterm \
+  && usermod -u "$PUID" -g "$PGID" webterm \
+  && install -d -o webterm -g webterm -m 0700 /home/webterm/.ssh
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY apps/client/package.json apps/client/package.json
+COPY apps/server/package.json apps/server/package.json
+COPY packages/shared/package.json packages/shared/package.json
+RUN npm ci
+COPY --chown=webterm:webterm . .
+ENV HOME=/home/webterm USER=webterm LOGNAME=webterm TERM=xterm-256color
+USER webterm
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["npm", "run", "dev"]

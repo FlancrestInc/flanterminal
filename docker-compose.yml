@@ -1,0 +1,42 @@
+services:
+  app:
+    image: flanterminal:phase1
+    build:
+      context: .
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    environment:
+      APP_PORT: ${APP_PORT:-3000}
+      APP_BIND_HOST: ${APP_BIND_HOST:-0.0.0.0}
+      APP_BASE_PATH: ${APP_BASE_PATH:-/}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
+      DEFAULT_SHELL: ${DEFAULT_SHELL:-/bin/bash}
+      DEFAULT_FONT_SIZE: ${DEFAULT_FONT_SIZE:-14}
+      XTERM_SCROLLBACK: ${XTERM_SCROLLBACK:-10000}
+      TMUX_HISTORY_LIMIT: ${TMUX_HISTORY_LIMIT:-20000}
+      WS_HEARTBEAT_SECONDS: ${WS_HEARTBEAT_SECONDS:-30}
+      WS_MAX_BUFFER_BYTES: ${WS_MAX_BUFFER_BYTES:-1048576}
+      RESIZE_DEBOUNCE_MS: ${RESIZE_DEBOUNCE_MS:-100}
+      RECONNECT_MAX_SECONDS: ${RECONNECT_MAX_SECONDS:-15}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TZ: ${TZ:-UTC}
+      HOME_DIR: /home/webterm
+    ports:
+      - '127.0.0.1:${HOST_PORT:-3000}:${APP_PORT:-3000}'
+    volumes:
+      - webterm-home:/home/webterm
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+      - /run:rw,noexec,nosuid,nodev,size=1m,mode=0755,uid=${PUID:-1000},gid=${PGID:-1000}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    restart: unless-stopped
+
+volumes:
+  webterm-home:
