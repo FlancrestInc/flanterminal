@@ -25,6 +25,8 @@ describe('loadConfig', () => {
       reconnectMaxSeconds: 15,
       logLevel: 'info',
       homeDir: '/home/webterm',
+      dataDir: '/app/data',
+      sessionMaxCount: 10,
     });
     expect(Object.isFrozen(config)).toBe(true);
   });
@@ -81,6 +83,10 @@ describe('loadConfig', () => {
     ['RECONNECT_MAX_SECONDS', '61'],
     ['LOG_LEVEL', 'verbose'],
     ['HOME_DIR', 'home/webterm'],
+    ['DATA_DIR', 'app/data'],
+    ['SESSION_MAX_COUNT', '0'],
+    ['SESSION_MAX_COUNT', '21'],
+    ['SESSION_MAX_COUNT', '1.5'],
   ])('rejects invalid %s safely', (key, value) => {
     let error: unknown;
 
@@ -93,6 +99,16 @@ describe('loadConfig', () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe('Invalid server configuration');
     expect((error as Error).message).not.toContain(value);
+  });
+
+  it('loads tab persistence settings at their inclusive boundaries', () => {
+    expect(
+      loadConfig({ DATA_DIR: '/var/lib/flanterminal', SESSION_MAX_COUNT: '1' }),
+    ).toMatchObject({
+      dataDir: '/var/lib/flanterminal',
+      sessionMaxCount: 1,
+    });
+    expect(loadConfig({ SESSION_MAX_COUNT: '20' }).sessionMaxCount).toBe(20);
   });
 
   it('clamps terminal scrollback to its supported range', () => {

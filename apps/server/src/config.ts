@@ -85,6 +85,8 @@ const envSchema = z
     ),
     LOG_LEVEL: z.enum(logLevels),
     HOME_DIR: absolutePathSchema,
+    DATA_DIR: absolutePathSchema,
+    SESSION_MAX_COUNT: integerString(1, 20),
   })
   .strict();
 
@@ -107,6 +109,8 @@ export type AppConfig = Readonly<{
   reconnectMaxSeconds: number;
   logLevel: LogLevel;
   homeDir: string;
+  dataDir: string;
+  sessionMaxCount: number;
 }>;
 
 export type ConfigEnvironment = Readonly<Record<string, string | undefined>>;
@@ -128,6 +132,8 @@ export function loadConfig(env: ConfigEnvironment): AppConfig {
       RECONNECT_MAX_SECONDS: env.RECONNECT_MAX_SECONDS ?? '15',
       LOG_LEVEL: env.LOG_LEVEL ?? 'info',
       HOME_DIR: env.HOME_DIR ?? '/home/webterm',
+      DATA_DIR: env.DATA_DIR ?? '/app/data',
+      SESSION_MAX_COUNT: env.SESSION_MAX_COUNT ?? '10',
     });
     const publicUrl = new URL(parsed.APP_PUBLIC_URL);
 
@@ -148,6 +154,8 @@ export function loadConfig(env: ConfigEnvironment): AppConfig {
       reconnectMaxSeconds: parsed.RECONNECT_MAX_SECONDS,
       logLevel: parsed.LOG_LEVEL,
       homeDir: parsed.HOME_DIR,
+      dataDir: parsed.DATA_DIR,
+      sessionMaxCount: parsed.SESSION_MAX_COUNT,
     });
   } catch {
     throw new Error('Invalid server configuration');
