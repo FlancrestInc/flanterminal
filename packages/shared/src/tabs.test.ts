@@ -119,6 +119,17 @@ describe('tab display names', () => {
       'valid-\ud83d\ude80-pair',
     );
   });
+
+  it('preserves legitimate ZWJ emoji and ZWNJ orthography', () => {
+    expect(
+      displayNameSchema.parse('Developer \ud83d\udc69\u200d\ud83d\udcbb'),
+    ).toBe('Developer \ud83d\udc69\u200d\ud83d\udcbb');
+    expect(
+      displayNameSchema.parse(
+        '\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645',
+      ),
+    ).toBe('\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645');
+  });
 });
 
 describe('tab records and views', () => {

@@ -2,8 +2,18 @@ import { z } from 'zod';
 
 const TAB_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-// Tab labels are plain text; invisible format controls have no display role.
-const FORBIDDEN_DISPLAY_NAME_PATTERN = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
+const FORBIDDEN_DISPLAY_NAME_PATTERN = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/u;
+const FORMAT_CONTROL_PATTERN = /\p{Cf}/u;
+const ALLOWED_FORMAT_CONTROLS = new Set(['\u200c', '\u200d']);
+
+function hasForbiddenDisplayNameCharacter(value: string): boolean {
+  return [...value].some(
+    (character) =>
+      FORBIDDEN_DISPLAY_NAME_PATTERN.test(character) ||
+      (FORMAT_CONTROL_PATTERN.test(character) &&
+        !ALLOWED_FORMAT_CONTROLS.has(character)),
+  );
+}
 
 export const TAB_DOCUMENT_FORMAT_VERSION = 1 as const;
 export const SESSION_REPLACED = 4001;
@@ -15,7 +25,7 @@ export const tabIdSchema = z.string().regex(TAB_ID_PATTERN);
 
 export const displayNameSchema = z
   .string()
-  .refine((value) => !FORBIDDEN_DISPLAY_NAME_PATTERN.test(value))
+  .refine((value) => !hasForbiddenDisplayNameCharacter(value))
   .transform((value) => value.trim().normalize('NFC'))
   .refine((value) => [...value].length >= 1 && [...value].length <= 80);
 
