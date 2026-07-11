@@ -35,8 +35,11 @@ export interface TerminalSocketController {
 const OPEN = 1;
 const INITIAL_RETRY_DELAY_MS = 500;
 const INITIAL_RETRY_STEPS = 5;
+const SESSION_REPLACED_CLOSE_CODE = 4001;
 const PROTOCOL_ERROR = 'Terminal connection protocol error.';
 const SERVER_ERROR = 'Terminal server reported an error.';
+const SESSION_REPLACED_ERROR =
+  'Terminal opened in another browser. Reconnect to take control.';
 const defaultSocketFactory: SocketFactory = (url) => new WebSocket(url);
 
 export function terminalSocketUrl(
@@ -147,9 +150,16 @@ export function useTerminalSocket(
       if (!isCurrent()) return;
       setError('Terminal connection interrupted.');
     };
-    const onClose = () => {
+    const onClose = (event: Event) => {
       if (!isCurrent()) return;
       socketRef.current = null;
+      if ((event as CloseEvent).code === SESSION_REPLACED_CLOSE_CODE) {
+        stoppedRef.current = true;
+        cancelRetry();
+        setStatus('disconnected');
+        setError(SESSION_REPLACED_ERROR);
+        return;
+      }
       if (stoppedRef.current) {
         setStatus('disconnected');
         return;

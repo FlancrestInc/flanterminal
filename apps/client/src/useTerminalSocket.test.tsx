@@ -258,6 +258,28 @@ describe('useTerminalSocket', () => {
     expect(factory).toHaveBeenCalledTimes(4);
   });
 
+  it('waits for manual reconnect after another browser replaces the bridge', () => {
+    const { result, sockets, factory } = harness();
+    act(() => {
+      sockets[0]!.open();
+      sockets[0]!.message(readyMessage());
+      sockets[0]!.dispatchEvent(
+        new CloseEvent('close', { code: 4001, reason: 'Session replaced' }),
+      );
+    });
+
+    expect(result.current.status).toBe('disconnected');
+    expect(result.current.error).toBe(
+      'Terminal opened in another browser. Reconnect to take control.',
+    );
+    act(() => vi.runAllTimers());
+    expect(factory).toHaveBeenCalledOnce();
+
+    act(() => result.current.reconnect());
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe('connecting');
+  });
+
   it('stops on unmount and ignores events from replaced sockets', () => {
     const { result, sockets, factory, unmount } = harness();
     act(() => result.current.reconnect());
