@@ -11,7 +11,7 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently --kill-others-on-fail --names shared,client,server \"npm run dev -w @flanterminal/shared\" \"npm run dev -w @flanterminal/client\" \"npm run dev -w @flanterminal/server\"",
+    "dev": "npm run build -w @flanterminal/shared && concurrently --kill-others-on-fail --names shared,client,server \"npm run dev -w @flanterminal/shared\" \"npm run dev -w @flanterminal/client\" \"npm run dev -w @flanterminal/server\"",
     "build": "npm run build -w @flanterminal/shared && npm run build -w @flanterminal/client && npm run build -w @flanterminal/server && npm run verify:dist",
     "lint": "eslint .",
     "format:check": "prettier --check .",

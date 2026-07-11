@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsc -b --watch --preserveWatchOutput",
+    "dev": "APP_PUBLIC_URL=${APP_PUBLIC_URL:-http://localhost:5173} tsx watch src/index.ts",
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run --config ../../vitest.config.ts --root . --passWithNoTests"
@@ -17,5 +17,8 @@
     "pino": "10.3.1",
     "ws": "8.21.0",
     "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.0"
   }
 }
