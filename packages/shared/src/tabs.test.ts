@@ -98,8 +98,26 @@ describe('tab display names', () => {
     'embedding\u202aname',
     'isolate\u2066name',
     'pop-isolate\u2069name',
+    'arabic-mark\u061cname',
+    'left-to-right-mark\u200ename',
+    'right-to-left-mark\u200fname',
+    'deprecated-bidi\u206aname',
+    'deprecated-bidi\u206fname',
+    'zero-width\u200bname',
   ])('rejects forbidden formatting character in %j', (name) => {
     expect(displayNameSchema.safeParse(name).success).toBe(false);
+  });
+
+  it('rejects lone UTF-16 surrogates but accepts valid surrogate pairs', () => {
+    expect(displayNameSchema.safeParse('high-\ud800-surrogate').success).toBe(
+      false,
+    );
+    expect(displayNameSchema.safeParse('low-\udfff-surrogate').success).toBe(
+      false,
+    );
+    expect(displayNameSchema.parse('valid-\ud83d\ude80-pair')).toBe(
+      'valid-\ud83d\ude80-pair',
+    );
   });
 });
 
@@ -192,6 +210,28 @@ describe('tab records and views', () => {
     expect(
       tabCollectionResponseSchema.safeParse({ ...response, formatVersion: 1 })
         .success,
+    ).toBe(false);
+  });
+
+  it.each([
+    ['duplicate ID', [record, { ...record, position: 1 }]],
+    ['duplicate position', [record, { ...record, id: SECOND_TAB_ID }]],
+    ['position gap', [record, { ...record, id: SECOND_TAB_ID, position: 2 }]],
+    ['out-of-range position', [{ ...record, position: 1 }]],
+    [
+      'records out of position order',
+      [
+        { ...record, position: 1 },
+        { ...record, id: SECOND_TAB_ID, position: 0 },
+      ],
+    ],
+  ])('rejects persisted documents with %s', (_reason, tabs) => {
+    expect(
+      persistedTabsDocumentSchema.safeParse({
+        formatVersion: 1,
+        structureRevision: 2,
+        tabs,
+      }).success,
     ).toBe(false);
   });
 });

@@ -2,8 +2,8 @@ import { z } from 'zod';
 
 const TAB_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const FORBIDDEN_DISPLAY_NAME_PATTERN =
-  /[\p{Cc}\p{Zl}\p{Zp}\u202a-\u202e\u2066-\u2069]/u;
+// Tab labels are plain text; invisible format controls have no display role.
+const FORBIDDEN_DISPLAY_NAME_PATTERN = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 
 export const TAB_DOCUMENT_FORMAT_VERSION = 1 as const;
 export const SESSION_REPLACED = 4001;
@@ -69,7 +69,39 @@ export const persistedTabsDocumentSchema = z
     structureRevision: z.number().int().nonnegative(),
     tabs: z.array(tabRecordSchema),
   })
-  .strict();
+  .strict()
+  .superRefine(({ tabs }, context) => {
+    const ids = new Set<string>();
+    const positions = new Set<number>();
+
+    tabs.forEach((tab, index) => {
+      if (ids.has(tab.id)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Tab IDs must be unique',
+          path: ['tabs', index, 'id'],
+        });
+      }
+      ids.add(tab.id);
+
+      if (positions.has(tab.position)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Tab positions must be unique',
+          path: ['tabs', index, 'position'],
+        });
+      }
+      positions.add(tab.position);
+
+      if (tab.position !== index) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Tab position must match its ordered array index',
+          path: ['tabs', index, 'position'],
+        });
+      }
+    });
+  });
 
 export type PersistedTabsDocument = z.infer<typeof persistedTabsDocumentSchema>;
 
