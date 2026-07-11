@@ -4,6 +4,8 @@ import { FIXED_SESSION_ID, type ClientConfig } from '@flanterminal/shared';
 import { act, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import './test/setup.js';
+
 vi.mock('@xterm/xterm', () => ({ Terminal: vi.fn() }));
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: vi.fn() }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: vi.fn() }));
@@ -14,6 +16,8 @@ import {
   type TerminalLike,
 } from './Terminal.js';
 import type { TerminalSocketController } from './useTerminalSocket.js';
+
+type Mutable<T> = { -readonly [Property in keyof T]: T[Property] };
 
 const config: ClientConfig = {
   basePath: '/terminal',
@@ -169,6 +173,65 @@ describe('Terminal', () => {
     expect(socket.sendResize).toHaveBeenCalledTimes(1);
     act(() => vi.advanceTimersByTime(1));
     expect(socket.sendResize).toHaveBeenLastCalledWith(100, 35);
+  });
+
+  it('sends valid dimensions after readiness and resends them after reconnect', () => {
+    const result = setup('reconnecting');
+    const mutableSocket = result.socket as Mutable<TerminalSocketController>;
+
+    act(() => result.initialFit());
+    act(() => vi.advanceTimersByTime(75));
+    expect(result.socket.sendResize).not.toHaveBeenCalled();
+
+    mutableSocket.status = 'connected';
+    result.rerender(
+      <Terminal
+        config={config}
+        socket={result.socket}
+        dependencies={result.dependencies}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(75));
+    expect(result.socket.sendResize).toHaveBeenLastCalledWith(80, 24);
+
+    mutableSocket.status = 'reconnecting';
+    result.rerender(
+      <Terminal
+        config={config}
+        socket={result.socket}
+        dependencies={result.dependencies}
+      />,
+    );
+    mutableSocket.status = 'connected';
+    result.rerender(
+      <Terminal
+        config={config}
+        socket={result.socket}
+        dependencies={result.dependencies}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(75));
+    expect(result.socket.sendResize).toHaveBeenCalledTimes(2);
+    expect(result.socket.sendResize).toHaveBeenLastCalledWith(80, 24);
+  });
+
+  it('does not send dimensions from a hidden or invalid terminal geometry', () => {
+    const result = setup();
+    result.terminal.cols = 1;
+    result.terminal.rows = 1;
+
+    act(() => result.initialFit());
+    act(() => vi.advanceTimersByTime(75));
+
+    expect(result.socket.sendResize).not.toHaveBeenCalled();
+  });
+
+  it('forwards focus from the accessible host to the xterm input', () => {
+    const result = setup();
+
+    act(() => result.getByLabelText('Terminal').focus());
+
+    expect(result.terminal.focus).toHaveBeenCalled();
   });
 
   it('disposes observers, scheduling, subscriptions, addons and terminal', () => {

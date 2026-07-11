@@ -8,7 +8,13 @@ import {
 import '@xterm/xterm/css/xterm.css';
 import { useEffect, useRef } from 'react';
 
-import type { ClientConfig } from '@flanterminal/shared';
+import {
+  MAX_COLS,
+  MAX_ROWS,
+  MIN_COLS,
+  MIN_ROWS,
+  type ClientConfig,
+} from '@flanterminal/shared';
 
 import type { TerminalSocketController } from './useTerminalSocket.js';
 
@@ -101,10 +107,18 @@ export function Terminal({
 }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const statusRef = useRef(socket.status);
+  const focusTerminalRef = useRef<() => void>(() => undefined);
+  const syncResizeRef = useRef<(force: boolean) => void>(() => undefined);
+  const cancelResizeRef = useRef<() => void>(() => undefined);
   const { sendInput, sendResize, subscribeOutput } = socket;
 
   useEffect(() => {
     statusRef.current = socket.status;
+    if (socket.status === 'connected') {
+      syncResizeRef.current(true);
+    } else {
+      cancelResizeRef.current();
+    }
   }, [socket.status]);
 
   useEffect(() => {
@@ -129,14 +143,31 @@ export function Terminal({
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);
     terminal.open(host);
+    focusTerminalRef.current = () => terminal.focus();
 
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     let lastDimensions: string | null = null;
-    const fitAndScheduleResize = () => {
+    const cancelResize = () => {
+      if (resizeTimer === null) return;
+      dependencies.clearTimer(resizeTimer);
+      resizeTimer = null;
+    };
+    const fitAndScheduleResize = (force = false) => {
       fitAddon.fit();
-      if (resizeTimer !== null) dependencies.clearTimer(resizeTimer);
+      cancelResize();
+      if (statusRef.current !== 'connected') return;
+      if (force) lastDimensions = null;
       resizeTimer = dependencies.setTimer(() => {
         resizeTimer = null;
+        if (statusRef.current !== 'connected') return;
+        if (
+          terminal.cols < MIN_COLS ||
+          terminal.cols > MAX_COLS ||
+          terminal.rows < MIN_ROWS ||
+          terminal.rows > MAX_ROWS
+        ) {
+          return;
+        }
         const dimensions = `${terminal.cols}x${terminal.rows}`;
         if (dimensions === lastDimensions) return;
         if (sendResize(terminal.cols, terminal.rows)) {
@@ -144,6 +175,8 @@ export function Terminal({
         }
       }, config.resizeDebounceMs);
     };
+    syncResizeRef.current = fitAndScheduleResize;
+    cancelResizeRef.current = cancelResize;
 
     const observer = dependencies.resizeObserverFactory(fitAndScheduleResize);
     observer.observe(host);
@@ -161,7 +194,10 @@ export function Terminal({
     return () => {
       observer.disconnect();
       cancelInitialFit();
-      if (resizeTimer !== null) dependencies.clearTimer(resizeTimer);
+      cancelResize();
+      focusTerminalRef.current = () => undefined;
+      syncResizeRef.current = () => undefined;
+      cancelResizeRef.current = () => undefined;
       dataSubscription.dispose();
       outputSubscription();
       fitAddon.dispose();
@@ -185,6 +221,9 @@ export function Terminal({
       role="region"
       aria-label="Terminal"
       tabIndex={0}
+      onFocus={(event) => {
+        if (event.target === event.currentTarget) focusTerminalRef.current();
+      }}
     />
   );
 }

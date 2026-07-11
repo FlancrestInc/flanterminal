@@ -50,6 +50,10 @@ describe('App', () => {
       'aria-selected',
       'true',
     );
+    expect(screen.getByRole('tab', { name: 'Terminal' })).toHaveAttribute(
+      'tabindex',
+      '0',
+    );
     expect(screen.getByText('Connected')).toBeInTheDocument();
     expect(screen.getByLabelText('Terminal surface')).toBeInTheDocument();
     expect(screen.queryByText(FIXED_SESSION_ID)).not.toBeInTheDocument();

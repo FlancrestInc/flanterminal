@@ -33,7 +33,8 @@ export interface TerminalSocketController {
 }
 
 const OPEN = 1;
-const RETRY_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000] as const;
+const INITIAL_RETRY_DELAY_MS = 500;
+const INITIAL_RETRY_STEPS = 5;
 const PROTOCOL_ERROR = 'Terminal connection protocol error.';
 const SERVER_ERROR = 'Terminal server reported an error.';
 const defaultSocketFactory: SocketFactory = (url) => new WebSocket(url);
@@ -70,6 +71,29 @@ export function useTerminalSocket(
     }
   }, []);
 
+  const scheduleRetry = useCallback(
+    (message?: string) => {
+      if (stoppedRef.current) {
+        setStatus('disconnected');
+        return;
+      }
+      cancelRetry();
+      setStatus('reconnecting');
+      if (message !== undefined) setError(message);
+      const configuredCap = config.reconnectMaxSeconds * 1_000;
+      const delay =
+        retryAttemptRef.current < INITIAL_RETRY_STEPS
+          ? Math.min(
+              INITIAL_RETRY_DELAY_MS * 2 ** retryAttemptRef.current,
+              configuredCap,
+            )
+          : configuredCap;
+      retryAttemptRef.current += 1;
+      retryTimerRef.current = setTimeout(() => connectRef.current(), delay);
+    },
+    [cancelRetry, config.reconnectMaxSeconds],
+  );
+
   const connect = useCallback(() => {
     if (stoppedRef.current) return;
     cancelRetry();
@@ -87,15 +111,14 @@ export function useTerminalSocket(
         ),
       );
     } catch {
-      setStatus('error');
-      setError('Unable to open terminal connection.');
+      socketRef.current = null;
+      scheduleRetry('Unable to open terminal connection.');
       return;
     }
     socketRef.current = socket;
 
     const onOpen = () => {
-      if (!isCurrent()) return;
-      retryAttemptRef.current = 0;
+      if (isCurrent()) retryAttemptRef.current = 0;
     };
     const onMessage = (event: Event) => {
       if (!isCurrent()) return;
@@ -131,17 +154,7 @@ export function useTerminalSocket(
         setStatus('disconnected');
         return;
       }
-      setStatus('reconnecting');
-      const delayIndex = Math.min(
-        retryAttemptRef.current,
-        RETRY_DELAYS_MS.length - 1,
-      );
-      const delay = Math.min(
-        RETRY_DELAYS_MS[delayIndex]!,
-        config.reconnectMaxSeconds * 1_000,
-      );
-      retryAttemptRef.current += 1;
-      retryTimerRef.current = setTimeout(() => connectRef.current(), delay);
+      scheduleRetry();
     };
 
     socket.addEventListener('open', onOpen);
@@ -151,10 +164,10 @@ export function useTerminalSocket(
   }, [
     cancelRetry,
     config.basePath,
-    config.reconnectMaxSeconds,
     config.sessionId,
     factory,
     location,
+    scheduleRetry,
   ]);
   useEffect(() => {
     connectRef.current = connect;

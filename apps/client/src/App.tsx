@@ -35,6 +35,7 @@ export function App({ config }: AppProps) {
             role="tab"
             aria-selected="true"
             aria-controls="terminal-panel"
+            tabIndex={0}
           >
             Terminal
           </div>

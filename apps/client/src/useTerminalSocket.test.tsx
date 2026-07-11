@@ -174,6 +174,53 @@ describe('useTerminalSocket', () => {
     }
   });
 
+  it('reaches the configured 15 second cap after the 8 second retry', () => {
+    const { sockets, factory } = harness({ reconnectMaxSeconds: 15 });
+    const delays = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 15_000];
+
+    for (const [index, delay] of delays.entries()) {
+      act(() => sockets[index]!.temporaryClose());
+      act(() => vi.advanceTimersByTime(delay - 1));
+      expect(factory).toHaveBeenCalledTimes(index + 1);
+      act(() => vi.advanceTimersByTime(1));
+      expect(factory).toHaveBeenCalledTimes(index + 2);
+    }
+  });
+
+  it('jumps directly from 8 seconds to a configured larger retry cap', () => {
+    const { sockets, factory } = harness({ reconnectMaxSeconds: 60 });
+    const delays = [500, 1_000, 2_000, 4_000, 8_000, 60_000, 60_000];
+
+    for (const [index, delay] of delays.entries()) {
+      act(() => sockets[index]!.temporaryClose());
+      act(() => vi.advanceTimersByTime(delay - 1));
+      expect(factory).toHaveBeenCalledTimes(index + 1);
+      act(() => vi.advanceTimersByTime(1));
+      expect(factory).toHaveBeenCalledTimes(index + 2);
+    }
+  });
+
+  it('retries when creating the browser WebSocket throws', () => {
+    const socket = new FakeSocket();
+    const factory = vi
+      .fn<(url: string) => BrowserSocket>()
+      .mockImplementationOnce(() => {
+        throw new Error('sensitive browser failure');
+      })
+      .mockReturnValue(socket);
+
+    const { result } = renderHook(() =>
+      useTerminalSocket(config, { socketFactory: factory }),
+    );
+
+    expect(result.current.status).toBe('reconnecting');
+    expect(result.current.error).toBe('Unable to open terminal connection.');
+    act(() => vi.advanceTimersByTime(499));
+    expect(factory).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(1));
+    expect(factory).toHaveBeenCalledTimes(2);
+  });
+
   it('resets backoff after open/ready and reconnects immediately on command', () => {
     const { result, sockets, factory } = harness();
     act(() => sockets[0]!.temporaryClose());
@@ -192,6 +239,23 @@ describe('useTerminalSocket', () => {
     expect(sockets[2]!.close).toHaveBeenCalled();
     expect(factory).toHaveBeenCalledTimes(4);
     expect(result.current.status).toBe('connecting');
+  });
+
+  it('resets backoff as soon as a browser WebSocket opens', () => {
+    const { sockets, factory } = harness();
+    act(() => sockets[0]!.temporaryClose());
+    act(() => vi.advanceTimersByTime(500));
+    act(() => sockets[1]!.temporaryClose());
+    act(() => vi.advanceTimersByTime(1_000));
+
+    act(() => {
+      sockets[2]!.open();
+      sockets[2]!.temporaryClose();
+    });
+    act(() => vi.advanceTimersByTime(499));
+    expect(factory).toHaveBeenCalledTimes(3);
+    act(() => vi.advanceTimersByTime(1));
+    expect(factory).toHaveBeenCalledTimes(4);
   });
 
   it('stops on unmount and ignores events from replaced sockets', () => {

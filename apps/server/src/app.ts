@@ -86,6 +86,8 @@ export function createApp(options: CreateAppOptions): Express {
 
   app.get('*path', (_request, response) => {
     const pathname = response.locals.canonicalPath as string;
+    const workspaceRoot =
+      options.config.basePath === '/' ? '/' : `${options.config.basePath}/`;
     if (
       !isWithinBase(pathname, options.config.basePath) ||
       pathname === apiPrefix ||
@@ -93,6 +95,10 @@ export function createApp(options: CreateAppOptions): Express {
       hasExtension(pathname)
     ) {
       response.sendStatus(404);
+      return;
+    }
+    if (pathname !== workspaceRoot) {
+      response.redirect(308, workspaceRoot);
       return;
     }
     response.sendFile(join(options.clientDist, 'index.html'));

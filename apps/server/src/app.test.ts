@@ -86,6 +86,17 @@ describe('createApp', () => {
     expect((await request('/terminal/api/unknown')).status).toBe(404);
   });
 
+  it.each(['/terminal', '/terminal/dashboard/session', '/terminal/a/'])(
+    'redirects noncanonical workspace path %s to the mounted root',
+    async (path) => {
+      const response = await request(path, {
+        redirect: 'manual',
+      });
+      expect(response.status).toBe(308);
+      expect(response.headers.get('location')).toBe('/terminal/');
+    },
+  );
+
   it.each([
     '/terminal/.ssh',
     '/terminal/home/user/id_rsa',
@@ -194,7 +205,11 @@ describe('createApp', () => {
 
 async function request(
   path: string,
-  options: { ready?: boolean; basePath?: string } = {},
+  options: {
+    ready?: boolean;
+    basePath?: string;
+    redirect?: RequestRedirect;
+  } = {},
 ): Promise<Response> {
   if (server !== undefined) {
     await new Promise<void>((resolve) => server?.close(() => resolve()));
@@ -215,7 +230,10 @@ async function request(
   const address = server.address();
   if (address === null || typeof address === 'string')
     throw new Error('listen failed');
-  return fetch(`http://127.0.0.1:${address.port}${path}`);
+  return fetch(
+    `http://127.0.0.1:${address.port}${path}`,
+    options.redirect === undefined ? {} : { redirect: options.redirect },
+  );
 }
 
 function config(basePath: string) {
