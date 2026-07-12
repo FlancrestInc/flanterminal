@@ -1,0 +1,453 @@
+import { once } from 'node:events';
+import { createServer, type Server } from 'node:http';
+
+import { FIXED_SESSION_ID, type TabView } from '@flanterminal/shared';
+import express from 'express';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  InvalidSessionStateError,
+  OperationFailedError,
+  TabNotFoundError as SessionTabNotFoundError,
+} from './session-manager.js';
+import {
+  OrderConflictError,
+  SessionLimitError,
+  TabNotFoundError as StoreTabNotFoundError,
+} from './tab-store.js';
+import {
+  createTabRouter,
+  type TabRouteSessions,
+  type TabRouteStore,
+} from './tab-routes.js';
+
+const PUBLIC_ORIGIN = 'https://terminal.example';
+const SECOND_ID = '123e4567-e89b-42d3-a456-426614174000';
+const NOW = '2026-07-11T12:00:00.000Z';
+
+let server: Server | undefined;
+let store: {
+  create: ReturnType<typeof vi.fn<TabRouteStore['create']>>;
+  rename: ReturnType<typeof vi.fn<TabRouteStore['rename']>>;
+  reorder: ReturnType<typeof vi.fn<TabRouteStore['reorder']>>;
+};
+let sessions: {
+  collectionView: ReturnType<typeof vi.fn<TabRouteSessions['collectionView']>>;
+  view: ReturnType<typeof vi.fn<TabRouteSessions['view']>>;
+  terminate: ReturnType<typeof vi.fn<TabRouteSessions['terminate']>>;
+  recreate: ReturnType<typeof vi.fn<TabRouteSessions['recreate']>>;
+  restart: ReturnType<typeof vi.fn<TabRouteSessions['restart']>>;
+  restartBridge: ReturnType<typeof vi.fn<TabRouteSessions['restartBridge']>>;
+  closeTab: ReturnType<typeof vi.fn<TabRouteSessions['closeTab']>>;
+};
+
+beforeEach(() => {
+  store = {
+    create: vi.fn(async () => record(FIXED_SESSION_ID, 'Terminal 1', 0)),
+    rename: vi.fn(async (_id, name) => record(FIXED_SESSION_ID, name, 0)),
+    reorder: vi.fn(async () => ({ structureRevision: 2, tabs: [] })),
+  };
+  sessions = {
+    collectionView: vi.fn(async () => collection()),
+    view: vi.fn(async (id) => view(id)),
+    terminate: vi.fn(async (id) => view(id, 'stopped')),
+    recreate: vi.fn(async (id) => view(id)),
+    restart: vi.fn(async (id) => view(id)),
+    restartBridge: vi.fn(async (id) => view(id)),
+    closeTab: vi.fn(async () => undefined),
+  };
+});
+
+afterEach(async () => {
+  if (server !== undefined) {
+    await new Promise<void>((resolve) => server?.close(() => resolve()));
+    server = undefined;
+  }
+});
+
+describe('createTabRouter', () => {
+  it('returns the authoritative collection with no-store', async () => {
+    const response = await request('/api/tabs');
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(await response.json()).toEqual(collection());
+    expect(sessions.collectionView).toHaveBeenCalledOnce();
+  });
+
+  it('creates metadata before returning the session view', async () => {
+    const calls: string[] = [];
+    store.create.mockImplementation(async (name) => {
+      calls.push(`create:${name}`);
+      return record(FIXED_SESSION_ID, name ?? 'Terminal 1', 0);
+    });
+    sessions.view.mockImplementation(async (id) => {
+      calls.push(`view:${id}`);
+      return view(id, 'running', 'Work');
+    });
+
+    const response = await mutation('/api/tabs', 'POST', {
+      displayName: 'Work',
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(await response.json()).toEqual(
+      view(FIXED_SESSION_ID, 'running', 'Work'),
+    );
+    expect(calls).toEqual([`create:Work`, `view:${FIXED_SESSION_ID}`]);
+  });
+
+  it('allows an empty create body and passes undefined', async () => {
+    const response = await mutation('/api/tabs', 'POST', {});
+
+    expect(response.status).toBe(201);
+    expect(store.create).toHaveBeenCalledWith(undefined);
+  });
+
+  it('renames metadata before returning the current session view', async () => {
+    const response = await mutation(`/api/tabs/${FIXED_SESSION_ID}`, 'PATCH', {
+      displayName: 'Logs',
+    });
+
+    expect(response.status).toBe(200);
+    expect(store.rename).toHaveBeenCalledWith(FIXED_SESSION_ID, 'Logs');
+    expect(sessions.view).toHaveBeenCalledWith(FIXED_SESSION_ID);
+  });
+
+  it('reorders metadata then returns the authoritative collection view', async () => {
+    const response = await mutation('/api/tabs/order', 'PUT', {
+      structureRevision: 1,
+      ids: [SECOND_ID, FIXED_SESSION_ID],
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(collection());
+    expect(store.reorder).toHaveBeenCalledWith(1, [
+      SECOND_ID,
+      FIXED_SESSION_ID,
+    ]);
+    expect(sessions.collectionView).toHaveBeenCalledOnce();
+  });
+
+  it('closes a tab with a bodyless 204 and does not require JSON', async () => {
+    const response = await request(`/api/tabs/${FIXED_SESSION_ID}`, {
+      method: 'DELETE',
+      headers: { Origin: PUBLIC_ORIGIN },
+    });
+
+    expect(response.status).toBe(204);
+    expect(await response.text()).toBe('');
+    expect(sessions.closeTab).toHaveBeenCalledWith(FIXED_SESSION_ID);
+  });
+
+  it('returns one tab session view with no-store', async () => {
+    const response = await request(`/api/tabs/${FIXED_SESSION_ID}/session`);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    expect(await response.json()).toEqual(view(FIXED_SESSION_ID));
+    expect(sessions.view).toHaveBeenCalledWith(FIXED_SESSION_ID);
+  });
+
+  it.each([
+    ['terminate', 'terminate', 'stopped'],
+    ['recreate', 'recreate', 'running'],
+    ['restart', 'restart', 'running'],
+    ['bridge/restart', 'restartBridge', 'running'],
+  ] as const)(
+    'dispatches session %s with an exact empty body',
+    async (path, method, state) => {
+      const response = await mutation(
+        `/api/tabs/${FIXED_SESSION_ID}/session/${path}`,
+        'POST',
+        {},
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(view(FIXED_SESSION_ID, state));
+      expect(sessions[method]).toHaveBeenCalledWith(FIXED_SESSION_ID);
+    },
+  );
+
+  it.each([
+    ['POST', '/api/tabs', { unexpected: true }],
+    [
+      'PATCH',
+      `/api/tabs/${FIXED_SESSION_ID}`,
+      { displayName: 'x', nested: {} },
+    ],
+    ['PUT', '/api/tabs/order', { structureRevision: '1', ids: [] }],
+    ['POST', `/api/tabs/${FIXED_SESSION_ID}/session/restart`, { force: true }],
+  ])('rejects strict invalid %s %s bodies', async (method, path, body) => {
+    const response = await mutation(path, method, body);
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'invalid_request' });
+    expect(totalMutationCalls()).toBe(0);
+  });
+
+  it.each(['{', 'null', '[]', '"value"'])(
+    'rejects malformed or non-object JSON %s',
+    async (body) => {
+      const response = await request('/api/tabs', {
+        method: 'POST',
+        headers: jsonHeaders(),
+        body,
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'invalid_request' });
+      expect(store.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects JSON larger than 16 KiB with a stable bounded response', async () => {
+    const response = await request('/api/tabs', {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ displayName: 'x'.repeat(17 * 1024) }),
+    });
+
+    const responseBody = await response.text();
+    expect(response.status).toBe(400);
+    expect(JSON.parse(responseBody)).toEqual({ error: 'invalid_request' });
+    expect(responseBody.length).toBeLessThan(100);
+    expect(store.create).not.toHaveBeenCalled();
+  });
+
+  it('requires exact application/json while accepting a charset', async () => {
+    const rejected = await request('/api/tabs', {
+      method: 'POST',
+      headers: { Origin: PUBLIC_ORIGIN, 'Content-Type': 'text/plain' },
+      body: '{}',
+    });
+    const accepted = await request('/api/tabs', {
+      method: 'POST',
+      headers: {
+        Origin: PUBLIC_ORIGIN,
+        'Content-Type': 'application/json; charset=utf-8',
+      },
+      body: '{}',
+    });
+
+    expect(rejected.status).toBe(415);
+    expect(await rejected.json()).toEqual({ error: 'json_required' });
+    expect(accepted.status).toBe(201);
+  });
+
+  it.each([
+    undefined,
+    'https://wrong.example',
+    `${PUBLIC_ORIGIN}, ${PUBLIC_ORIGIN}`,
+  ])(
+    'rejects missing, wrong, or combined Origin before body parsing: %s',
+    async (origin) => {
+      const headers: Record<string, string> = { 'Content-Type': 'text/plain' };
+      if (origin !== undefined) headers.Origin = origin;
+      const response = await request('/api/tabs', {
+        method: 'POST',
+        headers,
+        body: 'not-json',
+      });
+
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: 'origin_forbidden' });
+      expect(store.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects multiple Origin header lines before services run', async () => {
+    const response = await rawRequest('/api/tabs');
+
+    expect(response.status).toBe(403);
+    expect(JSON.parse(response.body)).toEqual({ error: 'origin_forbidden' });
+    expect(store.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '550E8400-E29B-41D4-A716-446655440000',
+    `${FIXED_SESSION_ID}%2Frestart`,
+    `${FIXED_SESSION_ID}%5Crestart`,
+    `%35${FIXED_SESSION_ID.slice(1)}`,
+    '..',
+    '%2e%2e',
+    `.${FIXED_SESSION_ID}`,
+  ])(
+    'rejects noncanonical tab identifier %s without service calls',
+    async (id) => {
+      const response = await request(`/api/tabs/${id}/session`);
+
+      expect([400, 404]).toContain(response.status);
+      expect(sessions.view).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    `/api/tabs/${FIXED_SESSION_ID}/session/`,
+    `/api/TABS/${FIXED_SESSION_ID}/session`,
+    `/API/tabs/${FIXED_SESSION_ID}/session`,
+  ])(
+    'rejects noncanonical route alias %s without service calls',
+    async (path) => {
+      const response = await request(path);
+
+      expect(response.status).toBe(404);
+      expect(sessions.view).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [new StoreTabNotFoundError(), 404, 'tab_not_found'],
+    [new SessionTabNotFoundError(), 404, 'tab_not_found'],
+    [new SessionLimitError(), 409, 'session_limit'],
+    [new OrderConflictError(), 409, 'order_conflict'],
+    [new InvalidSessionStateError(), 409, 'invalid_session_state'],
+    [new OperationFailedError(view(FIXED_SESSION_ID)), 500, 'operation_failed'],
+    [new Error('secret /home/user output'), 500, 'operation_failed'],
+    [
+      Object.assign(new Error('upstream secret'), { status: 400 }),
+      500,
+      'operation_failed',
+    ],
+  ] as const)(
+    'maps service rejection to stable HTTP errors',
+    async (error, status, code) => {
+      sessions.restart.mockRejectedValueOnce(error);
+      const response = await mutation(
+        `/api/tabs/${FIXED_SESSION_ID}/session/restart`,
+        'POST',
+        {},
+      );
+      const body = await response.text();
+
+      expect(response.status).toBe(status);
+      expect(JSON.parse(body)).toEqual({ error: code });
+      expect(body).not.toContain('secret');
+      expect(body).not.toContain('/home');
+      expect(body).not.toContain('bridgePid');
+      expect(body.length).toBeLessThan(100);
+    },
+  );
+
+  it('returns a JSON 404 for unknown API paths', async () => {
+    const response = await request('/api/tabs/no/such/operation');
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'not_found' });
+  });
+});
+
+async function request(path: string, init?: RequestInit): Promise<Response> {
+  const port = await listen();
+  return fetch(`http://127.0.0.1:${port}${path}`, init);
+}
+
+async function mutation(
+  path: string,
+  method: string,
+  body: unknown,
+): Promise<Response> {
+  return request(path, {
+    method,
+    headers: jsonHeaders(),
+    body: JSON.stringify(body),
+  });
+}
+
+function jsonHeaders(): Record<string, string> {
+  return { Origin: PUBLIC_ORIGIN, 'Content-Type': 'application/json' };
+}
+
+async function rawRequest(
+  path: string,
+): Promise<{ status: number; body: string }> {
+  const port = await listen();
+  return new Promise((resolve, reject) => {
+    const request = globalThis.process.getBuiltinModule('node:http').request({
+      hostname: '127.0.0.1',
+      port,
+      path,
+      method: 'POST',
+      headers: {
+        Origin: [PUBLIC_ORIGIN, PUBLIC_ORIGIN],
+        'Content-Type': 'application/json',
+      },
+    });
+    request.on('response', (response) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on('end', () =>
+        resolve({
+          status: response.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString('utf8'),
+        }),
+      );
+    });
+    request.on('error', reject);
+    request.end('{}');
+  });
+}
+
+async function listen(): Promise<number> {
+  if (server === undefined) {
+    const app = express();
+    app.use(
+      '/api',
+      createTabRouter({ publicOrigin: PUBLIC_ORIGIN, store, sessions }),
+    );
+    app.use('/api', (_request, response) =>
+      response.status(404).json({ error: 'not_found' }),
+    );
+    server = createServer(app);
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+  }
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('listen failed');
+  }
+  return address.port;
+}
+
+function record(id: string, displayName: string, position: number) {
+  return {
+    id,
+    displayName,
+    position,
+    createdAt: NOW,
+    lastActivityAt: NOW,
+    desiredState: 'active' as const,
+  };
+}
+
+function view(
+  id: string,
+  state: TabView['session']['state'] = 'running',
+  displayName = 'Terminal 1',
+): TabView {
+  return {
+    ...record(id, displayName, id === FIXED_SESSION_ID ? 0 : 1),
+    session: { state, attached: false, bridgePid: null },
+  };
+}
+
+function collection() {
+  return {
+    structureRevision: 1,
+    tabs: [view(FIXED_SESSION_ID), view(SECOND_ID)],
+  };
+}
+
+function totalMutationCalls(): number {
+  return (
+    store.create.mock.calls.length +
+    store.rename.mock.calls.length +
+    store.reorder.mock.calls.length +
+    sessions.terminate.mock.calls.length +
+    sessions.recreate.mock.calls.length +
+    sessions.restart.mock.calls.length +
+    sessions.restartBridge.mock.calls.length +
+    sessions.closeTab.mock.calls.length
+  );
+}

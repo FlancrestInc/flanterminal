@@ -4,6 +4,7 @@ import express, { type Express, type Request } from 'express';
 import helmet from 'helmet';
 
 import { toClientConfig, type AppConfig } from './config.js';
+import { createTabRouter, type TabRouterOptions } from './tab-routes.js';
 
 export interface RuntimeReadiness {
   isReady(): boolean | Promise<boolean>;
@@ -19,6 +20,7 @@ export type CreateAppOptions = Readonly<{
   readiness: RuntimeReadiness;
   metrics: RuntimeMetrics;
   clientDist: string;
+  tabs?: Omit<TabRouterOptions, 'publicOrigin'>;
 }>;
 
 export function createApp(options: CreateAppOptions): Express {
@@ -27,6 +29,7 @@ export function createApp(options: CreateAppOptions): Express {
   const apiPrefix = withBase(options.config.basePath, '/api');
 
   app.disable('x-powered-by');
+  app.enable('case sensitive routing');
   app.use(helmet());
 
   app.get('/health', (_request, response) => {
@@ -64,6 +67,16 @@ export function createApp(options: CreateAppOptions): Express {
     response.locals.canonicalPath = pathname;
     next();
   });
+
+  if (options.tabs !== undefined) {
+    app.use(
+      apiPrefix,
+      createTabRouter({
+        publicOrigin: options.config.publicOrigin,
+        ...options.tabs,
+      }),
+    );
+  }
 
   app.use(
     options.config.basePath,

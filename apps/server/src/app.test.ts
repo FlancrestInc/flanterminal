@@ -6,8 +6,11 @@ import { tmpdir } from 'node:os';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { FIXED_SESSION_ID } from '@flanterminal/shared';
+
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
+import type { TabRouterOptions } from './tab-routes.js';
 
 let clientDist: string;
 let server: Server | undefined;
@@ -61,12 +64,31 @@ describe('createApp', () => {
     expect(response.headers.get('cache-control')).toContain('no-store');
     expect(await response.json()).toEqual({
       basePath: '/terminal',
-      sessionId: 'phase-1-main',
+      sessionId: FIXED_SESSION_ID,
       fontSize: 14,
       scrollback: 10_000,
       resizeDebounceMs: 100,
       reconnectMaxSeconds: 15,
     });
+  });
+
+  it.each(['/terminal', '/'])(
+    'mounts optional tab routes beneath the API base for %s',
+    async (basePath) => {
+      const response = await request(
+        basePath === '/' ? '/api/tabs' : `${basePath}/api/tabs`,
+        { basePath, tabs: true },
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ structureRevision: 0, tabs: [] });
+    },
+  );
+
+  it('rejects a case-aliased base path before tab routing', async () => {
+    const response = await request('/TERMINAL/api/tabs', { tabs: true });
+
+    expect(response.status).toBe(404);
   });
 
   it('sets helmet security headers', async () => {
@@ -209,6 +231,7 @@ async function request(
     ready?: boolean;
     basePath?: string;
     redirect?: RequestRedirect;
+    tabs?: boolean;
   } = {},
 ): Promise<Response> {
   if (server !== undefined) {
@@ -223,6 +246,7 @@ async function request(
       connectedWebSocketCount: vi.fn(() => 3),
     },
     clientDist,
+    ...(options.tabs === true ? { tabs: tabDependencies() } : {}),
   });
   server = createServer(app);
   server.listen(0, '127.0.0.1');
@@ -234,6 +258,28 @@ async function request(
     `http://127.0.0.1:${address.port}${path}`,
     options.redirect === undefined ? {} : { redirect: options.redirect },
   );
+}
+
+function tabDependencies(): Omit<TabRouterOptions, 'publicOrigin'> {
+  const unavailable = async (): Promise<never> => {
+    throw new Error('not used');
+  };
+  return {
+    store: {
+      create: unavailable,
+      rename: unavailable,
+      reorder: unavailable,
+    },
+    sessions: {
+      collectionView: vi.fn(async () => ({ structureRevision: 0, tabs: [] })),
+      view: unavailable,
+      terminate: unavailable,
+      recreate: unavailable,
+      restart: unavailable,
+      restartBridge: unavailable,
+      closeTab: unavailable,
+    },
+  };
 }
 
 function config(basePath: string) {
