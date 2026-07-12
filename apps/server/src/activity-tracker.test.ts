@@ -112,6 +112,29 @@ describe('ActivityTracker', () => {
     expect(scheduler.pendingCount).toBe(0);
   });
 
+  it('retries when the store throws before returning a promise', async () => {
+    const scheduler = new FakeScheduler();
+    let attempts = 0;
+    const flushActivity = vi.fn<ActivityStore['flushActivity']>(() => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('synchronous failure');
+      return Promise.resolve();
+    });
+    const tracker = makeTracker({ scheduler, flushActivity });
+
+    tracker.mark('first');
+    scheduler.runNext();
+    await settle();
+    expect(scheduler.pendingCount).toBe(1);
+
+    scheduler.runNext();
+    await settle();
+
+    expect(flushActivity).toHaveBeenCalledTimes(2);
+    expect([...flushActivity.mock.calls[1]![0]]).toEqual(['first']);
+    expect(scheduler.pendingCount).toBe(0);
+  });
+
   it('passes deleted or unknown IDs through for the store to handle', async () => {
     const scheduler = new FakeScheduler();
     const flushActivity = vi.fn<ActivityStore['flushActivity']>();
@@ -295,7 +318,5 @@ function sequenceClock(...values: string[]): () => string {
 }
 
 async function settle(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
 }

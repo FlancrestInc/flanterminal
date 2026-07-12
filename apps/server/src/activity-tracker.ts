@@ -74,20 +74,17 @@ export class ActivityTracker {
     if (this.inFlight || this.dirtyIds.size === 0) return;
 
     const ids = this.takeDirtySnapshot();
-    this.inFlight = this.flushAndRetainOnFailure(ids);
-  }
-
-  private async flushAndRetainOnFailure(
-    ids: ReadonlySet<string>,
-  ): Promise<void> {
-    try {
-      await this.options.store.flushActivity(ids, this.now());
-    } catch {
-      for (const id of ids) this.dirtyIds.add(id);
-    } finally {
-      this.inFlight = undefined;
-      this.schedule();
-    }
+    const operation: Promise<void> = Promise.resolve()
+      .then(() => this.options.store.flushActivity(ids, this.now()))
+      .catch(() => {
+        for (const id of ids) this.dirtyIds.add(id);
+      })
+      .finally(() => {
+        if (this.inFlight !== operation) return;
+        this.inFlight = undefined;
+        this.schedule();
+      });
+    this.inFlight = operation;
   }
 
   private async finishShutdown(): Promise<void> {
