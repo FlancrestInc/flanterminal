@@ -19,6 +19,20 @@ import { SessionManagerError } from './session-manager.js';
 import { TabStoreError } from './tab-store.js';
 
 const MAX_JSON_BYTES = 16 * 1024;
+const INVALID_BODY_ERROR_TYPES = new Set([
+  'charset.unsupported',
+  'encoding.unsupported',
+  'entity.parse.failed',
+  'entity.too.large',
+  'entity.verify.failed',
+  'request.aborted',
+  'request.size.invalid',
+]);
+const INVALID_COMPRESSION_ERROR_CODES = new Set([
+  'Z_BUF_ERROR',
+  'Z_DATA_ERROR',
+  'Z_NEED_DICT',
+]);
 
 export interface TabRouteStore {
   create(displayName?: string): Promise<TabRecord>;
@@ -83,7 +97,13 @@ export function createTabRouter(options: TabRouterOptions): Router {
       sendError(response, 415, 'json_required');
       return;
     }
-    parseJson(request, response, next);
+    parseJson(request, response, (error?: unknown) => {
+      if (error === undefined) {
+        next();
+        return;
+      }
+      next(isBodyParserClientError(error) ? new InvalidRequestError() : error);
+    });
   });
 
   router.get('/tabs', async (_request, response) => {
@@ -224,7 +244,7 @@ function mapError(error: unknown): {
     | 'invalid_session_state'
     | 'operation_failed';
 } {
-  if (error instanceof InvalidRequestError || isJsonParseError(error)) {
+  if (error instanceof InvalidRequestError) {
     return { status: 400, code: 'invalid_request' };
   }
   const code =
@@ -242,10 +262,18 @@ function mapError(error: unknown): {
   return { status: 500, code: 'operation_failed' };
 }
 
-function isJsonParseError(error: unknown): boolean {
+function isBodyParserClientError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const type = Reflect.get(error, 'type');
-  return type === 'entity.parse.failed' || type === 'entity.too.large';
+  if (typeof type === 'string' && INVALID_BODY_ERROR_TYPES.has(type)) {
+    return true;
+  }
+  const code = Reflect.get(error, 'code');
+  return (
+    typeof code === 'string' &&
+    (INVALID_COMPRESSION_ERROR_CODES.has(code) ||
+      code.startsWith('ERR__ERROR_FORMAT_'))
+  );
 }
 
 function sendError(response: Response, status: number, error: string): void {

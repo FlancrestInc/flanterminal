@@ -238,6 +238,42 @@ describe('createTabRouter', () => {
     expect(store.create).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      'an unsupported JSON charset',
+      { 'Content-Type': 'application/json; charset=iso-8859-1' },
+      '{}',
+    ],
+    [
+      'an unsupported content encoding',
+      { 'Content-Type': 'application/json', 'Content-Encoding': 'compress' },
+      '{}',
+    ],
+    [
+      'a corrupt Brotli body',
+      { 'Content-Type': 'application/json', 'Content-Encoding': 'br' },
+      'not-brotli-private-input',
+    ],
+  ])(
+    'bounds and rejects %s as an invalid request',
+    async (_name, headers, body) => {
+      const response = await request('/api/tabs', {
+        method: 'POST',
+        headers: { Origin: PUBLIC_ORIGIN, ...headers },
+        body,
+      });
+      const responseBody = await response.text();
+
+      expect(response.status).toBe(400);
+      expect(JSON.parse(responseBody)).toEqual({ error: 'invalid_request' });
+      expect(responseBody.length).toBeLessThan(100);
+      expect(responseBody).not.toContain('iso-8859-1');
+      expect(responseBody).not.toContain('brotli');
+      expect(responseBody).not.toContain('private');
+      expect(store.create).not.toHaveBeenCalled();
+    },
+  );
+
   it('requires exact application/json while accepting a charset', async () => {
     const rejected = await request('/api/tabs', {
       method: 'POST',
@@ -329,6 +365,15 @@ describe('createTabRouter', () => {
     [new Error('secret /home/user output'), 500, 'operation_failed'],
     [
       Object.assign(new Error('upstream secret'), { status: 400 }),
+      500,
+      'operation_failed',
+    ],
+    [
+      Object.assign(new Error('spoofed parser failure'), {
+        type: 'entity.parse.failed',
+        code: 'Z_DATA_ERROR',
+        status: 400,
+      }),
       500,
       'operation_failed',
     ],
