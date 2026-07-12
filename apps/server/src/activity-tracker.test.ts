@@ -218,6 +218,38 @@ describe('ActivityTracker', () => {
     expect(flushActivity).toHaveBeenCalledOnce();
   });
 
+  it('shares the pending shutdown promise with a reentrant store call', async () => {
+    const finalWrite = deferred<void>();
+    let nestedShutdown: Promise<void> | undefined;
+    const trackerRef: { current?: ActivityTracker } = {};
+    const flushActivity = vi.fn<ActivityStore['flushActivity']>(() => {
+      nestedShutdown = trackerRef.current!.shutdown();
+      return finalWrite.promise;
+    });
+    const tracker = makeTracker({ flushActivity });
+    trackerRef.current = tracker;
+    tracker.mark('first');
+
+    const outerShutdown = tracker.shutdown();
+    let outerResolved = false;
+    let nestedResolved = false;
+    void outerShutdown.then(() => {
+      outerResolved = true;
+    });
+    void nestedShutdown!.then(() => {
+      nestedResolved = true;
+    });
+    await settle();
+
+    expect(nestedShutdown).toBe(outerShutdown);
+    expect(outerResolved).toBe(false);
+    expect(nestedResolved).toBe(false);
+
+    finalWrite.resolve();
+    await Promise.all([outerShutdown, nestedShutdown]);
+    expect(flushActivity).toHaveBeenCalledOnce();
+  });
+
   it('does not call the store when shutdown has no dirty IDs', async () => {
     const flushActivity = vi.fn<ActivityStore['flushActivity']>();
     const tracker = makeTracker({ flushActivity });

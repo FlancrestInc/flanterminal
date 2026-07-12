@@ -50,8 +50,15 @@ export class ActivityTracker {
 
     this.accepting = false;
     this.cancelTimer();
-    this.shutdownPromise = this.finishShutdown();
-    return this.shutdownPromise;
+    let resolveShutdown!: () => void;
+    let rejectShutdown!: (reason?: unknown) => void;
+    const shutdownPromise = new Promise<void>((resolve, reject) => {
+      resolveShutdown = resolve;
+      rejectShutdown = reject;
+    });
+    this.shutdownPromise = shutdownPromise;
+    void this.finishShutdown().then(resolveShutdown, rejectShutdown);
+    return shutdownPromise;
   }
 
   private schedule(): void {
