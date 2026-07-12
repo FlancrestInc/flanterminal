@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { FIXED_SESSION_ID, type ClientConfig } from '@flanterminal/shared';
+import type { ClientConfig } from '@flanterminal/shared';
 import { act, render } from '@testing-library/react';
+import { createRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './test/setup.js';
@@ -21,7 +22,6 @@ type Mutable<T> = { -readonly [Property in keyof T]: T[Property] };
 
 const config: ClientConfig = {
   basePath: '/terminal',
-  sessionId: FIXED_SESSION_ID,
   fontSize: 15,
   scrollback: 12_345,
   resizeDebounceMs: 75,
@@ -34,6 +34,7 @@ class FakeTerminal implements TerminalLike {
   readonly loadAddon = vi.fn();
   readonly open = vi.fn();
   readonly focus = vi.fn();
+  readonly clear = vi.fn();
   readonly write = vi.fn();
   readonly dispose = vi.fn();
   readonly dataListeners = new Set<(data: string) => void>();
@@ -232,6 +233,30 @@ describe('Terminal', () => {
     act(() => result.getByLabelText('Terminal').focus());
 
     expect(result.terminal.focus).toHaveBeenCalled();
+  });
+
+  it('exposes focus and clear commands without recreating xterm', () => {
+    const terminal = new FakeTerminal();
+    const ref = createRef<{ focus(): void; clear(): void }>();
+    const result = setup();
+    result.unmount();
+    const terminalFactory = vi.fn(() => terminal);
+    const dependencies = { ...result.dependencies, terminalFactory };
+
+    render(
+      <Terminal
+        ref={ref}
+        config={config}
+        socket={result.socket}
+        dependencies={dependencies}
+      />,
+    );
+    act(() => ref.current?.focus());
+    act(() => ref.current?.clear());
+
+    expect(terminal.focus).toHaveBeenCalledOnce();
+    expect(terminal.clear).toHaveBeenCalledOnce();
+    expect(terminalFactory).toHaveBeenCalledOnce();
   });
 
   it('disposes observers, scheduling, subscriptions, addons and terminal', () => {

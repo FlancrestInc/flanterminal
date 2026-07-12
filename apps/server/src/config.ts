@@ -1,5 +1,4 @@
 import {
-  FIXED_SESSION_ID,
   MAX_FONT_SIZE,
   MAX_RECONNECT_SECONDS,
   MAX_RESIZE_DEBOUNCE_MS,
@@ -165,7 +164,6 @@ export function loadConfig(env: ConfigEnvironment): AppConfig {
 export function toClientConfig(config: AppConfig): ClientConfig {
   return parseClientConfig({
     basePath: config.basePath,
-    sessionId: FIXED_SESSION_ID,
     fontSize: config.defaultFontSize,
     scrollback: config.xtermScrollback,
     resizeDebounceMs: config.resizeDebounceMs,

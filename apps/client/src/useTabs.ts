@@ -21,11 +21,11 @@ export interface TabsController {
   readonly rename: (id: string, displayName: string) => Promise<void>;
   readonly reorder: (ids: readonly string[]) => Promise<void>;
   readonly close: (id: string) => Promise<void>;
-  readonly health: (id: string) => Promise<void>;
-  readonly terminate: (id: string) => Promise<void>;
-  readonly recreate: (id: string) => Promise<void>;
-  readonly restart: (id: string) => Promise<void>;
-  readonly restartBridge: (id: string) => Promise<void>;
+  readonly health: (id: string) => Promise<boolean>;
+  readonly terminate: (id: string) => Promise<boolean>;
+  readonly recreate: (id: string) => Promise<boolean>;
+  readonly restart: (id: string) => Promise<boolean>;
+  readonly restartBridge: (id: string) => Promise<boolean>;
 }
 
 export function useTabs(
@@ -207,8 +207,10 @@ export function useTabs(
       try {
         update(await operation(id));
         setError(null);
+        return true;
       } catch {
         setError(SAFE_ERROR);
+        return false;
       }
     },
     [update],

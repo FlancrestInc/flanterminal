@@ -5,7 +5,6 @@ import { Buffer } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
 
 import {
-  FIXED_SESSION_ID,
   MAX_INPUT_BYTES,
   MAX_WS_PAYLOAD_BYTES,
   isSessionId,
@@ -16,6 +15,7 @@ import {
 } from './protocol.js';
 
 const OTHER_SESSION_ID = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+const FIXED_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 
 describe('terminal protocol', () => {
   it('parses valid direction-specific messages', () => {
@@ -228,8 +228,7 @@ describe('terminal protocol', () => {
     ).toBe(true);
   });
 
-  it('accepts canonical tab IDs while retaining a canonical compatibility ID', () => {
-    expect(FIXED_SESSION_ID).toBe('550e8400-e29b-41d4-a716-446655440000');
+  it('accepts canonical dynamic tab IDs', () => {
     expect(isSessionId(FIXED_SESSION_ID)).toBe(true);
     expect(isSessionId(OTHER_SESSION_ID)).toBe(true);
     expect(

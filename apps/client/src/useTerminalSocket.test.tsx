@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { FIXED_SESSION_ID, type ClientConfig } from '@flanterminal/shared';
+import type { ClientConfig } from '@flanterminal/shared';
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,13 +12,13 @@ import {
 
 const config: ClientConfig = {
   basePath: '/tools/terminal',
-  sessionId: FIXED_SESSION_ID,
   fontSize: 14,
   scrollback: 5_000,
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 8,
 };
 const DYNAMIC_SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
+const FIXED_SESSION_ID = DYNAMIC_SESSION_ID;
 
 class FakeSocket extends EventTarget implements BrowserSocket {
   static readonly CONNECTING = 0;
@@ -70,7 +70,9 @@ function harness(override: Partial<ClientConfig> = {}) {
     return socket;
   });
   const hook = renderHook(() =>
-    useTerminalSocket({ ...config, ...override }, { socketFactory: factory }),
+    useTerminalSocket({ ...config, ...override }, DYNAMIC_SESSION_ID, {
+      socketFactory: factory,
+    }),
   );
   return { ...hook, sockets, factory };
 }
@@ -87,10 +89,10 @@ afterEach(() => {
 describe('useTerminalSocket', () => {
   it('does not add a duplicate slash for a root-mounted runtime', () => {
     expect(
-      terminalSocketUrl(
-        { basePath: '/', sessionId: FIXED_SESSION_ID },
-        { host: 'terminal.example', protocol: 'https:' },
-      ),
+      terminalSocketUrl({ basePath: '/' }, DYNAMIC_SESSION_ID, {
+        host: 'terminal.example',
+        protocol: 'https:',
+      }),
     ).toBe(`wss://terminal.example/ws/sessions/${FIXED_SESSION_ID}`);
   });
 
@@ -238,7 +240,9 @@ describe('useTerminalSocket', () => {
       .mockReturnValue(socket);
 
     const { result } = renderHook(() =>
-      useTerminalSocket(config, { socketFactory: factory }),
+      useTerminalSocket(config, DYNAMIC_SESSION_ID, {
+        socketFactory: factory,
+      }),
     );
 
     expect(result.current.status).toBe('reconnecting');

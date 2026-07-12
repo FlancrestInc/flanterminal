@@ -48,30 +48,10 @@ const SESSION_REPLACED_ERROR =
 const defaultSocketFactory: SocketFactory = (url) => new WebSocket(url);
 
 export function terminalSocketUrl(
-  config: Pick<ClientConfig, 'basePath' | 'sessionId'>,
-  location?: Pick<Location, 'host' | 'protocol'>,
-): string;
-export function terminalSocketUrl(
   config: Pick<ClientConfig, 'basePath'>,
   sessionId: string,
-  location?: Pick<Location, 'host' | 'protocol'>,
-): string;
-export function terminalSocketUrl(
-  config: Pick<ClientConfig, 'basePath'> &
-    Partial<Pick<ClientConfig, 'sessionId'>>,
-  sessionIdOrLocation:
-    string | Pick<Location, 'host' | 'protocol'> = window.location,
-  explicitLocation: Pick<Location, 'host' | 'protocol'> = window.location,
+  location: Pick<Location, 'host' | 'protocol'> = window.location,
 ): string {
-  const sessionId =
-    typeof sessionIdOrLocation === 'string'
-      ? sessionIdOrLocation
-      : config.sessionId;
-  if (sessionId === undefined) throw new Error('Terminal session missing');
-  const location =
-    typeof sessionIdOrLocation === 'string'
-      ? explicitLocation
-      : sessionIdOrLocation;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const basePath = config.basePath === '/' ? '' : config.basePath;
   return `${protocol}//${location.host}${basePath}/ws/sessions/${encodeURIComponent(sessionId)}`;
@@ -79,26 +59,9 @@ export function terminalSocketUrl(
 
 export function useTerminalSocket(
   config: ClientConfig,
-  dependencies?: TerminalSocketDependencies,
-): TerminalSocketController;
-export function useTerminalSocket(
-  config: ClientConfig,
   sessionId: string,
-  dependencies?: TerminalSocketDependencies,
-): TerminalSocketController;
-export function useTerminalSocket(
-  config: ClientConfig,
-  sessionIdOrDependencies: string | TerminalSocketDependencies = {},
-  explicitDependencies: TerminalSocketDependencies = {},
+  dependencies: TerminalSocketDependencies = {},
 ): TerminalSocketController {
-  const sessionId =
-    typeof sessionIdOrDependencies === 'string'
-      ? sessionIdOrDependencies
-      : config.sessionId;
-  const dependencies =
-    typeof sessionIdOrDependencies === 'string'
-      ? explicitDependencies
-      : sessionIdOrDependencies;
   const onSessionStopped = dependencies.onSessionStopped;
   const onSessionRestarting = dependencies.onSessionRestarting;
   const factory = dependencies.socketFactory ?? defaultSocketFactory;

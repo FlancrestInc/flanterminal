@@ -1,85 +1,156 @@
 // @vitest-environment jsdom
 
-import { FIXED_SESSION_ID, type ClientConfig } from '@flanterminal/shared';
-import { fireEvent, render, screen } from '@testing-library/react';
+import type { ClientConfig, TabView } from '@flanterminal/shared';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './test/setup.js';
+import type { TabsApi } from './tabs-api.js';
+import type { TerminalSessionHandle } from './TerminalSession.js';
 
-import type { TerminalSocketController } from './useTerminalSocket.js';
-
-const socket = vi.hoisted(() => ({
-  status: 'connected' as TerminalSocketController['status'],
-  error: null as string | null,
-  reconnect: vi.fn(),
-  disconnect: vi.fn(),
-  sendInput: vi.fn(() => true),
-  sendResize: vi.fn(() => true),
-  subscribeOutput: vi.fn(() => vi.fn()),
-}));
-
-vi.mock('./useTerminalSocket.js', () => ({
-  useTerminalSocket: () => socket,
-}));
-vi.mock('./Terminal.js', () => ({
-  Terminal: () => <div aria-label="Terminal surface" />,
-}));
-
-import { App, StartupState } from './App.js';
-
+const A = '123e4567-e89b-42d3-a456-426614174000';
+const B = '223e4567-e89b-42d3-a456-426614174000';
+const C = '323e4567-e89b-42d3-a456-426614174000';
 const config: ClientConfig = {
   basePath: '/terminal',
-  sessionId: FIXED_SESSION_ID,
   fontSize: 14,
   scrollback: 5_000,
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 8,
 };
+const commands = vi.hoisted(() => ({
+  reconnect: vi.fn(),
+  detach: vi.fn(),
+  clear: vi.fn(),
+  focus: vi.fn(),
+}));
 
-beforeEach(() => {
-  socket.status = 'connected';
-  socket.error = null;
-  socket.reconnect.mockClear();
+vi.mock('./TerminalSession.js', async () => {
+  const { forwardRef, useImperativeHandle } = await import('react');
+  return {
+    TerminalSession: forwardRef<TerminalSessionHandle, { tabId: string }>(
+      function MockSession({ tabId }, ref) {
+        useImperativeHandle(ref, () => commands, []);
+        return <div aria-label={`Terminal ${tabId}`} />;
+      },
+    ),
+  };
 });
 
-describe('App', () => {
-  it('renders one compact Terminal workspace without exposing the session id', () => {
-    render(<App config={config} />);
+import { App, StartupState } from './App.js';
 
-    expect(screen.getByRole('tab', { name: 'Terminal' })).toHaveAttribute(
+function tab(
+  id: string,
+  position: number,
+  state: 'active' | 'stopped' = 'active',
+): TabView {
+  return {
+    id,
+    displayName: `Terminal ${position + 1}`,
+    position,
+    createdAt: '2026-07-11T00:00:00.000Z',
+    lastActivityAt: '2026-07-11T00:00:00.000Z',
+    desiredState: state,
+    session: {
+      state: state === 'active' ? 'running' : 'stopped',
+      attached: false,
+      bridgePid: null,
+    },
+  };
+}
+
+function api(initial = [tab(A, 0), tab(B, 1), tab(C, 2, 'stopped')]) {
+  const client: TabsApi = {
+    list: vi.fn(async () => ({ structureRevision: 1, tabs: initial })),
+    create: vi.fn(async () =>
+      tab('423e4567-e89b-42d3-a456-426614174000', initial.length),
+    ),
+    rename: vi.fn(async (id, name) => ({
+      ...initial.find((item) => item.id === id)!,
+      displayName: name,
+    })),
+    reorder: vi.fn(async (revision: number, ids: readonly string[]) => ({
+      structureRevision: revision + 1,
+      tabs: ids.map((id, position) => ({
+        ...initial.find((item) => item.id === id)!,
+        position,
+      })),
+    })),
+    close: vi.fn(async () => undefined),
+    health: vi.fn(async (id) => initial.find((item) => item.id === id)!),
+    terminate: vi.fn(async (id) => ({
+      ...initial.find((item) => item.id === id)!,
+      desiredState: 'stopped' as const,
+    })),
+    recreate: vi.fn(async (id) => ({
+      ...initial.find((item) => item.id === id)!,
+      desiredState: 'active' as const,
+    })),
+    restart: vi.fn(async (id) => initial.find((item) => item.id === id)!),
+    restartBridge: vi.fn(async (id) => initial.find((item) => item.id === id)!),
+  };
+  return client;
+}
+
+beforeEach(() => vi.clearAllMocks());
+
+describe('App', () => {
+  it('loads tabs, lazily mounts selected terminals, and retains visited sessions', async () => {
+    render(<App config={config} api={api()} />);
+    await screen.findByRole('tab', { name: 'Terminal 1' });
+    expect(await screen.findByLabelText(`Terminal ${A}`)).toBeInTheDocument();
+    expect(screen.queryByLabelText(`Terminal ${B}`)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Terminal 2' }));
+    expect(screen.getByLabelText(`Terminal ${A}`)).toBeInTheDocument();
+    expect(screen.getByLabelText(`Terminal ${B}`)).toBeInTheDocument();
+  });
+
+  it('selects stopped tabs without mounting a socket and recreates on command', async () => {
+    const client = api();
+    render(<App config={config} api={client} />);
+    fireEvent.click(await screen.findByRole('tab', { name: 'Terminal 3' }));
+    expect(screen.queryByLabelText(`Terminal ${C}`)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Recreate session' }));
+    await waitFor(() => expect(client.recreate).toHaveBeenCalledWith(C));
+  });
+
+  it('confirms closing a tab before terminating its backend session', async () => {
+    const client = api();
+    render(<App config={config} api={client} />);
+    await screen.findByRole('tab', { name: 'Terminal 1' });
+    fireEvent.click(screen.getByRole('button', { name: 'Close Terminal 1' }));
+    expect(client.close).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Close tab' }));
+    await waitFor(() => expect(client.close).toHaveBeenCalledWith(A));
+  });
+
+  it('reconnects the waiting client only after a session restart succeeds', async () => {
+    const client = api();
+    render(<App config={config} api={client} />);
+    await screen.findByLabelText(`Terminal ${A}`);
+    fireEvent.click(screen.getByRole('button', { name: 'Session actions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Restart session' }));
+    expect(client.restart).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Restart session' }));
+
+    await waitFor(() => expect(client.restart).toHaveBeenCalledWith(A));
+    expect(commands.reconnect).toHaveBeenCalledOnce();
+  });
+
+  it('supports new-tab, selection, and close shortcuts without intercepting inputs', async () => {
+    const client = api();
+    render(<App config={config} api={client} />);
+    await screen.findByRole('tab', { name: 'Terminal 1' });
+    fireEvent.keyDown(document, { key: 't', ctrlKey: true, shiftKey: true });
+    await waitFor(() => expect(client.create).toHaveBeenCalledOnce());
+    fireEvent.keyDown(document, { key: '2', altKey: true });
+    expect(screen.getByRole('tab', { name: 'Terminal 2' })).toHaveAttribute(
       'aria-selected',
       'true',
     );
-    expect(screen.getByRole('tab', { name: 'Terminal' })).toHaveAttribute(
-      'tabindex',
-      '0',
-    );
-    expect(screen.getByText('Connected')).toBeInTheDocument();
-    expect(screen.getByLabelText('Terminal surface')).toBeInTheDocument();
-    expect(screen.queryByText(FIXED_SESSION_ID)).not.toBeInTheDocument();
-  });
-
-  it('offers an icon-only reconnect command and disables it while connecting', () => {
-    const { rerender } = render(<App config={config} />);
-    const button = screen.getByRole('button', { name: 'Reconnect terminal' });
-    expect(button).toHaveAttribute('title', 'Reconnect terminal');
-    expect(button).not.toHaveTextContent(/Reconnect/i);
-    fireEvent.click(button);
-    expect(socket.reconnect).toHaveBeenCalledOnce();
-
-    socket.status = 'reconnecting';
-    rerender(<App config={config} />);
-    expect(button).toBeDisabled();
-    expect(screen.getByText('Reconnecting')).toBeInTheDocument();
-  });
-
-  it('announces a bounded connection error without rendering protocol details', () => {
-    socket.status = 'error';
-    socket.error = 'Terminal connection protocol error.';
-    render(<App config={config} />);
-
-    expect(screen.getByRole('status')).toHaveTextContent('Connection error');
-    expect(screen.queryByText(socket.error)).not.toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'w', ctrlKey: true, shiftKey: true });
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 });
 
@@ -87,7 +158,6 @@ describe('StartupState', () => {
   it('provides compact accessible loading and safe error states', () => {
     const { rerender } = render(<StartupState state="loading" />);
     expect(screen.getByRole('status')).toHaveTextContent('Loading terminal');
-
     rerender(<StartupState state="error" />);
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Unable to start terminal.',

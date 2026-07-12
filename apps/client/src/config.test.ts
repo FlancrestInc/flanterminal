@@ -1,11 +1,9 @@
-import { FIXED_SESSION_ID } from '@flanterminal/shared';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ClientConfigLoadError, loadClientConfig } from './config.js';
 
 const validConfig = {
   basePath: '/terminal/',
-  sessionId: FIXED_SESSION_ID,
   fontSize: 14,
   scrollback: 5_000,
   resizeDebounceMs: 100,

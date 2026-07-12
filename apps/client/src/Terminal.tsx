@@ -6,7 +6,7 @@ import {
   type ITerminalOptions,
 } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { useEffect, useRef } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 
 import {
   MAX_COLS,
@@ -34,6 +34,7 @@ export interface TerminalLike extends DisposableLike {
   loadAddon(addon: TerminalAddonLike): void;
   open(element: HTMLElement): void;
   focus(): void;
+  clear(): void;
   write(data: string): void;
   onData(listener: (data: string) => void): DisposableLike;
 }
@@ -66,6 +67,7 @@ const defaultDependencies: TerminalDependencies = {
       loadAddon: (addon) => terminal.loadAddon(addon as ITerminalAddon),
       open: (element) => terminal.open(element),
       focus: () => terminal.focus(),
+      clear: () => terminal.clear(),
       write: (data) => terminal.write(data),
       onData: (listener) => terminal.onData(listener),
       dispose: () => terminal.dispose(),
@@ -97,133 +99,151 @@ export interface TerminalProps {
   readonly dependencies?: TerminalDependencies;
 }
 
+export interface TerminalHandle {
+  focus(): void;
+  clear(): void;
+}
+
 const FONT_FAMILY =
   "'JetBrainsMono Nerd Font', ui-monospace, 'Noto Sans Mono', 'Symbols Nerd Font', 'Noto Color Emoji', monospace";
 
-export function Terminal({
-  config,
-  socket,
-  dependencies = defaultDependencies,
-}: TerminalProps) {
-  const hostRef = useRef<HTMLDivElement>(null);
-  const statusRef = useRef(socket.status);
-  const focusTerminalRef = useRef<() => void>(() => undefined);
-  const syncResizeRef = useRef<(force: boolean) => void>(() => undefined);
-  const cancelResizeRef = useRef<() => void>(() => undefined);
-  const { sendInput, sendResize, subscribeOutput } = socket;
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
+  function Terminal(
+    { config, socket, dependencies = defaultDependencies },
+    ref,
+  ) {
+    const hostRef = useRef<HTMLDivElement>(null);
+    const statusRef = useRef(socket.status);
+    const focusTerminalRef = useRef<() => void>(() => undefined);
+    const clearTerminalRef = useRef<() => void>(() => undefined);
+    const syncResizeRef = useRef<(force: boolean) => void>(() => undefined);
+    const cancelResizeRef = useRef<() => void>(() => undefined);
+    const { sendInput, sendResize, subscribeOutput } = socket;
 
-  useEffect(() => {
-    statusRef.current = socket.status;
-    if (socket.status === 'connected') {
-      syncResizeRef.current(true);
-    } else {
-      cancelResizeRef.current();
-    }
-  }, [socket.status]);
+    useImperativeHandle(
+      ref,
+      () => ({
+        focus: () => focusTerminalRef.current(),
+        clear: () => clearTerminalRef.current(),
+      }),
+      [],
+    );
 
-  useEffect(() => {
-    const host = hostRef.current;
-    if (host === null) return;
+    useEffect(() => {
+      statusRef.current = socket.status;
+      if (socket.status === 'connected') {
+        syncResizeRef.current(true);
+      } else {
+        cancelResizeRef.current();
+      }
+    }, [socket.status]);
 
-    const terminal = dependencies.terminalFactory({
-      allowTransparency: false,
-      altClickMovesCursor: true,
-      convertEol: false,
-      cursorBlink: true,
-      cursorStyle: 'block',
-      fontFamily: FONT_FAMILY,
-      fontSize: config.fontSize,
-      letterSpacing: 0,
-      lineHeight: 1.2,
-      rightClickSelectsWord: true,
-      scrollback: config.scrollback,
-    });
-    const fitAddon = dependencies.fitAddonFactory();
-    const webLinksAddon = dependencies.webLinksAddonFactory();
-    terminal.loadAddon(fitAddon);
-    terminal.loadAddon(webLinksAddon);
-    terminal.open(host);
-    focusTerminalRef.current = () => terminal.focus();
+    useEffect(() => {
+      const host = hostRef.current;
+      if (host === null) return;
 
-    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-    let lastDimensions: string | null = null;
-    const cancelResize = () => {
-      if (resizeTimer === null) return;
-      dependencies.clearTimer(resizeTimer);
-      resizeTimer = null;
-    };
-    const fitAndScheduleResize = (force = false) => {
-      fitAddon.fit();
-      cancelResize();
-      if (statusRef.current !== 'connected') return;
-      if (force) lastDimensions = null;
-      resizeTimer = dependencies.setTimer(() => {
+      const terminal = dependencies.terminalFactory({
+        allowTransparency: false,
+        altClickMovesCursor: true,
+        convertEol: false,
+        cursorBlink: true,
+        cursorStyle: 'block',
+        fontFamily: FONT_FAMILY,
+        fontSize: config.fontSize,
+        letterSpacing: 0,
+        lineHeight: 1.2,
+        rightClickSelectsWord: true,
+        scrollback: config.scrollback,
+      });
+      const fitAddon = dependencies.fitAddonFactory();
+      const webLinksAddon = dependencies.webLinksAddonFactory();
+      terminal.loadAddon(fitAddon);
+      terminal.loadAddon(webLinksAddon);
+      terminal.open(host);
+      focusTerminalRef.current = () => terminal.focus();
+      clearTerminalRef.current = () => terminal.clear();
+
+      let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+      let lastDimensions: string | null = null;
+      const cancelResize = () => {
+        if (resizeTimer === null) return;
+        dependencies.clearTimer(resizeTimer);
         resizeTimer = null;
+      };
+      const fitAndScheduleResize = (force = false) => {
+        fitAddon.fit();
+        cancelResize();
         if (statusRef.current !== 'connected') return;
-        if (
-          terminal.cols < MIN_COLS ||
-          terminal.cols > MAX_COLS ||
-          terminal.rows < MIN_ROWS ||
-          terminal.rows > MAX_ROWS
-        ) {
-          return;
-        }
-        const dimensions = `${terminal.cols}x${terminal.rows}`;
-        if (dimensions === lastDimensions) return;
-        if (sendResize(terminal.cols, terminal.rows)) {
-          lastDimensions = dimensions;
-        }
-      }, config.resizeDebounceMs);
-    };
-    syncResizeRef.current = fitAndScheduleResize;
-    cancelResizeRef.current = cancelResize;
+        if (force) lastDimensions = null;
+        resizeTimer = dependencies.setTimer(() => {
+          resizeTimer = null;
+          if (statusRef.current !== 'connected') return;
+          if (
+            terminal.cols < MIN_COLS ||
+            terminal.cols > MAX_COLS ||
+            terminal.rows < MIN_ROWS ||
+            terminal.rows > MAX_ROWS
+          ) {
+            return;
+          }
+          const dimensions = `${terminal.cols}x${terminal.rows}`;
+          if (dimensions === lastDimensions) return;
+          if (sendResize(terminal.cols, terminal.rows)) {
+            lastDimensions = dimensions;
+          }
+        }, config.resizeDebounceMs);
+      };
+      syncResizeRef.current = fitAndScheduleResize;
+      cancelResizeRef.current = cancelResize;
 
-    const observer = dependencies.resizeObserverFactory(fitAndScheduleResize);
-    observer.observe(host);
-    const cancelInitialFit = dependencies.scheduleInitialFit(() => {
-      fitAndScheduleResize();
-      terminal.focus();
-    });
-    const dataSubscription = terminal.onData((data) => {
-      if (statusRef.current === 'connected') sendInput(data);
-    });
-    const outputSubscription = subscribeOutput((data) => {
-      terminal.write(data);
-    });
+      const observer = dependencies.resizeObserverFactory(fitAndScheduleResize);
+      observer.observe(host);
+      const cancelInitialFit = dependencies.scheduleInitialFit(() => {
+        fitAndScheduleResize();
+        terminal.focus();
+      });
+      const dataSubscription = terminal.onData((data) => {
+        if (statusRef.current === 'connected') sendInput(data);
+      });
+      const outputSubscription = subscribeOutput((data) => {
+        terminal.write(data);
+      });
 
-    return () => {
-      observer.disconnect();
-      cancelInitialFit();
-      cancelResize();
-      focusTerminalRef.current = () => undefined;
-      syncResizeRef.current = () => undefined;
-      cancelResizeRef.current = () => undefined;
-      dataSubscription.dispose();
-      outputSubscription();
-      fitAddon.dispose();
-      webLinksAddon.dispose();
-      terminal.dispose();
-    };
-  }, [
-    config.fontSize,
-    config.resizeDebounceMs,
-    config.scrollback,
-    dependencies,
-    sendInput,
-    sendResize,
-    subscribeOutput,
-  ]);
+      return () => {
+        observer.disconnect();
+        cancelInitialFit();
+        cancelResize();
+        focusTerminalRef.current = () => undefined;
+        clearTerminalRef.current = () => undefined;
+        syncResizeRef.current = () => undefined;
+        cancelResizeRef.current = () => undefined;
+        dataSubscription.dispose();
+        outputSubscription();
+        fitAddon.dispose();
+        webLinksAddon.dispose();
+        terminal.dispose();
+      };
+    }, [
+      config.fontSize,
+      config.resizeDebounceMs,
+      config.scrollback,
+      dependencies,
+      sendInput,
+      sendResize,
+      subscribeOutput,
+    ]);
 
-  return (
-    <div
-      ref={hostRef}
-      className="terminal-host"
-      role="region"
-      aria-label="Terminal"
-      tabIndex={0}
-      onFocus={(event) => {
-        if (event.target === event.currentTarget) focusTerminalRef.current();
-      }}
-    />
-  );
-}
+    return (
+      <div
+        ref={hostRef}
+        className="terminal-host"
+        role="region"
+        aria-label="Terminal"
+        tabIndex={0}
+        onFocus={(event) => {
+          if (event.target === event.currentTarget) focusTerminalRef.current();
+        }}
+      />
+    );
+  },
+);

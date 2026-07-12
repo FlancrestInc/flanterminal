@@ -1,7 +1,7 @@
 import { once } from 'node:events';
 import { createServer, type Server } from 'node:http';
 
-import { FIXED_SESSION_ID, type TabView } from '@flanterminal/shared';
+import type { TabView } from '@flanterminal/shared';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,6 +15,8 @@ import {
   SessionLimitError,
   TabNotFoundError as StoreTabNotFoundError,
 } from './tab-store.js';
+
+const FIXED_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 import {
   createTabRouter,
   type TabRouteSessions,

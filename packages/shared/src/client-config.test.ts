@@ -1,18 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { FIXED_SESSION_ID } from './protocol.js';
 import { parseClientConfig } from './client-config.js';
 
 const validConfig = {
   basePath: '/terminal/',
-  sessionId: FIXED_SESSION_ID,
   fontSize: 14,
   scrollback: 10_000,
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 15,
 };
-
-const OTHER_SESSION_ID = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
 describe('parseClientConfig', () => {
   it('returns only the approved normalized client fields', () => {
@@ -45,13 +41,12 @@ describe('parseClientConfig', () => {
     expect(() => parseClientConfig({ ...validConfig, basePath })).toThrow();
   });
 
-  it('requires a canonical session tab ID', () => {
-    expect(
-      parseClientConfig({ ...validConfig, sessionId: OTHER_SESSION_ID })
-        .sessionId,
-    ).toBe(OTHER_SESSION_ID);
+  it('rejects the removed fixed session field', () => {
     expect(() =>
-      parseClientConfig({ ...validConfig, sessionId: 'other' }),
+      parseClientConfig({
+        ...validConfig,
+        sessionId: '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+      }),
     ).toThrow();
   });
 

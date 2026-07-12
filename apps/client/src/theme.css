@@ -71,19 +71,115 @@ button {
   min-width: 0;
   height: 37px;
   align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .terminal-tab {
   display: flex;
-  min-width: 0;
+  width: 180px;
+  min-width: 96px;
+  max-width: 220px;
   align-items: center;
-  padding: 0 8px;
-  border-bottom: 2px solid #b88732;
+  border-right: 1px solid #2c2e2f;
+  border-bottom: 2px solid transparent;
   color: #e2e0da;
   font-size: 13px;
-  font-weight: 600;
   letter-spacing: 0;
   white-space: nowrap;
+}
+
+.terminal-tab.is-active {
+  border-bottom-color: #b88732;
+  background: #222425;
+}
+
+.tab-bar {
+  display: flex;
+  min-width: 0;
+  height: 37px;
+  flex: 1 1 auto;
+  align-items: stretch;
+}
+
+.tab-select {
+  min-width: 0;
+  height: 100%;
+  flex: 1 1 auto;
+  padding: 0 4px;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+  text-align: left;
+}
+
+.tab-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-status {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  margin-left: 7px;
+  border: 1px solid #777976;
+  border-radius: 50%;
+  background: #555856;
+}
+
+.tab-status.status-connected {
+  border-color: #c19642;
+  background: #b88732;
+}
+
+.tab-status.status-connecting,
+.tab-status.status-reconnecting {
+  border-color: #9c7c42;
+  background: #725e36;
+}
+
+.tab-status.status-error {
+  border-color: #e0716b;
+  background: #c84e49;
+}
+
+.tab-close {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #858784;
+}
+
+.tab-close:hover,
+.tab-close:focus-visible {
+  background: #303233;
+  color: #e2e0da;
+}
+
+.tab-rename-input {
+  width: 100%;
+  min-width: 0;
+  margin: 0 4px;
+  border: 1px solid #c19642;
+  border-radius: 2px;
+  outline: 0;
+  background: #101112;
+  color: #e2e0da;
+  font: inherit;
+}
+
+.new-tab-button {
+  align-self: center;
 }
 
 .connection-controls {
@@ -178,6 +274,150 @@ button {
   flex: 1 1 auto;
   overflow: hidden;
   background: #101112;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.terminal-workspace {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  background: #101112;
+}
+
+.stopped-terminal,
+.empty-terminal {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: #9fa09d;
+  font-size: 13px;
+}
+
+.stopped-terminal button,
+.empty-terminal button,
+.dialog-actions button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid #454746;
+  border-radius: 4px;
+  background: #242627;
+  color: #e2e0da;
+}
+
+.workspace-error {
+  padding: 5px 10px;
+  border-bottom: 1px solid #713d3a;
+  background: #321f1e;
+  color: #efaaa5;
+  font-size: 12px;
+}
+
+.session-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.session-menu-popup {
+  position: absolute;
+  z-index: 20;
+  top: 34px;
+  right: 0;
+  width: 210px;
+  padding: 4px;
+  border: 1px solid #3b3d3d;
+  border-radius: 4px;
+  background: #1d1f20;
+  box-shadow: 0 8px 22px rgb(0 0 0 / 35%);
+}
+
+.session-menu-popup button {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #d5d4cf;
+  font-size: 12px;
+  text-align: left;
+}
+
+.session-menu-popup button:hover:not(:disabled),
+.session-menu-popup button:focus-visible {
+  background: #2b2d2e;
+  outline: 0;
+}
+
+.session-menu-popup button:disabled {
+  color: #656764;
+}
+
+.session-health {
+  padding: 6px 8px;
+  color: #8f918e;
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
+.menu-separator {
+  height: 1px;
+  margin: 4px;
+  background: #353737;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(0 0 0 / 58%);
+}
+
+.confirm-dialog {
+  width: min(380px, 100%);
+  padding: 18px;
+  border: 1px solid #454746;
+  border-radius: 6px;
+  background: #1b1d1e;
+  box-shadow: 0 14px 34px rgb(0 0 0 / 45%);
+}
+
+.confirm-dialog h2 {
+  margin: 0 0 8px;
+  color: #e5e3de;
+  font-size: 16px;
+  letter-spacing: 0;
+}
+
+.confirm-dialog p {
+  margin: 0 0 18px;
+  color: #a7a8a5;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dialog-actions .danger-button {
+  border-color: #9a4c47;
+  background: #793b37;
 }
 
 .terminal-host {

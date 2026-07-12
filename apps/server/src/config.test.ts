@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
 
-import { FIXED_SESSION_ID } from '@flanterminal/shared';
-
 import { loadConfig, toClientConfig } from './config.js';
 
 describe('loadConfig', () => {
@@ -122,7 +120,6 @@ describe('loadConfig', () => {
     expect(toClientConfig(loadConfig({ APP_BASE_PATH: '/terminal/' }))).toEqual(
       {
         basePath: '/terminal',
-        sessionId: FIXED_SESSION_ID,
         fontSize: 14,
         scrollback: 10_000,
         resizeDebounceMs: 100,
