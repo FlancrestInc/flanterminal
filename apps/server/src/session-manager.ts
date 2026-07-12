@@ -1,9 +1,17 @@
 import {
+  BRIDGE_RESTART,
   MAX_COLS,
   MAX_ROWS,
   MIN_COLS,
   MIN_ROWS,
+  SESSION_RESTARTING,
+  SESSION_STOPPED,
   isSessionId,
+  type DesiredState,
+  type TabCollection,
+  type TabCollectionResponse,
+  type TabRecord,
+  type TabView,
 } from '@flanterminal/shared';
 
 import type { BridgeRegistry } from './bridge-registry.js';
@@ -14,7 +22,7 @@ import {
   type BridgeOwner,
   type SocketPort,
 } from './terminal-bridge.js';
-import type { SessionPreparer } from './tmux.js';
+import type { AttachSpec, SessionPreparer } from './tmux.js';
 
 export type ManagedBridgeOptions = Readonly<{
   sessionId: string;
@@ -27,10 +35,15 @@ export interface ManagedBridgeFactory {
   create(options: ManagedBridgeOptions): BridgeOwner;
 }
 
+export interface ActivityMarker {
+  mark(id: string): void;
+}
+
 export class TerminalBridgeFactory implements ManagedBridgeFactory {
   constructor(
     private readonly logger: LifecycleLogger,
     private readonly maxBufferedBytes: number,
+    private readonly activity?: ActivityMarker,
   ) {}
 
   create(options: ManagedBridgeOptions): BridgeOwner {
@@ -38,6 +51,9 @@ export class TerminalBridgeFactory implements ManagedBridgeFactory {
       ...options,
       logger: this.logger,
       maxBufferedBytes: this.maxBufferedBytes,
+      ...(this.activity === undefined
+        ? {}
+        : { onActivity: (id: string) => this.activity?.mark(id) }),
     });
   }
 }
@@ -48,12 +64,85 @@ export type ConnectRequest = Readonly<{
   dimensions: TerminalDimensions;
 }>;
 
+export interface SessionTabStore {
+  snapshot(): TabCollection;
+  has(id: string): boolean;
+  setDesiredState(id: string, state: DesiredState): Promise<TabRecord>;
+  remove(id: string): Promise<void>;
+}
+
+export interface SessionRuntimeController extends SessionPreparer {
+  exists(sessionId: string): Promise<boolean>;
+  kill(sessionId: string): Promise<void>;
+  listActiveSessionIds(): Promise<string[]>;
+  attachSpec(sessionId: string): AttachSpec;
+}
+
 export type SessionManagerOptions = Readonly<{
-  preparer: SessionPreparer;
+  preparer: SessionPreparer | SessionRuntimeController;
   ptyFactory: PtyFactory;
   registry: BridgeRegistry;
   bridgeFactory: ManagedBridgeFactory;
+  store?: SessionTabStore;
+  activity?: ActivityMarker;
 }>;
+
+const ATTACH_TOKEN_BRAND = Symbol('AttachToken');
+
+export type AttachToken = Readonly<{
+  sessionId: string;
+  generation: number;
+  [ATTACH_TOKEN_BRAND]: true;
+}>;
+
+export type TabCollectionView = TabCollectionResponse;
+
+export type SessionManagerErrorCode =
+  | 'invalid_connection'
+  | 'stale_attach'
+  | 'tab_not_found'
+  | 'invalid_session_state'
+  | 'operation_failed';
+
+export class SessionManagerError extends Error {
+  constructor(
+    readonly code: SessionManagerErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+export class InvalidConnectionError extends SessionManagerError {
+  constructor() {
+    super('invalid_connection', 'Invalid terminal connection');
+  }
+}
+
+export class StaleAttachError extends SessionManagerError {
+  constructor() {
+    super('stale_attach', 'Attach authorization expired');
+  }
+}
+
+export class TabNotFoundError extends SessionManagerError {
+  constructor() {
+    super('tab_not_found', 'Tab not found');
+  }
+}
+
+export class InvalidSessionStateError extends SessionManagerError {
+  constructor() {
+    super('invalid_session_state', 'Invalid session state');
+  }
+}
+
+export class OperationFailedError extends SessionManagerError {
+  constructor(readonly view?: TabView) {
+    super('operation_failed', 'Session operation failed');
+  }
+}
 
 class KeyedMutex {
   private readonly tails = new Map<string, Promise<void>>();
@@ -79,34 +168,480 @@ class KeyedMutex {
 
 export class SessionManager {
   private readonly mutex = new KeyedMutex();
+  private readonly generations = new Map<string, number>();
+  private readonly issuedTokens = new WeakSet<object>();
+  private readonly compatibilityMode: boolean;
 
-  constructor(private readonly options: SessionManagerOptions) {}
+  constructor(private readonly options: SessionManagerOptions) {
+    // Task 7 wires the store and activity tracker into production. Until then,
+    // omitting both preserves only the Phase 1 request-shaped connect call.
+    this.compatibilityMode =
+      options.store === undefined && options.activity === undefined;
+  }
 
-  async connect(request: ConnectRequest): Promise<BridgeOwner> {
-    if (!isValidRequest(request)) {
-      throw new Error('Invalid terminal connection');
+  authorize(id: string): AttachToken | undefined {
+    const store = this.options.store;
+    if (store === undefined || !isSessionId(id)) return undefined;
+    try {
+      if (!store.has(id)) return undefined;
+      const record = findRecord(store.snapshot(), id);
+      if (record?.desiredState !== 'active') return undefined;
+      const token = Object.freeze({
+        sessionId: id,
+        generation: this.generation(id),
+        [ATTACH_TOKEN_BRAND]: true as const,
+      });
+      this.issuedTokens.add(token);
+      return token;
+    } catch {
+      return undefined;
+    }
+  }
+
+  connect(request: ConnectRequest): Promise<BridgeOwner>;
+  connect(
+    token: AttachToken,
+    socket: SocketPort,
+    dimensions: TerminalDimensions,
+  ): Promise<BridgeOwner>;
+  connect(
+    tokenOrRequest: AttachToken | ConnectRequest,
+    socket?: SocketPort,
+    dimensions?: TerminalDimensions,
+  ): Promise<BridgeOwner> {
+    if (socket === undefined || dimensions === undefined) {
+      if (!this.compatibilityMode || !isValidLegacyRequest(tokenOrRequest)) {
+        return Promise.reject(new InvalidConnectionError());
+      }
+      return this.connectLegacy(tokenOrRequest);
     }
 
-    return this.mutex.runExclusive(request.sessionId, async () => {
-      const spec = await this.options.preparer.prepare(request.sessionId);
+    if (!isValidDimensions(dimensions) || !this.isIssuedToken(tokenOrRequest)) {
+      return Promise.reject(
+        !isValidDimensions(dimensions)
+          ? new InvalidConnectionError()
+          : new StaleAttachError(),
+      );
+    }
 
-      await this.options.registry.close(request.sessionId);
-      const pty = this.options.ptyFactory.spawn(spec, request.dimensions);
+    const token = tokenOrRequest;
+    return this.mutex.runExclusive(token.sessionId, async () => {
+      const dependencies = this.requirePhaseTwo();
+      const record = this.currentRecord(token.sessionId);
+      if (
+        record === undefined ||
+        record.desiredState !== 'active' ||
+        token.generation !== this.generation(token.sessionId)
+      ) {
+        throw new StaleAttachError();
+      }
+      return this.attach(
+        token.sessionId,
+        socket,
+        dimensions,
+        dependencies.runtime,
+        true,
+      );
+    });
+  }
+
+  terminate(id: string): Promise<TabView> {
+    return this.mutex.runExclusive(id, async () => {
+      const dependencies = this.requireLifecycleTab(id);
+      this.incrementGeneration(id);
+      try {
+        await dependencies.store.setDesiredState(id, 'stopped');
+      } catch {
+        throw new OperationFailedError();
+      }
+
+      const failure = await this.stopRuntime(
+        id,
+        SESSION_STOPPED,
+        'session_stopped',
+        dependencies.runtime,
+      );
+      if (failure) {
+        throw new OperationFailedError(await this.viewBestEffort(id));
+      }
+      this.mark(id);
+      return this.viewFromRecord(
+        this.requireCurrentRecord(id),
+        await this.probeHealth(id),
+      );
+    });
+  }
+
+  recreate(id: string): Promise<TabView> {
+    return this.mutex.runExclusive(id, async () => {
+      const dependencies = this.requireLifecycleTab(id);
+      if (this.requireCurrentRecord(id).desiredState !== 'stopped') {
+        throw new InvalidSessionStateError();
+      }
+
+      let exists: boolean;
+      try {
+        exists = await dependencies.runtime.exists(id);
+      } catch {
+        throw new OperationFailedError();
+      }
+      if (exists) throw new InvalidSessionStateError();
+
+      this.incrementGeneration(id);
+      try {
+        await dependencies.runtime.prepare(id);
+        await dependencies.store.setDesiredState(id, 'active');
+      } catch {
+        await ignoreFailure(() => dependencies.runtime.kill(id));
+        throw new OperationFailedError();
+      }
+      this.incrementGeneration(id);
+      this.mark(id);
+      return this.viewFromRecord(
+        this.requireCurrentRecord(id),
+        await this.probeHealth(id),
+      );
+    });
+  }
+
+  restart(id: string): Promise<TabView> {
+    return this.mutex.runExclusive(id, async () => {
+      const dependencies = this.requireLifecycleTab(id);
+      this.incrementGeneration(id);
+      try {
+        await dependencies.store.setDesiredState(id, 'stopped');
+      } catch {
+        throw new OperationFailedError();
+      }
+
+      const stopFailed = await this.stopRuntime(
+        id,
+        SESSION_RESTARTING,
+        'session_restarting',
+        dependencies.runtime,
+      );
+      if (stopFailed) {
+        this.mark(id);
+        throw new OperationFailedError(await this.viewBestEffort(id));
+      }
+
+      try {
+        await dependencies.runtime.prepare(id);
+        await dependencies.store.setDesiredState(id, 'active');
+      } catch {
+        await ignoreFailure(() => dependencies.runtime.kill(id));
+        this.mark(id);
+        throw new OperationFailedError(await this.viewBestEffort(id));
+      }
+      this.incrementGeneration(id);
+      this.mark(id);
+      return this.viewFromRecord(
+        this.requireCurrentRecord(id),
+        await this.probeHealth(id),
+      );
+    });
+  }
+
+  restartBridge(id: string): Promise<TabView> {
+    return this.mutex.runExclusive(id, async () => {
+      this.requireLifecycleTab(id);
+      try {
+        await this.options.registry.close(id, BRIDGE_RESTART, 'bridge_restart');
+      } catch {
+        throw new OperationFailedError();
+      }
+      this.mark(id);
+      return this.viewFromRecord(
+        this.requireCurrentRecord(id),
+        await this.probeHealth(id),
+      );
+    });
+  }
+
+  closeTab(id: string): Promise<void> {
+    return this.mutex.runExclusive(id, async () => {
+      const dependencies = this.requireLifecycleTab(id);
+      this.incrementGeneration(id);
+      try {
+        await dependencies.store.setDesiredState(id, 'stopped');
+      } catch {
+        throw new OperationFailedError();
+      }
+      this.mark(id);
+
+      const failure = await this.stopRuntime(
+        id,
+        SESSION_STOPPED,
+        'session_stopped',
+        dependencies.runtime,
+      );
+      if (failure) {
+        await this.viewBestEffort(id);
+        throw new OperationFailedError();
+      }
+      try {
+        await dependencies.store.remove(id);
+      } catch {
+        await this.viewBestEffort(id);
+        throw new OperationFailedError();
+      }
+    });
+  }
+
+  async view(id: string): Promise<TabView> {
+    const dependencies = this.requireLifecycleTab(id);
+    const record = this.requireCurrentRecord(id);
+    return this.viewFromRecord(
+      record,
+      await this.probeHealth(id, dependencies.runtime),
+    );
+  }
+
+  async collectionView(): Promise<TabCollectionView> {
+    const { store, runtime } = this.requirePhaseTwo();
+    let snapshot: TabCollection;
+    try {
+      snapshot = store.snapshot();
+    } catch {
+      throw new OperationFailedError();
+    }
+    const registryEntries = this.options.registry.entries();
+    let active: ReadonlySet<string> | undefined;
+    try {
+      active = new Set(await runtime.listActiveSessionIds());
+    } catch {
+      active = undefined;
+    }
+    const bridges = new Map(
+      registryEntries.map((entry) => [entry.sessionId, entry] as const),
+    );
+    return immutableCollection({
+      structureRevision: snapshot.structureRevision,
+      tabs: snapshot.tabs.map((record) => {
+        const bridge = bridges.get(record.id);
+        return this.viewFromRecord(record, {
+          state:
+            active === undefined
+              ? 'unknown'
+              : active.has(record.id)
+                ? 'running'
+                : 'stopped',
+          attached: bridge !== undefined,
+          bridgePid: bridge?.pid ?? null,
+        });
+      }),
+    });
+  }
+
+  private async connectLegacy(request: ConnectRequest): Promise<BridgeOwner> {
+    return this.mutex.runExclusive(request.sessionId, () =>
+      this.attach(
+        request.sessionId,
+        request.socket,
+        request.dimensions,
+        this.options.preparer,
+        false,
+      ),
+    );
+  }
+
+  private async attach(
+    id: string,
+    socket: SocketPort,
+    dimensions: TerminalDimensions,
+    preparer: SessionPreparer,
+    markActivity: boolean,
+  ): Promise<BridgeOwner> {
+    try {
+      const spec = await preparer.prepare(id);
+      await this.options.registry.close(id);
+      const pty = this.options.ptyFactory.spawn(spec, dimensions);
       const bridge = this.options.bridgeFactory.create({
-        sessionId: request.sessionId,
-        socket: request.socket,
+        sessionId: id,
+        socket,
         pty,
       });
-      await this.options.registry.replace(request.sessionId, bridge);
+      await this.options.registry.replace(id, bridge);
+      if (markActivity) this.mark(id);
       return bridge;
+    } catch (error) {
+      if (error instanceof SessionManagerError) throw error;
+      throw new OperationFailedError();
+    }
+  }
+
+  private async stopRuntime(
+    id: string,
+    code: number,
+    reason: string,
+    runtime: SessionRuntimeController,
+  ): Promise<boolean> {
+    let failed = false;
+    try {
+      await this.options.registry.close(id, code, reason);
+    } catch {
+      failed = true;
+    }
+    try {
+      await runtime.kill(id);
+    } catch {
+      failed = true;
+    }
+    return failed;
+  }
+
+  private requirePhaseTwo(): {
+    store: SessionTabStore;
+    runtime: SessionRuntimeController;
+  } {
+    const store = this.options.store;
+    const runtime = asRuntimeController(this.options.preparer);
+    if (
+      store === undefined ||
+      this.options.activity === undefined ||
+      !runtime
+    ) {
+      throw new OperationFailedError();
+    }
+    return { store, runtime };
+  }
+
+  private requireLifecycleTab(id: string): {
+    store: SessionTabStore;
+    runtime: SessionRuntimeController;
+  } {
+    const dependencies = this.requirePhaseTwo();
+    if (!isSessionId(id)) {
+      throw new TabNotFoundError();
+    }
+    try {
+      if (!dependencies.store.has(id)) throw new TabNotFoundError();
+    } catch (error) {
+      if (error instanceof TabNotFoundError) throw error;
+      throw new OperationFailedError();
+    }
+    return dependencies;
+  }
+
+  private currentRecord(id: string): TabRecord | undefined {
+    const store = this.options.store;
+    if (store === undefined) return undefined;
+    try {
+      if (!store.has(id)) return undefined;
+      return findRecord(store.snapshot(), id);
+    } catch {
+      throw new OperationFailedError();
+    }
+  }
+
+  private requireCurrentRecord(id: string): TabRecord {
+    const record = this.currentRecord(id);
+    if (record === undefined) throw new TabNotFoundError();
+    return record;
+  }
+
+  private async probeHealth(
+    id: string,
+    runtime = this.requirePhaseTwo().runtime,
+  ): Promise<TabView['session']> {
+    const bridge = this.options.registry
+      .entries()
+      .find((entry) => entry.sessionId === id);
+    let state: TabView['session']['state'];
+    try {
+      state = (await runtime.exists(id)) ? 'running' : 'stopped';
+    } catch {
+      state = 'unknown';
+    }
+    return Object.freeze({
+      state,
+      attached: bridge !== undefined,
+      bridgePid: bridge?.pid ?? null,
     });
+  }
+
+  private async viewBestEffort(id: string): Promise<TabView | undefined> {
+    try {
+      return this.viewFromRecord(
+        this.requireCurrentRecord(id),
+        await this.probeHealth(id),
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
+  private viewFromRecord(
+    record: TabRecord,
+    session: TabView['session'],
+  ): TabView {
+    return Object.freeze({
+      ...record,
+      session: Object.freeze({ ...session }),
+    });
+  }
+
+  private generation(id: string): number {
+    return this.generations.get(id) ?? 0;
+  }
+
+  private incrementGeneration(id: string): void {
+    this.generations.set(id, this.generation(id) + 1);
+  }
+
+  private isIssuedToken(value: unknown): value is AttachToken {
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      this.issuedTokens.has(value) &&
+      Reflect.get(value, ATTACH_TOKEN_BRAND) === true
+    );
+  }
+
+  private mark(id: string): void {
+    try {
+      this.options.activity?.mark(id);
+    } catch {
+      // Activity is best-effort and must not change lifecycle outcomes.
+    }
   }
 }
 
-function isValidRequest(request: ConnectRequest): boolean {
-  const { cols, rows } = request.dimensions;
+function asRuntimeController(
+  preparer: SessionPreparer,
+): SessionRuntimeController | undefined {
+  const candidate = preparer as Partial<SessionRuntimeController>;
+  return typeof candidate.exists === 'function' &&
+    typeof candidate.kill === 'function' &&
+    typeof candidate.listActiveSessionIds === 'function' &&
+    typeof candidate.attachSpec === 'function'
+    ? (candidate as SessionRuntimeController)
+    : undefined;
+}
+
+function findRecord(
+  collection: TabCollection,
+  id: string,
+): TabRecord | undefined {
+  return collection.tabs.find((record) => record.id === id);
+}
+
+function isValidLegacyRequest(value: unknown): value is ConnectRequest {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<ConnectRequest>;
   return (
-    isSessionId(request.sessionId) &&
+    isSessionId(candidate.sessionId) &&
+    candidate.socket !== undefined &&
+    isValidDimensions(candidate.dimensions)
+  );
+}
+
+function isValidDimensions(
+  dimensions: TerminalDimensions | undefined,
+): dimensions is TerminalDimensions {
+  if (dimensions === undefined) return false;
+  const { cols, rows } = dimensions;
+  return (
     Number.isInteger(cols) &&
     cols >= MIN_COLS &&
     cols <= MAX_COLS &&
@@ -114,4 +649,21 @@ function isValidRequest(request: ConnectRequest): boolean {
     rows >= MIN_ROWS &&
     rows <= MAX_ROWS
   );
+}
+
+function immutableCollection(value: TabCollectionView): TabCollectionView {
+  const immutable: TabCollectionView = {
+    structureRevision: value.structureRevision,
+    tabs: [...value.tabs],
+  };
+  Object.freeze(immutable.tabs);
+  return Object.freeze(immutable);
+}
+
+async function ignoreFailure(operation: () => Promise<void>): Promise<void> {
+  try {
+    await operation();
+  } catch {
+    // Preserve the bounded primary operation error after best-effort cleanup.
+  }
 }
