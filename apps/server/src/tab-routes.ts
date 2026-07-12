@@ -134,7 +134,7 @@ export function createTabRouter(options: TabRouterOptions): Router {
     response.json(await options.sessions.restart(parseId(request.params.id)));
   });
 
-  router.post('/tabs/:id/session/bridge/restart', async (request, response) => {
+  router.post('/tabs/:id/bridge/restart', async (request, response) => {
     parseEmptyBody(request.body);
     response.json(
       await options.sessions.restartBridge(parseId(request.params.id)),

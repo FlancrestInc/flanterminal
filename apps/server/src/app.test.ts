@@ -6,11 +6,16 @@ import { tmpdir } from 'node:os';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { FIXED_SESSION_ID } from '@flanterminal/shared';
+import { FIXED_SESSION_ID, type TabView } from '@flanterminal/shared';
 
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
+import { TabNotFoundError as SessionTabNotFoundError } from './session-manager.js';
 import type { TabRouterOptions } from './tab-routes.js';
+import { SessionLimitError } from './tab-store.js';
+
+const PUBLIC_ORIGIN = 'http://localhost:3000';
+const NOW = '2026-07-12T00:00:00.000Z';
 
 let clientDist: string;
 let server: Server | undefined;
@@ -73,15 +78,144 @@ describe('createApp', () => {
   });
 
   it.each(['/terminal', '/'])(
-    'mounts optional tab routes beneath the API base for %s',
+    'mounts every tab lifecycle command beneath the API base for %s',
     async (basePath) => {
-      const response = await request(
-        basePath === '/' ? '/api/tabs' : `${basePath}/api/tabs`,
-        { basePath, tabs: true },
-      );
+      const api = apiPath(basePath);
+      const commands: ReadonlyArray<
+        readonly [string, string, BodyInit | undefined, number]
+      > = [
+        ['GET', `${api}/tabs`, undefined, 200],
+        ['POST', `${api}/tabs`, JSON.stringify({ displayName: 'Work' }), 201],
+        [
+          'PATCH',
+          `${api}/tabs/${FIXED_SESSION_ID}`,
+          JSON.stringify({ displayName: 'Logs' }),
+          200,
+        ],
+        [
+          'PUT',
+          `${api}/tabs/order`,
+          JSON.stringify({ structureRevision: 0, ids: [FIXED_SESSION_ID] }),
+          200,
+        ],
+        ['DELETE', `${api}/tabs/${FIXED_SESSION_ID}`, 'not-json', 204],
+        ['GET', `${api}/tabs/${FIXED_SESSION_ID}/session`, undefined, 200],
+        [
+          'POST',
+          `${api}/tabs/${FIXED_SESSION_ID}/session/terminate`,
+          '{}',
+          200,
+        ],
+        ['POST', `${api}/tabs/${FIXED_SESSION_ID}/session/recreate`, '{}', 200],
+        ['POST', `${api}/tabs/${FIXED_SESSION_ID}/session/restart`, '{}', 200],
+        ['POST', `${api}/tabs/${FIXED_SESSION_ID}/bridge/restart`, '{}', 200],
+      ];
 
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ structureRevision: 0, tabs: [] });
+      for (const [method, path, body, status] of commands) {
+        const response = await request(path, {
+          basePath,
+          tabs: true,
+          init: {
+            method,
+            ...(method === 'GET'
+              ? {}
+              : {
+                  headers:
+                    method === 'DELETE'
+                      ? { Origin: PUBLIC_ORIGIN }
+                      : jsonHeaders(),
+                }),
+            ...(body === undefined ? {} : { body }),
+          },
+        });
+
+        expect(response.status, `${method} ${path}`).toBe(status);
+      }
+    },
+  );
+
+  it.each(['/terminal', '/'])(
+    'enforces mounted tab security and stable errors for %s',
+    async (basePath) => {
+      const api = apiPath(basePath);
+      const cases: ReadonlyArray<
+        readonly [string, RequestInit, number, string, AppTabFailure?]
+      > = [
+        [
+          `${api}/tabs`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+          },
+          403,
+          'origin_forbidden',
+        ],
+        [
+          `${api}/tabs`,
+          {
+            method: 'POST',
+            headers: { Origin: PUBLIC_ORIGIN, 'Content-Type': 'text/plain' },
+            body: '{}',
+          },
+          415,
+          'json_required',
+        ],
+        [
+          `${api}/tabs`,
+          { method: 'POST', headers: jsonHeaders(), body: '{' },
+          400,
+          'invalid_request',
+        ],
+        [
+          `${api}/tabs`,
+          { method: 'POST', headers: jsonHeaders(), body: '{}' },
+          409,
+          'session_limit',
+          'create_conflict',
+        ],
+        [
+          `${api}/tabs/${FIXED_SESSION_ID}/session/restart`,
+          { method: 'POST', headers: jsonHeaders(), body: '{}' },
+          500,
+          'operation_failed',
+          'restart_failure',
+        ],
+        [
+          `${api}/tabs/${FIXED_SESSION_ID}/session`,
+          { method: 'GET' },
+          404,
+          'tab_not_found',
+          'view_not_found',
+        ],
+        [
+          `${api}/tabs/${FIXED_SESSION_ID}/session/bridge/restart`,
+          { method: 'POST', headers: jsonHeaders(), body: '{}' },
+          404,
+          'not_found',
+        ],
+      ];
+
+      for (const [path, init, status, error, tabFailure] of cases) {
+        const response = await request(path, {
+          basePath,
+          tabs: true,
+          init,
+          ...(tabFailure === undefined ? {} : { tabFailure }),
+        });
+        expect(response.status, path).toBe(status);
+        expect(await response.json()).toEqual({ error });
+      }
+
+      for (const [path, statuses] of [
+        [`${api}/tabs/%35${FIXED_SESSION_ID.slice(1)}/session`, [400]],
+        [`${api}/tabs/${FIXED_SESSION_ID}/session/`, [404]],
+        [`${api}/tabs/${FIXED_SESSION_ID.toUpperCase()}/session`, [400]],
+        [`${api}/tabs/${FIXED_SESSION_ID}%2F..%2Fother/session`, [404]],
+      ] as const) {
+        const response = await request(path, { basePath, tabs: true });
+        expect(statuses, path).toContain(response.status);
+      }
     },
   );
 
@@ -232,6 +366,8 @@ async function request(
     basePath?: string;
     redirect?: RequestRedirect;
     tabs?: boolean;
+    init?: RequestInit;
+    tabFailure?: AppTabFailure;
   } = {},
 ): Promise<Response> {
   if (server !== undefined) {
@@ -246,7 +382,9 @@ async function request(
       connectedWebSocketCount: vi.fn(() => 3),
     },
     clientDist,
-    ...(options.tabs === true ? { tabs: tabDependencies() } : {}),
+    ...(options.tabs === true
+      ? { tabs: tabDependencies(options.tabFailure) }
+      : {}),
   });
   server = createServer(app);
   server.listen(0, '127.0.0.1');
@@ -254,32 +392,74 @@ async function request(
   const address = server.address();
   if (address === null || typeof address === 'string')
     throw new Error('listen failed');
-  return fetch(
-    `http://127.0.0.1:${address.port}${path}`,
-    options.redirect === undefined ? {} : { redirect: options.redirect },
-  );
+  return fetch(`http://127.0.0.1:${address.port}${path}`, {
+    ...options.init,
+    ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
+  });
 }
 
-function tabDependencies(): Omit<TabRouterOptions, 'publicOrigin'> {
-  const unavailable = async (): Promise<never> => {
-    throw new Error('not used');
-  };
+type AppTabFailure = 'create_conflict' | 'restart_failure' | 'view_not_found';
+
+function tabDependencies(
+  failure?: AppTabFailure,
+): Omit<TabRouterOptions, 'publicOrigin'> {
   return {
     store: {
-      create: unavailable,
-      rename: unavailable,
-      reorder: unavailable,
+      create: vi.fn(async (displayName) => {
+        if (failure === 'create_conflict') throw new SessionLimitError();
+        return tabRecord(displayName ?? 'Terminal 1');
+      }),
+      rename: vi.fn(async (_id, displayName) => tabRecord(displayName)),
+      reorder: vi.fn(async () => ({
+        structureRevision: 1,
+        tabs: [tabRecord()],
+      })),
     },
     sessions: {
-      collectionView: vi.fn(async () => ({ structureRevision: 0, tabs: [] })),
-      view: unavailable,
-      terminate: unavailable,
-      recreate: unavailable,
-      restart: unavailable,
-      restartBridge: unavailable,
-      closeTab: unavailable,
+      collectionView: vi.fn(async () => ({
+        structureRevision: 0,
+        tabs: [appTabView()],
+      })),
+      view: vi.fn(async () => {
+        if (failure === 'view_not_found') throw new SessionTabNotFoundError();
+        return appTabView();
+      }),
+      terminate: vi.fn(async () => appTabView('stopped')),
+      recreate: vi.fn(async () => appTabView()),
+      restart: vi.fn(async () => {
+        if (failure === 'restart_failure') throw new Error('private output');
+        return appTabView();
+      }),
+      restartBridge: vi.fn(async () => appTabView()),
+      closeTab: vi.fn(async () => undefined),
     },
   };
+}
+
+function tabRecord(displayName = 'Terminal 1') {
+  return {
+    id: FIXED_SESSION_ID,
+    displayName,
+    position: 0,
+    createdAt: NOW,
+    lastActivityAt: NOW,
+    desiredState: 'active' as const,
+  };
+}
+
+function appTabView(state: TabView['session']['state'] = 'running'): TabView {
+  return {
+    ...tabRecord(),
+    session: { state, attached: false, bridgePid: null },
+  };
+}
+
+function apiPath(basePath: string): string {
+  return basePath === '/' ? '/api' : `${basePath}/api`;
+}
+
+function jsonHeaders(): Record<string, string> {
+  return { Origin: PUBLIC_ORIGIN, 'Content-Type': 'application/json' };
 }
 
 function config(basePath: string) {

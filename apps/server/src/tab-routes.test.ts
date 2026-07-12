@@ -154,7 +154,6 @@ describe('createTabRouter', () => {
     ['terminate', 'terminate', 'stopped'],
     ['recreate', 'recreate', 'running'],
     ['restart', 'restart', 'running'],
-    ['bridge/restart', 'restartBridge', 'running'],
   ] as const)(
     'dispatches session %s with an exact empty body',
     async (path, method, state) => {
@@ -169,6 +168,29 @@ describe('createTabRouter', () => {
       expect(sessions[method]).toHaveBeenCalledWith(FIXED_SESSION_ID);
     },
   );
+
+  it('restarts a bridge at the tab-level route', async () => {
+    const response = await mutation(
+      `/api/tabs/${FIXED_SESSION_ID}/bridge/restart`,
+      'POST',
+      {},
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(view(FIXED_SESSION_ID));
+    expect(sessions.restartBridge).toHaveBeenCalledWith(FIXED_SESSION_ID);
+  });
+
+  it('does not accept the obsolete session bridge route', async () => {
+    const response = await mutation(
+      `/api/tabs/${FIXED_SESSION_ID}/session/bridge/restart`,
+      'POST',
+      {},
+    );
+
+    expect(response.status).toBe(404);
+    expect(sessions.restartBridge).not.toHaveBeenCalled();
+  });
 
   it.each([
     ['POST', '/api/tabs', { unexpected: true }],
