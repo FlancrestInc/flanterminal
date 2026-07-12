@@ -207,15 +207,19 @@ export class TerminalBridge implements BridgeOwner {
 
   private sendLifecycleError(): void {
     if (this.closed || !this.socketIsOpen()) return;
-    if (this.options.socket.bufferedAmount > this.maxBufferedBytes) return;
     const message: ServerMessage = {
       v: PROTOCOL_VERSION,
       type: 'error',
       sessionId: this.options.sessionId,
       code: 'terminal_unavailable',
     };
+    const serialized = JSON.stringify(message);
+    const pendingBytes =
+      this.options.socket.bufferedAmount +
+      Buffer.byteLength(serialized, 'utf8');
+    if (pendingBytes >= this.maxBufferedBytes) return;
     try {
-      this.options.socket.send(JSON.stringify(message));
+      this.options.socket.send(serialized);
     } catch {
       this.options.logger.error('terminal_send_failed', {
         sessionId: this.options.sessionId,

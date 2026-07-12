@@ -159,6 +159,33 @@ describe('TerminalBridge', () => {
     });
   });
 
+  it.each([
+    ['above', -1, false],
+    ['at', 0, false],
+    ['below', 1, true],
+  ] as const)(
+    'sends a lifecycle error only when pending UTF-8 bytes stay %s the limit',
+    (_boundary, limitOffset, shouldSend) => {
+      const frame = JSON.stringify({
+        v: 1,
+        type: 'error',
+        sessionId: SESSION_ID,
+        code: 'terminal_unavailable',
+      });
+      const frameBytes = new TextEncoder().encode(frame).byteLength;
+      const socket = new FakeSocket();
+      socket.bufferedAmount = 7;
+      const pty = new FakePty();
+      createBridge(socket, pty, undefined, 7 + frameBytes + limitOffset);
+
+      pty.emitExit({ exitCode: 1 });
+
+      expect(socket.sent).toEqual(shouldSend ? [frame] : []);
+      expect(socket.close).toHaveBeenCalledWith(1011, 'terminal_exited');
+      expect(pty.kill).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each(['close', 'error'] as const)('cleans up on socket %s', (event) => {
     const socket = new FakeSocket();
     const pty = new FakePty();
