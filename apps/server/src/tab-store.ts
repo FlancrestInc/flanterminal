@@ -305,11 +305,24 @@ export class TabStore {
         throw new Error('Invalid tab store document');
       }
       const buffer = Buffer.alloc(MAX_DOCUMENT_BYTES + 1);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
-      if (bytesRead > MAX_DOCUMENT_BYTES) {
+      let totalBytesRead = 0;
+      while (totalBytesRead < buffer.byteLength) {
+        const { bytesRead } = await handle.read(
+          buffer,
+          totalBytesRead,
+          buffer.byteLength - totalBytesRead,
+          totalBytesRead,
+        );
+        if (bytesRead === 0) break;
+        if (bytesRead < 0 || bytesRead > buffer.byteLength - totalBytesRead) {
+          throw new Error('Invalid tab store document');
+        }
+        totalBytesRead += bytesRead;
+      }
+      if (totalBytesRead > MAX_DOCUMENT_BYTES) {
         throw new Error('Invalid tab store document');
       }
-      bytes = buffer.subarray(0, bytesRead);
+      bytes = buffer.subarray(0, totalBytesRead);
     } finally {
       await handle.close();
     }

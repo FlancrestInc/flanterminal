@@ -107,12 +107,13 @@ describe('TabStore', () => {
       tabs: [{ displayName: 'Original' }],
     });
     expect(fs.entry('/data/tabs.json')?.content).toBe('{replacement');
-    expect(fs.operations.slice(0, 4)).toEqual([
+    expect(fs.operations.slice(0, 3)).toEqual([
       `open-read /data/tabs.json flags=${O_RDONLY | O_NOFOLLOW}`,
       'handle-stat /data/tabs.json',
       'handle-read /data/tabs.json length=65537',
-      'close-read /data/tabs.json',
     ]);
+    expect(fs.operations[3]).toMatch(/^handle-read .* length=\d+$/);
+    expect(fs.operations[4]).toBe('close-read /data/tabs.json');
   });
 
   it('rejects a symlink at no-follow open without reading it', async () => {
@@ -141,6 +142,27 @@ describe('TabStore', () => {
 
     expect(fs.operations).toContain('handle-read /data/tabs.json length=65537');
     expect(fs.operations).toContain('close-read /data/tabs.json');
+  });
+
+  it('reads a valid primary across multiple short positional reads', async () => {
+    const fs = new MemoryFileSystem({
+      '/data/tabs.json': JSON.stringify(
+        document([record(IDS[0], 0, 'Chunked')], 4),
+      ),
+    });
+    fs.maxReadChunk = 7;
+
+    const store = makeStore(fs);
+    await store.initialize();
+
+    expect(store.snapshot()).toMatchObject({
+      structureRevision: 4,
+      tabs: [{ displayName: 'Chunked' }],
+    });
+    expect(
+      fs.operations.filter((operation) => operation.startsWith('handle-read '))
+        .length,
+    ).toBeGreaterThan(1);
   });
 
   it('rejects a valid document that exceeds the configured session limit', async () => {
@@ -555,6 +577,7 @@ class MemoryFileSystem implements TabStoreFileSystem {
   collisionPath: string | undefined;
   directoryCloseError: Error | undefined;
   directorySyncError: Error | undefined;
+  maxReadChunk: number | undefined;
   primaryStatSizeOverride: number | undefined;
   replacePrimaryAfterOpen: Entry | undefined;
   failNext:
@@ -666,11 +689,16 @@ class MemoryFileSystem implements TabStoreFileSystem {
             isFile: () => openedEntry.kind === 'file',
           };
         },
-        read: async (buffer, offset, length) => {
+        read: async (buffer, offset, length, position) => {
           this.operations.push(`handle-read ${path} length=${length}`);
           const bytes = Buffer.from(openedEntry.content);
-          const bytesRead = Math.min(length, bytes.byteLength);
-          bytes.copy(buffer, offset, 0, bytesRead);
+          const available = Math.max(0, bytes.byteLength - position);
+          const bytesRead = Math.min(
+            length,
+            available,
+            this.maxReadChunk ?? Number.POSITIVE_INFINITY,
+          );
+          bytes.copy(buffer, offset, position, position + bytesRead);
           return { bytesRead };
         },
         writeFile: async () => undefined,
