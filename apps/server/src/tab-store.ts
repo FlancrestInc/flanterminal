@@ -1,5 +1,6 @@
 import { randomUUID as nodeRandomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { O_NOFOLLOW, O_RDONLY } from 'node:constants';
 import * as fs from 'node:fs/promises';
 import { join } from 'node:path';
 import { TextDecoder } from 'node:util';
@@ -65,6 +66,16 @@ export type DurabilityEvent = Readonly<{
 }>;
 
 export interface TabStoreFileHandle {
+  stat(): Promise<{
+    size: number;
+    isFile(): boolean;
+  }>;
+  read(
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<{ bytesRead: number }>;
   writeFile(data: string | Uint8Array): Promise<void>;
   sync(): Promise<void>;
   close(): Promise<void>;
@@ -77,12 +88,11 @@ export interface TabStoreFileSystem {
     isFile(): boolean;
     isSymbolicLink(): boolean;
   }>;
-  readFile(path: string): Promise<Uint8Array>;
   readdir(path: string): Promise<string[]>;
   unlink(path: string): Promise<void>;
   open(
     path: string,
-    flags: 'wx' | 'r',
+    flags: 'wx' | 'r' | number,
     mode?: number,
   ): Promise<TabStoreFileHandle>;
   rename(from: string, to: string): Promise<void>;
@@ -100,7 +110,6 @@ export type TabStoreOptions = Readonly<{
 const nodeFileSystem: TabStoreFileSystem = {
   mkdir: (path, options) => fs.mkdir(path, options),
   lstat: (path) => fs.lstat(path),
-  readFile: (path) => fs.readFile(path),
   readdir: (path) => fs.readdir(path),
   unlink: (path) => fs.unlink(path),
   open: (path, flags, mode) => fs.open(path, flags, mode),
@@ -116,7 +125,7 @@ export class TabStore {
     ((event: DurabilityEvent) => void) | undefined;
   private document: PersistedTabsDocument | undefined;
   private mutationTail: Promise<void> = Promise.resolve();
-  private ready = true;
+  private ready = false;
 
   constructor(private readonly options: TabStoreOptions) {
     this.primaryPath = join(options.dataDir, PRIMARY_FILENAME);
@@ -139,6 +148,7 @@ export class TabStore {
       let document: PersistedTabsDocument;
       try {
         document = await this.readPrimary();
+        this.ready = true;
       } catch (error) {
         if (!isErrorCode(error, 'ENOENT')) throw error;
         const timestamp = this.now();
@@ -284,16 +294,24 @@ export class TabStore {
   }
 
   private async readPrimary(): Promise<PersistedTabsDocument> {
-    const stat = await this.fileSystem.lstat(this.primaryPath);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      throw new Error('Invalid tab store document');
-    }
-    if (stat.size > MAX_DOCUMENT_BYTES) {
-      throw new Error('Invalid tab store document');
-    }
-    const bytes = await this.fileSystem.readFile(this.primaryPath);
-    if (bytes.byteLength > MAX_DOCUMENT_BYTES) {
-      throw new Error('Invalid tab store document');
+    const handle = await this.fileSystem.open(
+      this.primaryPath,
+      O_RDONLY | O_NOFOLLOW,
+    );
+    let bytes: Uint8Array;
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size > MAX_DOCUMENT_BYTES) {
+        throw new Error('Invalid tab store document');
+      }
+      const buffer = Buffer.alloc(MAX_DOCUMENT_BYTES + 1);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, 0);
+      if (bytesRead > MAX_DOCUMENT_BYTES) {
+        throw new Error('Invalid tab store document');
+      }
+      bytes = buffer.subarray(0, bytesRead);
+    } finally {
+      await handle.close();
     }
     try {
       const document = parseDocument(

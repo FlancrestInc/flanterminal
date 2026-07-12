@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { O_NOFOLLOW, O_RDONLY } from 'node:constants';
 import { posix } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
@@ -57,6 +58,89 @@ describe('TabStore', () => {
 
     expect(store.snapshot()).toEqual({ structureRevision: 8, tabs: [] });
     expect(fs.operations).not.toContainEqual(expect.stringMatching(/^rename /));
+    expect(store.durabilityReady()).toBe(true);
+  });
+
+  it('is not durability-ready before initialization or after invalid startup', async () => {
+    const fs = new MemoryFileSystem({ '/data/tabs.json': '{bad' });
+    const store = makeStore(fs);
+
+    expect(store.durabilityReady()).toBe(false);
+    await expect(store.initialize()).rejects.toThrow(
+      'Invalid tab store document',
+    );
+    expect(store.durabilityReady()).toBe(false);
+  });
+
+  it('is not durability-ready when initial primary creation fails before commit', async () => {
+    const fs = new MemoryFileSystem();
+    fs.failNext = 'file-sync';
+    const store = makeStore(fs);
+
+    await expect(store.initialize()).rejects.toThrow('file-sync failed');
+
+    expect(store.durabilityReady()).toBe(false);
+  });
+
+  it('becomes durability-ready after initial commit with unsupported directory sync', async () => {
+    const fs = new MemoryFileSystem();
+    fs.directorySyncError = nodeError('ENOTSUP');
+    const store = makeStore(fs);
+
+    await store.initialize();
+
+    expect(store.durabilityReady()).toBe(true);
+  });
+
+  it('validates and reads the originally opened primary after pathname replacement', async () => {
+    const original = JSON.stringify(
+      document([record(IDS[0], 0, 'Original')], 3),
+    );
+    const fs = new MemoryFileSystem({ '/data/tabs.json': original });
+    fs.replacePrimaryAfterOpen = { kind: 'file', content: '{replacement' };
+    const store = makeStore(fs);
+
+    await store.initialize();
+
+    expect(store.snapshot()).toMatchObject({
+      structureRevision: 3,
+      tabs: [{ displayName: 'Original' }],
+    });
+    expect(fs.entry('/data/tabs.json')?.content).toBe('{replacement');
+    expect(fs.operations.slice(0, 4)).toEqual([
+      `open-read /data/tabs.json flags=${O_RDONLY | O_NOFOLLOW}`,
+      'handle-stat /data/tabs.json',
+      'handle-read /data/tabs.json length=65537',
+      'close-read /data/tabs.json',
+    ]);
+  });
+
+  it('rejects a symlink at no-follow open without reading it', async () => {
+    const fs = new MemoryFileSystem({
+      '/data/tabs.json': { kind: 'symlink', content: '{}' },
+    });
+
+    await expect(makeStore(fs).initialize()).rejects.toMatchObject({
+      code: 'ELOOP',
+    });
+
+    expect(fs.operations).toEqual([
+      `open-read /data/tabs.json flags=${O_RDONLY | O_NOFOLLOW}`,
+    ]);
+  });
+
+  it('rejects content that grows beyond the bounded handle read', async () => {
+    const fs = new MemoryFileSystem({
+      '/data/tabs.json': 'x'.repeat(65_537),
+    });
+    fs.primaryStatSizeOverride = 1;
+
+    await expect(makeStore(fs).initialize()).rejects.toThrow(
+      'Invalid tab store document',
+    );
+
+    expect(fs.operations).toContain('handle-read /data/tabs.json length=65537');
+    expect(fs.operations).toContain('close-read /data/tabs.json');
   });
 
   it('rejects a valid document that exceeds the configured session limit', async () => {
@@ -470,6 +554,9 @@ class MemoryFileSystem implements TabStoreFileSystem {
   collideNextOpen = false;
   collisionPath: string | undefined;
   directoryCloseError: Error | undefined;
+  directorySyncError: Error | undefined;
+  primaryStatSizeOverride: number | undefined;
+  replacePrimaryAfterOpen: Entry | undefined;
   failNext:
     | 'open-wx'
     | 'write'
@@ -554,12 +641,50 @@ class MemoryFileSystem implements TabStoreFileSystem {
 
   async open(
     path: string,
-    flags: 'wx' | 'r',
+    flags: 'wx' | 'r' | number,
     mode?: number,
   ): Promise<TabStoreFileHandle> {
+    if (typeof flags === 'number') {
+      this.operations.push(`open-read ${path} flags=${flags}`);
+      const entry = this.entries.get(path);
+      if (!entry) throw nodeError('ENOENT');
+      if (entry.kind === 'symlink' && (flags & O_NOFOLLOW) !== 0) {
+        throw nodeError('ELOOP');
+      }
+      const openedEntry = entry;
+      if (this.replacePrimaryAfterOpen) {
+        this.entries.set(path, this.replacePrimaryAfterOpen);
+        this.replacePrimaryAfterOpen = undefined;
+      }
+      return {
+        stat: async () => {
+          this.operations.push(`handle-stat ${path}`);
+          return {
+            size:
+              this.primaryStatSizeOverride ??
+              Buffer.byteLength(openedEntry.content),
+            isFile: () => openedEntry.kind === 'file',
+          };
+        },
+        read: async (buffer, offset, length) => {
+          this.operations.push(`handle-read ${path} length=${length}`);
+          const bytes = Buffer.from(openedEntry.content);
+          const bytesRead = Math.min(length, bytes.byteLength);
+          bytes.copy(buffer, offset, 0, bytesRead);
+          return { bytesRead };
+        },
+        writeFile: async () => undefined,
+        sync: async () => undefined,
+        close: async () => {
+          this.operations.push(`close-read ${path}`);
+        },
+      };
+    }
     if (flags === 'r') {
       this.operations.push(`open-dir ${path}`);
       return {
+        stat: async () => ({ size: 0, isFile: () => false }),
+        read: async () => ({ bytesRead: 0 }),
         writeFile: async () => undefined,
         sync: async () => {
           this.operations.push(`dir-sync ${path}`);
@@ -567,6 +692,7 @@ class MemoryFileSystem implements TabStoreFileSystem {
             this.failNext = undefined;
             throw new Error('dir-sync failed');
           }
+          if (this.directorySyncError) throw this.directorySyncError;
         },
         close: async () => {
           this.operations.push(`close-dir ${path}`);
@@ -588,6 +714,11 @@ class MemoryFileSystem implements TabStoreFileSystem {
     }
     this.entries.set(path, { kind: 'file', content: '' });
     return {
+      stat: async () => ({
+        size: Buffer.byteLength(this.entries.get(path)?.content ?? ''),
+        isFile: () => true,
+      }),
+      read: async () => ({ bytesRead: 0 }),
       writeFile: async (data) => {
         this.operations.push(`write ${path}`);
         this.markWriteStarted?.();
