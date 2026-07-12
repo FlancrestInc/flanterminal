@@ -18,6 +18,7 @@ const config: ClientConfig = {
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 8,
 };
+const DYNAMIC_SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
 
 class FakeSocket extends EventTarget implements BrowserSocket {
   static readonly CONNECTING = 0;
@@ -106,6 +107,33 @@ describe('useTerminalSocket', () => {
       sockets[0]!.message(readyMessage());
     });
     expect(result.current.status).toBe('connected');
+  });
+
+  it('uses an explicit dynamic tab ID for the URL and every frame', () => {
+    const sockets: FakeSocket[] = [];
+    const factory = vi.fn(() => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    });
+    const { result } = renderHook(() =>
+      useTerminalSocket(config, DYNAMIC_SESSION_ID, { socketFactory: factory }),
+    );
+
+    expect(factory).toHaveBeenCalledWith(
+      `ws://${window.location.host}/tools/terminal/ws/sessions/${DYNAMIC_SESSION_ID}`,
+    );
+    act(() => {
+      sockets[0]!.open();
+      sockets[0]!.message(
+        JSON.stringify({ v: 1, type: 'ready', sessionId: DYNAMIC_SESSION_ID }),
+      );
+      result.current.sendInput('pwd\n');
+    });
+    expect(JSON.parse(sockets[0]!.sent[0]!)).toMatchObject({
+      sessionId: DYNAMIC_SESSION_ID,
+      data: 'pwd\n',
+    });
   });
 
   it('sends versioned input and resize only while open and never replays input', () => {
@@ -278,6 +306,48 @@ describe('useTerminalSocket', () => {
     act(() => result.current.reconnect());
     expect(factory).toHaveBeenCalledTimes(2);
     expect(result.current.status).toBe('connecting');
+  });
+
+  it('retries a bridge restart but waits after session stop or restart', () => {
+    const onSessionStopped = vi.fn();
+    const onSessionRestarting = vi.fn();
+    const sockets: FakeSocket[] = [];
+    const factory = vi.fn(() => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    });
+    const { result } = renderHook(() =>
+      useTerminalSocket(config, DYNAMIC_SESSION_ID, {
+        socketFactory: factory,
+        onSessionStopped,
+        onSessionRestarting,
+      }),
+    );
+
+    act(() =>
+      sockets[0]!.dispatchEvent(new CloseEvent('close', { code: 4010 })),
+    );
+    expect(result.current.status).toBe('reconnecting');
+    act(() => vi.advanceTimersByTime(500));
+    expect(factory).toHaveBeenCalledTimes(2);
+
+    act(() =>
+      sockets[1]!.dispatchEvent(new CloseEvent('close', { code: 4011 })),
+    );
+    expect(result.current.status).toBe('disconnected');
+    expect(onSessionStopped).toHaveBeenCalledOnce();
+    act(() => vi.runAllTimers());
+    expect(factory).toHaveBeenCalledTimes(2);
+
+    act(() => result.current.reconnect());
+    act(() =>
+      sockets[2]!.dispatchEvent(new CloseEvent('close', { code: 4012 })),
+    );
+    expect(result.current.status).toBe('disconnected');
+    expect(onSessionRestarting).toHaveBeenCalledOnce();
+    act(() => vi.runAllTimers());
+    expect(factory).toHaveBeenCalledTimes(3);
   });
 
   it('stops on unmount and ignores events from replaced sockets', () => {

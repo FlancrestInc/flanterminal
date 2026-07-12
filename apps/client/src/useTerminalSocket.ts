@@ -1,5 +1,9 @@
 import {
+  BRIDGE_RESTART,
   PROTOCOL_VERSION,
+  SESSION_REPLACED,
+  SESSION_RESTARTING,
+  SESSION_STOPPED,
   parseServerMessage,
   type ClientConfig,
   type ClientMessage,
@@ -20,6 +24,8 @@ export type SocketFactory = (url: string) => BrowserSocket;
 export interface TerminalSocketDependencies {
   readonly socketFactory?: SocketFactory;
   readonly location?: Pick<Location, 'host' | 'protocol'>;
+  readonly onSessionStopped?: () => void;
+  readonly onSessionRestarting?: () => void;
 }
 
 export interface TerminalSocketController {
@@ -35,7 +41,6 @@ export interface TerminalSocketController {
 const OPEN = 1;
 const INITIAL_RETRY_DELAY_MS = 500;
 const INITIAL_RETRY_STEPS = 5;
-const SESSION_REPLACED_CLOSE_CODE = 4001;
 const PROTOCOL_ERROR = 'Terminal connection protocol error.';
 const SERVER_ERROR = 'Terminal server reported an error.';
 const SESSION_REPLACED_ERROR =
@@ -44,17 +49,58 @@ const defaultSocketFactory: SocketFactory = (url) => new WebSocket(url);
 
 export function terminalSocketUrl(
   config: Pick<ClientConfig, 'basePath' | 'sessionId'>,
-  location: Pick<Location, 'host' | 'protocol'> = window.location,
+  location?: Pick<Location, 'host' | 'protocol'>,
+): string;
+export function terminalSocketUrl(
+  config: Pick<ClientConfig, 'basePath'>,
+  sessionId: string,
+  location?: Pick<Location, 'host' | 'protocol'>,
+): string;
+export function terminalSocketUrl(
+  config: Pick<ClientConfig, 'basePath'> &
+    Partial<Pick<ClientConfig, 'sessionId'>>,
+  sessionIdOrLocation:
+    string | Pick<Location, 'host' | 'protocol'> = window.location,
+  explicitLocation: Pick<Location, 'host' | 'protocol'> = window.location,
 ): string {
+  const sessionId =
+    typeof sessionIdOrLocation === 'string'
+      ? sessionIdOrLocation
+      : config.sessionId;
+  if (sessionId === undefined) throw new Error('Terminal session missing');
+  const location =
+    typeof sessionIdOrLocation === 'string'
+      ? explicitLocation
+      : sessionIdOrLocation;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const basePath = config.basePath === '/' ? '' : config.basePath;
-  return `${protocol}//${location.host}${basePath}/ws/sessions/${encodeURIComponent(config.sessionId)}`;
+  return `${protocol}//${location.host}${basePath}/ws/sessions/${encodeURIComponent(sessionId)}`;
 }
 
 export function useTerminalSocket(
   config: ClientConfig,
-  dependencies: TerminalSocketDependencies = {},
+  dependencies?: TerminalSocketDependencies,
+): TerminalSocketController;
+export function useTerminalSocket(
+  config: ClientConfig,
+  sessionId: string,
+  dependencies?: TerminalSocketDependencies,
+): TerminalSocketController;
+export function useTerminalSocket(
+  config: ClientConfig,
+  sessionIdOrDependencies: string | TerminalSocketDependencies = {},
+  explicitDependencies: TerminalSocketDependencies = {},
 ): TerminalSocketController {
+  const sessionId =
+    typeof sessionIdOrDependencies === 'string'
+      ? sessionIdOrDependencies
+      : config.sessionId;
+  const dependencies =
+    typeof sessionIdOrDependencies === 'string'
+      ? explicitDependencies
+      : sessionIdOrDependencies;
+  const onSessionStopped = dependencies.onSessionStopped;
+  const onSessionRestarting = dependencies.onSessionRestarting;
   const factory = dependencies.socketFactory ?? defaultSocketFactory;
   const location = dependencies.location ?? window.location;
   const [status, setStatus] = useState<ConnectionStatus>('connecting');
@@ -108,10 +154,7 @@ export function useTerminalSocket(
     let socket: BrowserSocket;
     try {
       socket = factory(
-        terminalSocketUrl(
-          { basePath: config.basePath, sessionId: config.sessionId },
-          location,
-        ),
+        terminalSocketUrl({ basePath: config.basePath }, sessionId, location),
       );
     } catch {
       socketRef.current = null;
@@ -127,6 +170,12 @@ export function useTerminalSocket(
       if (!isCurrent()) return;
       const result = parseServerMessage((event as MessageEvent<unknown>).data);
       if (!result.success) {
+        setStatus('error');
+        setError(PROTOCOL_ERROR);
+        socket.close(1002, 'Protocol error');
+        return;
+      }
+      if (result.data.sessionId !== sessionId) {
         setStatus('error');
         setError(PROTOCOL_ERROR);
         socket.close(1002, 'Protocol error');
@@ -153,11 +202,25 @@ export function useTerminalSocket(
     const onClose = (event: Event) => {
       if (!isCurrent()) return;
       socketRef.current = null;
-      if ((event as CloseEvent).code === SESSION_REPLACED_CLOSE_CODE) {
+      const code = (event as CloseEvent).code;
+      if (code === SESSION_REPLACED) {
         stoppedRef.current = true;
         cancelRetry();
         setStatus('disconnected');
         setError(SESSION_REPLACED_ERROR);
+        return;
+      }
+      if (code === SESSION_STOPPED || code === SESSION_RESTARTING) {
+        stoppedRef.current = true;
+        cancelRetry();
+        setStatus('disconnected');
+        setError(null);
+        if (code === SESSION_STOPPED) onSessionStopped?.();
+        else onSessionRestarting?.();
+        return;
+      }
+      if (code === BRIDGE_RESTART) {
+        scheduleRetry();
         return;
       }
       if (stoppedRef.current) {
@@ -174,10 +237,12 @@ export function useTerminalSocket(
   }, [
     cancelRetry,
     config.basePath,
-    config.sessionId,
     factory,
     location,
+    onSessionRestarting,
+    onSessionStopped,
     scheduleRetry,
+    sessionId,
   ]);
   useEffect(() => {
     connectRef.current = connect;
@@ -208,10 +273,10 @@ export function useTerminalSocket(
       send({
         v: PROTOCOL_VERSION,
         type: 'input',
-        sessionId: config.sessionId,
+        sessionId,
         data,
       }),
-    [config.sessionId, send],
+    [send, sessionId],
   );
 
   const sendResize = useCallback(
@@ -219,11 +284,11 @@ export function useTerminalSocket(
       send({
         v: PROTOCOL_VERSION,
         type: 'resize',
-        sessionId: config.sessionId,
+        sessionId,
         cols,
         rows,
       }),
-    [config.sessionId, send],
+    [send, sessionId],
   );
 
   const subscribeOutput = useCallback((listener: (data: string) => void) => {
