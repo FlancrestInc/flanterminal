@@ -251,6 +251,48 @@ describe('BridgeRegistry', () => {
     expect(rejected.close).toHaveBeenCalledWith(1001, 'server_shutdown');
   });
 
+  it('seals close and remove behind an in-progress shutdown', async () => {
+    let finishShutdownClose: (() => void) | undefined;
+    const current = owner(
+      new Promise<void>((resolve) => {
+        finishShutdownClose = resolve;
+      }),
+    );
+    const registry = new BridgeRegistry();
+    await registry.replace('550e8400-e29b-41d4-a716-446655440000', current);
+
+    const closingAll = registry.closeAll();
+    await vi.waitFor(() => expect(current.close).toHaveBeenCalledOnce());
+    let closeFinished = false;
+    let removeFinished = false;
+    const closingOne = registry
+      .close('550e8400-e29b-41d4-a716-446655440000')
+      .then(() => {
+        closeFinished = true;
+      });
+    const removing = registry
+      .remove('550e8400-e29b-41d4-a716-446655440000', current)
+      .then(() => {
+        removeFinished = true;
+      });
+
+    await Promise.resolve();
+    expect(current.close).toHaveBeenCalledOnce();
+    expect(registry.get('550e8400-e29b-41d4-a716-446655440000')).toBe(current);
+    expect(closeFinished).toBe(false);
+    expect(removeFinished).toBe(false);
+
+    finishShutdownClose?.();
+    await Promise.all([closingAll, closingOne, removing]);
+
+    expect(current.close).toHaveBeenCalledOnce();
+    expect(
+      registry.get('550e8400-e29b-41d4-a716-446655440000'),
+    ).toBeUndefined();
+    expect(closeFinished).toBe(true);
+    expect(removeFinished).toBe(true);
+  });
+
   it('returns an immutable runtime snapshot containing only session health', async () => {
     const registry = new BridgeRegistry();
     const attached = owner(undefined, 4321);

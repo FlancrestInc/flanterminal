@@ -61,6 +61,7 @@ export class BridgeRegistry {
   }
 
   remove(sessionId: string, owner: BridgeOwner): Promise<void> {
+    if (this.shuttingDown) return this.shutdownBarrier;
     return this.serialize(sessionId, () => {
       if (this.owners.get(sessionId) === owner) this.owners.delete(sessionId);
     });
@@ -71,6 +72,7 @@ export class BridgeRegistry {
     code = 4001,
     reason = 'session_replaced',
   ): Promise<void> {
+    if (this.shuttingDown) return this.shutdownBarrier;
     return this.serialize(sessionId, async () => {
       const owner = this.owners.get(sessionId);
       if (owner === undefined) return;
