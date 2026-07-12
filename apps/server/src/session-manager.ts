@@ -283,7 +283,7 @@ export class SessionManager {
       try {
         exists = await dependencies.runtime.exists(id);
       } catch {
-        throw new OperationFailedError();
+        throw new InvalidSessionStateError();
       }
       if (exists) throw new InvalidSessionStateError();
 
@@ -376,14 +376,12 @@ export class SessionManager {
         dependencies.runtime,
       );
       if (failure) {
-        await this.viewBestEffort(id);
-        throw new OperationFailedError();
+        throw new OperationFailedError(await this.viewBestEffort(id));
       }
       try {
         await dependencies.store.remove(id);
       } catch {
-        await this.viewBestEffort(id);
-        throw new OperationFailedError();
+        throw new OperationFailedError(await this.viewBestEffort(id));
       }
     });
   }

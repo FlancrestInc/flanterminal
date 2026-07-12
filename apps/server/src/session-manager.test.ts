@@ -203,6 +203,46 @@ describe('SessionManager Phase 2 lifecycle', () => {
     expect(harness.activity.mark).toHaveBeenCalledWith(TAB_A);
   });
 
+  it('reports a fresh stopped view when terminate bridge close fails and releases the mutex', async () => {
+    const harness = createHarness();
+    vi.mocked(harness.registry.close).mockRejectedValueOnce(
+      new Error('bridge secret output'),
+    );
+
+    const error = await rejected(harness.manager.terminate(TAB_A));
+
+    expect(error).toBeInstanceOf(OperationFailedError);
+    expect(error).toMatchObject({
+      code: 'operation_failed',
+      message: 'Session operation failed',
+      view: { desiredState: 'stopped', session: { state: 'stopped' } },
+    });
+    expect(error.message).not.toContain('secret');
+    expect(harness.tmux.kill).toHaveBeenCalledWith(TAB_A);
+    expect(harness.store.records.get(TAB_B)?.desiredState).toBe('active');
+    expect(harness.tmux.active.has(TAB_B)).toBe(true);
+    expect(harness.activity.mark).not.toHaveBeenCalled();
+
+    await expect(harness.manager.terminate(TAB_A)).resolves.toBeDefined();
+  });
+
+  it('reports a fresh running view when terminate tmux kill fails', async () => {
+    const harness = createHarness();
+    vi.mocked(harness.tmux.kill).mockRejectedValueOnce(
+      new Error('tmux private output'),
+    );
+
+    const error = await rejected(harness.manager.terminate(TAB_A));
+
+    expect(error).toMatchObject({
+      code: 'operation_failed',
+      message: 'Session operation failed',
+      view: { desiredState: 'stopped', session: { state: 'running' } },
+    });
+    expect(harness.store.records.get(TAB_A)?.desiredState).toBe('stopped');
+    expect(harness.activity.mark).not.toHaveBeenCalled();
+  });
+
   it('rejects tokens captured before and during terminate and authorizes none after', async () => {
     const harness = createHarness();
     const before = harness.manager.authorize(TAB_A)!;
@@ -245,6 +285,43 @@ describe('SessionManager Phase 2 lifecycle', () => {
     });
     expect(harness.tmux.prepare).not.toHaveBeenCalled();
     expect(harness.activity.mark).not.toHaveBeenCalled();
+  });
+
+  it('maps an indeterminate recreate absence probe to invalid session state', async () => {
+    const harness = createHarness();
+    harness.store.applyState(TAB_A, 'stopped');
+    harness.tmux.active.delete(TAB_A);
+    vi.mocked(harness.tmux.exists).mockRejectedValueOnce(
+      new Error('tmux probe details'),
+    );
+
+    await expect(harness.manager.recreate(TAB_A)).rejects.toMatchObject({
+      code: 'invalid_session_state',
+      message: 'Invalid session state',
+    });
+    expect(harness.tmux.prepare).not.toHaveBeenCalled();
+    expect(harness.activity.mark).not.toHaveBeenCalled();
+  });
+
+  it('cleans a failed recreate prepare, stays stopped, and permits retry', async () => {
+    const harness = createHarness();
+    harness.store.applyState(TAB_A, 'stopped');
+    harness.tmux.active.delete(TAB_A);
+    vi.mocked(harness.tmux.prepare).mockRejectedValueOnce(
+      new Error('prepare private output'),
+    );
+
+    const error = await rejected(harness.manager.recreate(TAB_A));
+
+    expect(error).toMatchObject({
+      code: 'operation_failed',
+      message: 'Session operation failed',
+    });
+    expect(harness.tmux.kill).toHaveBeenCalledWith(TAB_A);
+    expect(harness.store.records.get(TAB_A)?.desiredState).toBe('stopped');
+    expect(harness.store.records.get(TAB_B)?.desiredState).toBe('active');
+    expect(harness.activity.mark).not.toHaveBeenCalled();
+    await expect(harness.manager.recreate(TAB_A)).resolves.toBeDefined();
   });
 
   it('recreate invalidates tokens captured before and during creation, then activates', async () => {
@@ -380,6 +457,96 @@ describe('SessionManager Phase 2 lifecycle', () => {
     expect(harness.manager.authorize(TAB_A)).toBeUndefined();
   });
 
+  it('aborts restart before bridge and tmux work when stopped persistence fails', async () => {
+    const harness = createHarness();
+    vi.mocked(harness.store.setDesiredState).mockRejectedValueOnce(
+      new Error('store private output'),
+    );
+
+    const error = await rejected(harness.manager.restart(TAB_A));
+
+    expect(error).toMatchObject({
+      code: 'operation_failed',
+      message: 'Session operation failed',
+    });
+    expect(harness.registry.close).not.toHaveBeenCalled();
+    expect(harness.tmux.kill).not.toHaveBeenCalled();
+    expect(harness.tmux.prepare).not.toHaveBeenCalled();
+    expect(harness.activity.mark).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['bridge close', 'close'],
+    ['tmux kill', 'kill'],
+    ['tmux prepare', 'prepare'],
+  ] as const)(
+    'keeps restart stopped with a bounded fresh view after %s failure',
+    async (_label, phase) => {
+      const harness = createHarness();
+      if (phase === 'close') {
+        vi.mocked(harness.registry.close).mockRejectedValueOnce(
+          new Error('bridge private output'),
+        );
+      } else if (phase === 'kill') {
+        vi.mocked(harness.tmux.kill).mockRejectedValueOnce(
+          new Error('kill private output'),
+        );
+      } else {
+        vi.mocked(harness.tmux.prepare).mockRejectedValueOnce(
+          new Error('prepare private output'),
+        );
+      }
+
+      const error = await rejected(harness.manager.restart(TAB_A));
+
+      expect(error).toMatchObject({
+        code: 'operation_failed',
+        message: 'Session operation failed',
+        view: { desiredState: 'stopped' },
+      });
+      expect(error.message).not.toContain('private');
+      expect(harness.store.records.get(TAB_A)?.desiredState).toBe('stopped');
+      expect(harness.store.records.get(TAB_B)?.desiredState).toBe('active');
+      expect(harness.tmux.active.has(TAB_B)).toBe(true);
+      expect(harness.activity.mark).toHaveBeenCalledWith(TAB_A);
+      expect(harness.activity.mark).not.toHaveBeenCalledWith(TAB_B);
+    },
+  );
+
+  it('uses the final restart generation change to reject a token captured after active commit', async () => {
+    const harness = createHarness();
+    const activeCommitGate = deferred<TabRecord>();
+    vi.mocked(harness.store.setDesiredState)
+      .mockImplementationOnce(async (id, state) =>
+        harness.store.applyState(id, state),
+      )
+      .mockImplementationOnce(async (id, state) => {
+        const committed = harness.store.applyState(id, state);
+        return activeCommitGate.promise.then(() => committed);
+      });
+
+    const restarting = harness.manager.restart(TAB_A);
+    await vi.waitFor(() =>
+      expect(harness.store.setDesiredState).toHaveBeenLastCalledWith(
+        TAB_A,
+        'active',
+      ),
+    );
+    const midCommit = harness.manager.authorize(TAB_A)!;
+    activeCommitGate.resolve(harness.store.records.get(TAB_A)!);
+    await restarting;
+
+    await expect(
+      harness.manager.connect(midCommit, fakeSocket(), { cols: 80, rows: 24 }),
+    ).rejects.toBeInstanceOf(StaleAttachError);
+    await expect(
+      harness.manager.connect(harness.manager.authorize(TAB_A)!, fakeSocket(), {
+        cols: 80,
+        rows: 24,
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it('rejects restart tokens from before and during the operation, then accepts only a fresh token', async () => {
     const harness = createHarness();
     const before = harness.manager.authorize(TAB_A)!;
@@ -414,6 +581,23 @@ describe('SessionManager Phase 2 lifecycle', () => {
     expect(harness.store.setDesiredState).not.toHaveBeenCalled();
     expect(view.desiredState).toBe('active');
     expect(harness.activity.mark).toHaveBeenCalledWith(TAB_A);
+  });
+
+  it('bounds restartBridge close failure and does not mark activity', async () => {
+    const harness = createHarness();
+    vi.mocked(harness.registry.close).mockRejectedValueOnce(
+      new Error('bridge implementation output'),
+    );
+
+    const error = await rejected(harness.manager.restartBridge(TAB_A));
+
+    expect(error).toMatchObject({
+      code: 'operation_failed',
+      message: 'Session operation failed',
+    });
+    expect(harness.tmux.kill).not.toHaveBeenCalled();
+    expect(harness.store.records.get(TAB_A)?.desiredState).toBe('active');
+    expect(harness.activity.mark).not.toHaveBeenCalled();
   });
 
   it('closeTab persists stopped, closes, kills, removes under one lock and stales tokens', async () => {
@@ -498,6 +682,51 @@ describe('SessionManager Phase 2 lifecycle', () => {
     expect(harness.store.remove).not.toHaveBeenCalled();
     expect(harness.activity.mark).toHaveBeenCalledWith(TAB_A);
   });
+
+  it.each([
+    ['bridge close', 'close', 'stopped'],
+    ['tmux kill', 'kill', 'running'],
+    ['metadata removal', 'remove', 'stopped'],
+  ] as const)(
+    'reports a fresh view and stopped intent after closeTab %s failure',
+    async (_label, phase, expectedState) => {
+      const harness = createHarness();
+      if (phase === 'close') {
+        vi.mocked(harness.registry.close).mockRejectedValueOnce(
+          new Error('bridge secret content'),
+        );
+      } else if (phase === 'kill') {
+        vi.mocked(harness.tmux.kill).mockRejectedValueOnce(
+          new Error('tmux secret content'),
+        );
+      } else {
+        vi.mocked(harness.store.remove).mockRejectedValueOnce(
+          new Error('store secret content'),
+        );
+      }
+
+      const error = await rejected(harness.manager.closeTab(TAB_A));
+
+      expect(error).toBeInstanceOf(OperationFailedError);
+      expect(error).toMatchObject({
+        code: 'operation_failed',
+        message: 'Session operation failed',
+        view: {
+          desiredState: 'stopped',
+          session: { state: expectedState },
+        },
+      });
+      expect(error.message).not.toContain('secret');
+      expect(Object.isFrozen(error.view)).toBe(true);
+      expect(harness.store.records.get(TAB_A)?.desiredState).toBe('stopped');
+      expect(harness.store.records.get(TAB_B)?.desiredState).toBe('active');
+      expect(harness.tmux.active.has(TAB_B)).toBe(true);
+      expect(harness.activity.mark).toHaveBeenCalledWith(TAB_A);
+      expect(harness.store.remove).toHaveBeenCalledTimes(
+        phase === 'remove' ? 1 : 0,
+      );
+    },
+  );
 
   it('returns tab-not-found errors without touching dependencies', async () => {
     const harness = createHarness();
@@ -767,6 +996,17 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+async function rejected(
+  promise: Promise<unknown>,
+): Promise<OperationFailedError> {
+  try {
+    await promise;
+  } catch (error) {
+    return error as OperationFailedError;
+  }
+  throw new Error('Expected operation to reject');
 }
 
 function owner(result: Promise<void> = Promise.resolve()): BridgeOwner {
