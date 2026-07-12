@@ -1,7 +1,6 @@
 import { Buffer } from 'node:buffer';
 
 import {
-  FIXED_SESSION_ID,
   PROTOCOL_VERSION,
   isSessionId,
   parseClientMessage,
@@ -26,6 +25,7 @@ export interface SocketPort {
 }
 
 export interface BridgeOwner {
+  readonly pid?: number | null;
   close(code?: number, reason?: string): Promise<void>;
 }
 
@@ -35,6 +35,7 @@ export type TerminalBridgeOptions = Readonly<{
   pty: PtyProcess;
   logger: LifecycleLogger;
   maxBufferedBytes: number;
+  onActivity?: (sessionId: string) => void;
 }>;
 
 export class TerminalBridge implements BridgeOwner {
@@ -100,6 +101,21 @@ export class TerminalBridge implements BridgeOwner {
     options.logger.info('terminal_opened', { sessionId: options.sessionId });
   }
 
+  get pid(): number | null {
+    let value: unknown;
+    try {
+      value = Reflect.get(this.options.pty as object, 'pid');
+    } catch {
+      return null;
+    }
+    return typeof value === 'number' &&
+      Number.isInteger(value) &&
+      Number.isFinite(value) &&
+      value > 0
+      ? value
+      : null;
+  }
+
   write(data: string): void {
     if (this.closed) return;
     try {
@@ -139,19 +155,31 @@ export class TerminalBridge implements BridgeOwner {
       this.shutdown(1008, 'invalid_message', true);
       return;
     }
+    if (parsed.data.sessionId !== this.options.sessionId) {
+      this.options.logger.warn('protocol_message_rejected', {
+        sessionId: this.options.sessionId,
+        category: 'session_mismatch',
+      });
+      this.shutdown(1008, 'invalid_message', true);
+      return;
+    }
     if (parsed.data.type === 'input') {
+      this.markActivity();
       this.write(parsed.data.data);
     } else {
+      this.markActivity();
       this.resize(parsed.data.cols, parsed.data.rows);
     }
   }
 
   private handleOutput(data: string): void {
-    if (this.closed || !this.socketIsOpen()) return;
+    if (this.closed) return;
+    this.markActivity();
+    if (!this.socketIsOpen()) return;
     const message: ServerMessage = {
       v: PROTOCOL_VERSION,
       type: 'output',
-      sessionId: FIXED_SESSION_ID,
+      sessionId: this.options.sessionId,
       data,
     };
     const serialized = JSON.stringify(message);
@@ -183,7 +211,7 @@ export class TerminalBridge implements BridgeOwner {
     const message: ServerMessage = {
       v: PROTOCOL_VERSION,
       type: 'error',
-      sessionId: FIXED_SESSION_ID,
+      sessionId: this.options.sessionId,
       code: 'terminal_unavailable',
     };
     try {
@@ -197,6 +225,16 @@ export class TerminalBridge implements BridgeOwner {
 
   private socketIsOpen(): boolean {
     return this.options.socket.readyState === this.options.socket.OPEN;
+  }
+
+  private markActivity(): void {
+    try {
+      this.options.onActivity?.(this.options.sessionId);
+    } catch {
+      this.options.logger.warn('terminal_activity_failed', {
+        sessionId: this.options.sessionId,
+      });
+    }
   }
 
   private shutdown(code: number, reason: string, closeSocket: boolean): void {

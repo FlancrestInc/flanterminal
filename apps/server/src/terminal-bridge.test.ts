@@ -9,6 +9,8 @@ import {
 } from './terminal-bridge.js';
 
 type FakeDisposable = { dispose: Mock<() => void> };
+const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
+const OTHER_SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
 
 describe('TerminalBridge', () => {
   it('forwards input, output, and resize without logging terminal data', () => {
@@ -29,7 +31,7 @@ describe('TerminalBridge', () => {
       JSON.stringify({
         v: 1,
         type: 'output',
-        sessionId: 'phase-1-main',
+        sessionId: SESSION_ID,
         data: outputSecret,
       }),
     ]);
@@ -96,7 +98,7 @@ describe('TerminalBridge', () => {
       const frame = JSON.stringify({
         v: 1,
         type: 'output',
-        sessionId: 'phase-1-main',
+        sessionId: SESSION_ID,
         data,
       });
       const frameBytes = new TextEncoder().encode(frame).byteLength;
@@ -118,7 +120,7 @@ describe('TerminalBridge', () => {
     const frame = JSON.stringify({
       v: 1,
       type: 'output',
-      sessionId: 'phase-1-main',
+      sessionId: SESSION_ID,
       data,
     });
     const frameBytes = new TextEncoder().encode(frame).byteLength;
@@ -145,7 +147,7 @@ describe('TerminalBridge', () => {
       JSON.stringify({
         v: 1,
         type: 'error',
-        sessionId: 'phase-1-main',
+        sessionId: SESSION_ID,
         code: 'terminal_unavailable',
       }),
     ]);
@@ -153,7 +155,7 @@ describe('TerminalBridge', () => {
     expect(logger.records).toContainEqual({
       level: 'warn',
       event: 'terminal_exited',
-      metadata: { sessionId: 'phase-1-main', exitCode: 55, signal: 9 },
+      metadata: { sessionId: SESSION_ID, exitCode: 55, signal: 9 },
     });
   });
 
@@ -241,6 +243,130 @@ describe('TerminalBridge', () => {
       expect(String(caught)).toBe('Error: Terminal bridge setup failed');
     },
   );
+
+  it.each(['input', 'resize'] as const)(
+    'rejects a valid %s frame authorized for a different session',
+    (type) => {
+      const socket = new FakeSocket();
+      const pty = new FakePty();
+      const logger = new CapturingLogger();
+      createBridge(socket, pty, logger);
+      const frame =
+        type === 'input'
+          ? { v: 1, type, sessionId: OTHER_SESSION_ID, data: 'private input' }
+          : { v: 1, type, sessionId: OTHER_SESSION_ID, cols: 100, rows: 30 };
+
+      socket.emitMessage(JSON.stringify(frame));
+
+      expect(pty.write).not.toHaveBeenCalled();
+      expect(pty.resize).not.toHaveBeenCalled();
+      expect(socket.close).toHaveBeenCalledWith(1008, 'invalid_message');
+      expect(logger.records).toContainEqual({
+        level: 'warn',
+        event: 'protocol_message_rejected',
+        metadata: { sessionId: SESSION_ID, category: 'session_mismatch' },
+      });
+      expect(JSON.stringify(logger.records)).not.toContain('private input');
+    },
+  );
+
+  it('marks accepted input, resize, and output activity by session ID only', () => {
+    const socket = new FakeSocket();
+    const pty = new FakePty();
+    const onActivity = vi.fn();
+    createBridge(socket, pty, undefined, 1024, onActivity);
+
+    socket.emitMessage(
+      JSON.stringify({
+        v: 1,
+        type: 'input',
+        sessionId: SESSION_ID,
+        data: 'private input',
+      }),
+    );
+    socket.emitMessage(
+      JSON.stringify({
+        v: 1,
+        type: 'resize',
+        sessionId: SESSION_ID,
+        cols: 100,
+        rows: 30,
+      }),
+    );
+    pty.emitData('private output');
+
+    expect(onActivity).toHaveBeenCalledTimes(3);
+    expect(onActivity).toHaveBeenNthCalledWith(1, SESSION_ID);
+    expect(onActivity).toHaveBeenNthCalledWith(2, SESSION_ID);
+    expect(onActivity).toHaveBeenNthCalledWith(3, SESSION_ID);
+  });
+
+  it('does not mark malformed or mismatched frame activity', () => {
+    const onActivity = vi.fn();
+    const malformedSocket = new FakeSocket();
+    createBridge(malformedSocket, new FakePty(), undefined, 1024, onActivity);
+    malformedSocket.emitMessage('{');
+
+    const mismatchSocket = new FakeSocket();
+    createBridge(mismatchSocket, new FakePty(), undefined, 1024, onActivity);
+    mismatchSocket.emitMessage(
+      JSON.stringify({
+        v: 1,
+        type: 'input',
+        sessionId: OTHER_SESSION_ID,
+        data: 'secret',
+      }),
+    );
+
+    expect(onActivity).not.toHaveBeenCalled();
+  });
+
+  it('bounds activity observer failures without interrupting terminal flow', () => {
+    const socket = new FakeSocket();
+    const pty = new FakePty();
+    const logger = new CapturingLogger();
+    createBridge(socket, pty, logger, 1024, () => {
+      throw new Error('observer-secret');
+    });
+
+    socket.emitMessage(
+      JSON.stringify({
+        v: 1,
+        type: 'input',
+        sessionId: SESSION_ID,
+        data: 'input-secret',
+      }),
+    );
+
+    expect(pty.write).toHaveBeenCalledWith('input-secret');
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(logger.records).toContainEqual({
+      level: 'warn',
+      event: 'terminal_activity_failed',
+      metadata: { sessionId: SESSION_ID },
+    });
+    expect(JSON.stringify(logger.records)).not.toContain('observer-secret');
+  });
+
+  it.each([
+    [4321, 4321],
+    [0, null],
+    [-1, null],
+    [1.5, null],
+    [Number.POSITIVE_INFINITY, null],
+    ['4321', null],
+    [undefined, null],
+  ])('exposes only a validated PTY pid for %j', (nativePid, expected) => {
+    const pty = new FakePty();
+    Object.assign(pty, { pid: nativePid, privateState: 'do-not-expose' });
+    const bridge = createBridge(new FakeSocket(), pty);
+
+    expect(bridge.pid).toBe(expected);
+    expect(Object.keys({ sessionId: SESSION_ID, pid: bridge.pid })).toEqual([
+      'sessionId',
+      'pid',
+    ]);
+  });
 });
 
 function createBridge(
@@ -248,13 +374,15 @@ function createBridge(
   pty: FakePty,
   logger: LifecycleLogger = new CapturingLogger(),
   maxBufferedBytes = 1024,
+  onActivity?: (sessionId: string) => void,
 ) {
   return new TerminalBridge({
-    sessionId: 'phase-1-main',
+    sessionId: SESSION_ID,
     socket,
     pty,
     logger,
     maxBufferedBytes,
+    ...(onActivity === undefined ? {} : { onActivity }),
   });
 }
 
@@ -309,6 +437,10 @@ class FakeSocket implements SocketPort {
       ? this.closeListeners
       : this.errorListeners)
       listener();
+  }
+
+  emitMessage(data: unknown, isBinary = false) {
+    for (const listener of this.messageListeners) listener(data, isBinary);
   }
 
   private disposable(): FakeDisposable {

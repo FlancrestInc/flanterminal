@@ -49,9 +49,11 @@ export type TmuxConfig = Readonly<{
   historyLimit: number;
 }>;
 
-function sessionName(sessionId: string): string {
+const APP_SESSION_NAME = /^webterm-tab-([0-9a-f]{32})$/;
+
+export function tmuxSessionName(sessionId: string): string {
   if (!isSessionId(sessionId)) throw new Error('Invalid session');
-  return `webterm-${sessionId}`;
+  return `webterm-tab-${sessionId.replaceAll('-', '')}`;
 }
 
 export class TmuxSessionPreparer implements SessionPreparer {
@@ -61,10 +63,8 @@ export class TmuxSessionPreparer implements SessionPreparer {
   ) {}
 
   async prepare(sessionId: string): Promise<AttachSpec> {
-    const name = sessionName(sessionId);
-    const status = await this.run(['has-session', '-t', name]);
-
-    if (status.exitCode === 1) {
+    const name = tmuxSessionName(sessionId);
+    if (!(await this.exists(sessionId))) {
       const creation = await this.run([
         'start-server',
         ';',
@@ -95,10 +95,59 @@ export class TmuxSessionPreparer implements SessionPreparer {
         'on',
       ]);
       if (creation.exitCode !== 0) throw new Error('Tmux command failed');
-    } else if (status.exitCode !== 0) {
-      throw new Error('Tmux command failed');
     }
 
+    return this.attachSpec(sessionId);
+  }
+
+  async exists(sessionId: string): Promise<boolean> {
+    const result = await this.run([
+      'has-session',
+      '-t',
+      tmuxSessionName(sessionId),
+    ]);
+    if (result.exitCode === 0) return true;
+    if (result.exitCode === 1) return false;
+    throw new Error('Tmux command failed');
+  }
+
+  async kill(sessionId: string): Promise<void> {
+    const result = await this.run([
+      'kill-session',
+      '-t',
+      tmuxSessionName(sessionId),
+    ]);
+    if (result.exitCode !== 0 && result.exitCode !== 1) {
+      throw new Error('Tmux command failed');
+    }
+  }
+
+  async listActiveSessionIds(): Promise<string[]> {
+    const result = await this.run(['list-sessions', '-F', '#{session_name}']);
+    if (result.exitCode === 1) return [];
+    if (result.exitCode !== 0) throw new Error('Tmux command failed');
+    if (result.stdout.trim() === '') return [];
+
+    const sessionIds: string[] = [];
+    for (const line of result.stdout.split(/\r?\n/u)) {
+      const match = APP_SESSION_NAME.exec(line);
+      if (match === null) continue;
+      const compact = match[1];
+      if (compact === undefined) continue;
+      const sessionId = [
+        compact.slice(0, 8),
+        compact.slice(8, 12),
+        compact.slice(12, 16),
+        compact.slice(16, 20),
+        compact.slice(20),
+      ].join('-');
+      if (isSessionId(sessionId)) sessionIds.push(sessionId);
+    }
+    return sessionIds;
+  }
+
+  attachSpec(sessionId: string): AttachSpec {
+    const name = tmuxSessionName(sessionId);
     return {
       executable: this.config.executable,
       args: ['attach-session', '-t', name],
