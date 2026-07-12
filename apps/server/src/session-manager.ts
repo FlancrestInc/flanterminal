@@ -169,6 +169,7 @@ class KeyedMutex {
 export class SessionManager {
   private readonly mutex = new KeyedMutex();
   private readonly generations = new Map<string, number>();
+  private generationClock = 0;
   private readonly issuedTokens = new WeakSet<object>();
   private readonly compatibilityMode: boolean;
 
@@ -188,7 +189,7 @@ export class SessionManager {
       if (record?.desiredState !== 'active') return undefined;
       const token = Object.freeze({
         sessionId: id,
-        generation: this.generation(id),
+        generation: this.ensureGeneration(id),
         [ATTACH_TOKEN_BRAND]: true as const,
       });
       this.issuedTokens.add(token);
@@ -231,7 +232,7 @@ export class SessionManager {
       if (
         record === undefined ||
         record.desiredState !== 'active' ||
-        token.generation !== this.generation(token.sessionId)
+        token.generation !== this.generations.get(token.sessionId)
       ) {
         throw new StaleAttachError();
       }
@@ -254,6 +255,7 @@ export class SessionManager {
       } catch {
         throw new OperationFailedError();
       }
+      this.mark(id);
 
       const failure = await this.stopRuntime(
         id,
@@ -264,7 +266,6 @@ export class SessionManager {
       if (failure) {
         throw new OperationFailedError(await this.viewBestEffort(id));
       }
-      this.mark(id);
       return this.viewFromRecord(
         this.requireCurrentRecord(id),
         await this.probeHealth(id),
@@ -383,6 +384,7 @@ export class SessionManager {
       } catch {
         throw new OperationFailedError(await this.viewBestEffort(id));
       }
+      this.generations.delete(id);
     });
   }
 
@@ -579,12 +581,21 @@ export class SessionManager {
     });
   }
 
-  private generation(id: string): number {
-    return this.generations.get(id) ?? 0;
+  private ensureGeneration(id: string): number {
+    const current = this.generations.get(id);
+    if (current !== undefined) return current;
+    const generation = this.nextGeneration();
+    this.generations.set(id, generation);
+    return generation;
   }
 
   private incrementGeneration(id: string): void {
-    this.generations.set(id, this.generation(id) + 1);
+    this.generations.set(id, this.nextGeneration());
+  }
+
+  private nextGeneration(): number {
+    this.generationClock += 1;
+    return this.generationClock;
   }
 
   private isIssuedToken(value: unknown): value is AttachToken {

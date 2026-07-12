@@ -201,6 +201,7 @@ describe('SessionManager Phase 2 lifecycle', () => {
     expect(Object.isFrozen(view)).toBe(true);
     expect(Object.isFrozen(view.session)).toBe(true);
     expect(harness.activity.mark).toHaveBeenCalledWith(TAB_A);
+    expect(harness.activity.mark).toHaveBeenCalledTimes(1);
   });
 
   it('reports a fresh stopped view when terminate bridge close fails and releases the mutex', async () => {
@@ -221,7 +222,8 @@ describe('SessionManager Phase 2 lifecycle', () => {
     expect(harness.tmux.kill).toHaveBeenCalledWith(TAB_A);
     expect(harness.store.records.get(TAB_B)?.desiredState).toBe('active');
     expect(harness.tmux.active.has(TAB_B)).toBe(true);
-    expect(harness.activity.mark).not.toHaveBeenCalled();
+    expect(harness.activity.mark).toHaveBeenCalledTimes(1);
+    expect(harness.activity.mark).toHaveBeenCalledWith(TAB_A);
 
     await expect(harness.manager.terminate(TAB_A)).resolves.toBeDefined();
   });
@@ -240,7 +242,8 @@ describe('SessionManager Phase 2 lifecycle', () => {
       view: { desiredState: 'stopped', session: { state: 'running' } },
     });
     expect(harness.store.records.get(TAB_A)?.desiredState).toBe('stopped');
-    expect(harness.activity.mark).not.toHaveBeenCalled();
+    expect(harness.activity.mark).toHaveBeenCalledTimes(1);
+    expect(harness.activity.mark).toHaveBeenCalledWith(TAB_A);
   });
 
   it('rejects tokens captured before and during terminate and authorizes none after', async () => {
@@ -628,6 +631,35 @@ describe('SessionManager Phase 2 lifecycle', () => {
     await expect(
       harness.manager.connect(token, fakeSocket(), { cols: 80, rows: 24 }),
     ).rejects.toBeInstanceOf(StaleAttachError);
+    expect(policySize(harness.manager)).toBe(0);
+  });
+
+  it('prunes successful close generations across churn and resets safely on ID reintroduction', async () => {
+    const harness = createHarness();
+    const oldToken = harness.manager.authorize(TAB_A)!;
+    await harness.manager.closeTab(TAB_A);
+    expect(policySize(harness.manager)).toBe(0);
+
+    harness.store.records.set(TAB_A, { ...record(TAB_A, 'Reintroduced') });
+    harness.tmux.active.add(TAB_A);
+    const freshToken = harness.manager.authorize(TAB_A)!;
+    await expect(
+      harness.manager.connect(oldToken, fakeSocket(), { cols: 80, rows: 24 }),
+    ).rejects.toBeInstanceOf(StaleAttachError);
+    await expect(
+      harness.manager.connect(freshToken, fakeSocket(), { cols: 80, rows: 24 }),
+    ).resolves.toBeDefined();
+    await harness.manager.closeTab(TAB_A);
+
+    for (let index = 1; index <= 24; index += 1) {
+      const id = `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
+      harness.store.records.set(id, { ...record(id, `Terminal ${index}`) });
+      harness.tmux.active.add(id);
+      expect(harness.manager.authorize(id)).toBeDefined();
+      await harness.manager.closeTab(id);
+    }
+
+    expect(policySize(harness.manager)).toBe(0);
   });
 
   it('close persistence failure aborts bridge/tmux and does not mark activity', async () => {
@@ -727,6 +759,24 @@ describe('SessionManager Phase 2 lifecycle', () => {
       );
     },
   );
+
+  it('retains failed-removal generation state and keeps the prior token stale', async () => {
+    const harness = createHarness();
+    const token = harness.manager.authorize(TAB_A)!;
+    vi.mocked(harness.store.remove).mockRejectedValueOnce(
+      new Error('remove failed'),
+    );
+
+    await expect(harness.manager.closeTab(TAB_A)).rejects.toBeInstanceOf(
+      OperationFailedError,
+    );
+
+    expect(policySize(harness.manager)).toBe(1);
+    harness.store.applyState(TAB_A, 'active');
+    await expect(
+      harness.manager.connect(token, fakeSocket(), { cols: 80, rows: 24 }),
+    ).rejects.toBeInstanceOf(StaleAttachError);
+  });
 
   it('returns tab-not-found errors without touching dependencies', async () => {
     const harness = createHarness();
@@ -1007,6 +1057,11 @@ async function rejected(
     return error as OperationFailedError;
   }
   throw new Error('Expected operation to reject');
+}
+
+function policySize(manager: SessionManager): number {
+  return (manager as unknown as { generations: ReadonlyMap<string, number> })
+    .generations.size;
 }
 
 function owner(result: Promise<void> = Promise.resolve()): BridgeOwner {
