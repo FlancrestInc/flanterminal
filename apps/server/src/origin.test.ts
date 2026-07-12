@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { authorizeUpgrade, websocketSessionPath } from './origin.js';
 
+const SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
+
 describe('authorizeUpgrade', () => {
   it.each([
     ['http://example.test', 'http://example.test'],
@@ -11,10 +13,13 @@ describe('authorizeUpgrade', () => {
   ])('accepts the exact normalized origin %s', (origin, publicOrigin) => {
     expect(
       authorizeUpgrade(
-        { origin, requestUrl: '/terminal/ws/sessions/phase-1-main' },
+        {
+          origin,
+          requestUrl: `/terminal/ws/sessions/${SESSION_ID}`,
+        },
         { publicOrigin, basePath: '/terminal' },
       ),
-    ).toEqual({ allowed: true, sessionId: 'phase-1-main' });
+    ).toEqual({ allowed: true, sessionId: SESSION_ID });
   });
 
   it.each([
@@ -36,7 +41,7 @@ describe('authorizeUpgrade', () => {
     (origin) => {
       expect(
         authorizeUpgrade(
-          { origin, requestUrl: '/terminal/ws/sessions/phase-1-main' },
+          { origin, requestUrl: '/private-invalid-path' },
           { publicOrigin: 'http://example.test', basePath: '/terminal' },
         ),
       ).toEqual({ allowed: false, status: 403 });
@@ -58,23 +63,24 @@ describe('authorizeUpgrade', () => {
   ])('rejects ASCII whitespace or controls in Origin: %j', (origin) => {
     expect(
       authorizeUpgrade(
-        { origin, requestUrl: '/terminal/ws/sessions/phase-1-main' },
+        { origin, requestUrl: `/terminal/ws/sessions/${SESSION_ID}` },
         { publicOrigin: 'http://example.test', basePath: '/terminal' },
       ),
     ).toEqual({ allowed: false, status: 403 });
   });
 
   it.each([
-    '/ws/sessions/phase-1-main',
-    '/terminal/sessions/phase-1-main',
-    '/terminal/ws/sessions/other',
-    '/terminal/ws/sessions/phase-1-main?session=other',
-    '/terminal/ws/sessions/phase-1-main/',
+    `/ws/sessions/${SESSION_ID}`,
+    `/terminal/sessions/${SESSION_ID}`,
+    '/terminal/ws/sessions/not-a-uuid',
+    '/terminal/ws/sessions/123E4567-e89b-42d3-a456-426614174000',
+    `/terminal/ws/sessions/${SESSION_ID}?session=other`,
+    `/terminal/ws/sessions/${SESSION_ID}/`,
     '/terminal/ws/sessions/%2e%2e',
-    '/terminal/ws/sessions/%2Fphase-1-main',
-    '/terminal/ws/sessions/phase%2d1%2dmain',
-    '//terminal/ws/sessions/phase-1-main',
-    'http://other.test/terminal/ws/sessions/phase-1-main',
+    `/terminal/ws/sessions/%2F${SESSION_ID}`,
+    '/terminal/ws/sessions/123e4567%2de89b%2d42d3%2da456%2d426614174000',
+    `//terminal/ws/sessions/${SESSION_ID}`,
+    `http://other.test/terminal/ws/sessions/${SESSION_ID}`,
   ])('rejects a non-canonical websocket route: %s', (requestUrl) => {
     expect(
       authorizeUpgrade(
@@ -85,15 +91,17 @@ describe('authorizeUpgrade', () => {
   });
 
   it('supports the root base path', () => {
-    expect(websocketSessionPath('/')).toBe('/ws/sessions/phase-1-main');
+    expect(websocketSessionPath('/', SESSION_ID)).toBe(
+      `/ws/sessions/${SESSION_ID}`,
+    );
     expect(
       authorizeUpgrade(
         {
           origin: 'http://example.test',
-          requestUrl: '/ws/sessions/phase-1-main',
+          requestUrl: `/ws/sessions/${SESSION_ID}`,
         },
         { publicOrigin: 'http://example.test', basePath: '/' },
       ),
-    ).toEqual({ allowed: true, sessionId: 'phase-1-main' });
+    ).toEqual({ allowed: true, sessionId: SESSION_ID });
   });
 });

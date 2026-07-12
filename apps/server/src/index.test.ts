@@ -15,7 +15,9 @@ describe('server lifecycle', () => {
     const lifecycle = createServerLifecycle({
       httpServer,
       websocket: fakeWebsocket(),
+      activity: fakeActivity(),
       registry: { closeAll: vi.fn(async () => undefined) },
+      durabilityReady: () => true,
       closeTimeoutMs: 100,
     });
 
@@ -24,6 +26,24 @@ describe('server lifecycle', () => {
 
     expect(httpServer.listen).toHaveBeenCalledWith(4321, '127.0.0.1');
     expect(lifecycle.isReady()).toBe(true);
+  });
+
+  it('reports not ready when tab metadata durability is degraded', async () => {
+    const httpServer = fakeHttpServer();
+    let durable = true;
+    const lifecycle = createServerLifecycle({
+      httpServer,
+      websocket: fakeWebsocket(),
+      activity: fakeActivity(),
+      registry: { closeAll: vi.fn(async () => undefined) },
+      durabilityReady: () => durable,
+      closeTimeoutMs: 100,
+    });
+
+    await lifecycle.start('127.0.0.1', 4321);
+    expect(lifecycle.isReady()).toBe(true);
+    durable = false;
+    expect(lifecycle.isReady()).toBe(false);
   });
 
   it('rejects a real listen collision promptly and rolls back all initialized resources', async () => {
@@ -39,7 +59,9 @@ describe('server lifecycle', () => {
     const lifecycle = createServerLifecycle({
       httpServer,
       websocket,
+      activity: fakeActivity(),
       registry,
+      durabilityReady: () => true,
       closeTimeoutMs: 100,
     });
 
@@ -71,10 +93,13 @@ describe('server lifecycle', () => {
         throw new Error('private close failure');
       }),
     };
+    const activity = fakeActivity(calls);
     const lifecycle = createServerLifecycle({
       httpServer,
       websocket,
+      activity,
       registry,
+      durabilityReady: () => true,
       closeTimeoutMs: 100,
     });
 
@@ -86,11 +111,13 @@ describe('server lifecycle', () => {
     expect(calls).toEqual([
       'ws.stopAccepting',
       'ws.stopHeartbeat',
+      'activity.shutdown',
       'ws.closeClients',
       'registry.closeAll',
       'http.close',
     ]);
     expect(registry.closeAll).toHaveBeenCalledOnce();
+    expect(activity.shutdown).toHaveBeenCalledOnce();
     expect(lifecycle.isReady()).toBe(false);
   });
 
@@ -101,7 +128,9 @@ describe('server lifecycle', () => {
     const lifecycle = createServerLifecycle({
       httpServer,
       websocket: fakeWebsocket(),
+      activity: fakeActivity(),
       registry: { closeAll: vi.fn(async () => undefined) },
+      durabilityReady: () => true,
       closeTimeoutMs: 25,
     });
 
@@ -196,5 +225,13 @@ function fakeWebsocket(calls: string[] = []) {
     stopHeartbeat: vi.fn(() => calls.push('ws.stopHeartbeat')),
     closeClients: vi.fn(() => calls.push('ws.closeClients')),
     close: vi.fn(async () => undefined),
+  };
+}
+
+function fakeActivity(calls: string[] = []) {
+  return {
+    shutdown: vi.fn(async () => {
+      calls.push('activity.shutdown');
+    }),
   };
 }

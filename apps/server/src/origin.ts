@@ -1,4 +1,4 @@
-import { FIXED_SESSION_ID } from '@flanterminal/shared';
+import { isSessionId } from '@flanterminal/shared';
 
 export type UpgradeAuthorizationOptions = Readonly<{
   publicOrigin: string;
@@ -11,12 +11,15 @@ export type UpgradeRequest = Readonly<{
 }>;
 
 export type UpgradeAuthorization =
-  | Readonly<{ allowed: true; sessionId: typeof FIXED_SESSION_ID }>
+  | Readonly<{ allowed: true; sessionId: string }>
   | Readonly<{ allowed: false; status: 403 | 404 }>;
 
-export function websocketSessionPath(basePath: string): string {
+export function websocketSessionPath(
+  basePath: string,
+  sessionId: string,
+): string {
   const prefix = basePath === '/' ? '' : basePath;
-  return `${prefix}/ws/sessions/${FIXED_SESSION_ID}`;
+  return `${prefix}/ws/sessions/${sessionId}`;
 }
 
 export function authorizeUpgrade(
@@ -26,10 +29,22 @@ export function authorizeUpgrade(
   if (!isExactOrigin(request.origin, options.publicOrigin)) {
     return { allowed: false, status: 403 };
   }
-  if (request.requestUrl !== websocketSessionPath(options.basePath)) {
+  const prefix = options.basePath === '/' ? '' : options.basePath;
+  const routePrefix = `${prefix}/ws/sessions/`;
+  if (
+    request.requestUrl === undefined ||
+    !request.requestUrl.startsWith(routePrefix)
+  ) {
     return { allowed: false, status: 404 };
   }
-  return { allowed: true, sessionId: FIXED_SESSION_ID };
+  const sessionId = request.requestUrl.slice(routePrefix.length);
+  if (
+    !isSessionId(sessionId) ||
+    request.requestUrl !== websocketSessionPath(options.basePath, sessionId)
+  ) {
+    return { allowed: false, status: 404 };
+  }
+  return { allowed: true, sessionId };
 }
 
 function isExactOrigin(

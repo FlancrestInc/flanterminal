@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 
-import { FIXED_SESSION_ID, PROTOCOL_VERSION } from '@flanterminal/shared';
+import { PROTOCOL_VERSION, type TabRecord } from '@flanterminal/shared';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -13,6 +13,9 @@ import {
   type HeartbeatScheduler,
   type TerminalWebSocketServer,
 } from './websocket.js';
+
+const SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
+const OTHER_SESSION_ID = '223e4567-e89b-42d3-a456-426614174000';
 
 const openResources: Array<() => Promise<void>> = [];
 const inboxes = new WeakMap<
@@ -33,14 +36,14 @@ describe('terminal websocket server', () => {
     expect(JSON.parse(ready)).toEqual({
       v: PROTOCOL_VERSION,
       type: 'ready',
-      sessionId: FIXED_SESSION_ID,
+      sessionId: SESSION_ID,
     });
 
     client.send(
       JSON.stringify({
         v: PROTOCOL_VERSION,
         type: 'input',
-        sessionId: FIXED_SESSION_ID,
+        sessionId: SESSION_ID,
         data: 'echo private\n',
       }),
     );
@@ -48,7 +51,7 @@ describe('terminal websocket server', () => {
       JSON.stringify({
         v: PROTOCOL_VERSION,
         type: 'resize',
-        sessionId: FIXED_SESSION_ID,
+        sessionId: SESSION_ID,
         cols: 120,
         rows: 40,
       }),
@@ -64,7 +67,7 @@ describe('terminal websocket server', () => {
     expect(JSON.parse(await outputMessage)).toEqual({
       v: PROTOCOL_VERSION,
       type: 'output',
-      sessionId: FIXED_SESSION_ID,
+      sessionId: SESSION_ID,
       data: 'terminal contents',
     });
   });
@@ -77,7 +80,7 @@ describe('terminal websocket server', () => {
       JSON.stringify({
         v: 2,
         type: 'input',
-        sessionId: FIXED_SESSION_ID,
+        sessionId: SESSION_ID,
         data: 'private',
       }),
       false,
@@ -87,7 +90,7 @@ describe('terminal websocket server', () => {
       JSON.stringify({
         v: 1,
         type: 'output',
-        sessionId: FIXED_SESSION_ID,
+        sessionId: SESSION_ID,
         data: 'private',
       }),
       false,
@@ -129,7 +132,7 @@ describe('terminal websocket server', () => {
       server,
       publicOrigin: 'http://app.test',
       basePath: '/terminal',
-      sessionManager: { connect: connectSession },
+      sessionManager: { authorize: vi.fn(), connect: connectSession },
       registry: new BridgeRegistry(),
       logger: logger(),
       heartbeatIntervalMs: 30_000,
@@ -140,18 +143,76 @@ describe('terminal websocket server', () => {
     expect(
       await rejectedStatus(
         port,
-        '/terminal/ws/sessions/phase-1-main',
+        `/terminal/ws/sessions/${SESSION_ID}`,
         'http://wrong.test',
       ),
     ).toBe(403);
     expect(
       await rejectedStatus(
         port,
-        '/ws/sessions/phase-1-main',
+        `/ws/sessions/${SESSION_ID}`,
         'http://app.test',
       ),
     ).toBe(404);
     expect(connectSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown and stopped sessions before upgrading or connecting', async () => {
+    const authorize = vi.fn().mockReturnValue(undefined);
+    const connectSession = vi.fn();
+    const server = createServer();
+    const gateway = createTerminalWebSocketServer({
+      server,
+      publicOrigin: 'http://app.test',
+      basePath: '/',
+      sessionManager: { authorize, connect: connectSession },
+      registry: new BridgeRegistry(),
+      logger: logger(),
+      heartbeatIntervalMs: 30_000,
+    });
+    const port = await listen(server);
+    track(server, gateway);
+
+    expect(
+      await rejectedStatus(
+        port,
+        `/ws/sessions/${SESSION_ID}`,
+        'http://app.test',
+      ),
+    ).toBe(404);
+    expect(authorize).toHaveBeenCalledWith(SESSION_ID);
+    expect(connectSession).not.toHaveBeenCalled();
+  });
+
+  it('passes the authorization token captured before upgrade to connect', async () => {
+    const token = Object.freeze({ sessionId: SESSION_ID, generation: 7 });
+    const owner = { pid: 11, close: vi.fn(async () => undefined) };
+    const authorize = vi.fn().mockReturnValue(token);
+    const connectSession = vi.fn().mockResolvedValue(owner);
+    const server = createServer();
+    const gateway = createTerminalWebSocketServer({
+      server,
+      publicOrigin: 'http://app.test',
+      basePath: '/',
+      sessionManager: { authorize, connect: connectSession },
+      registry: new BridgeRegistry(),
+      logger: logger(),
+      heartbeatIntervalMs: 30_000,
+    });
+    const port = await listen(server);
+    track(server, gateway);
+    const client = await connect(
+      `ws://127.0.0.1:${port}/ws/sessions/${SESSION_ID}`,
+    );
+
+    expect(JSON.parse(await nextMessage(client))).toMatchObject({
+      type: 'ready',
+      sessionId: SESSION_ID,
+    });
+    expect(connectSession).toHaveBeenCalledWith(token, expect.anything(), {
+      cols: 80,
+      rows: 24,
+    });
   });
 
   it('sends a bounded protocol error and closes 1011 when session setup fails', async () => {
@@ -162,6 +223,10 @@ describe('terminal websocket server', () => {
       publicOrigin: 'http://app.test',
       basePath: '/',
       sessionManager: {
+        authorize: vi.fn().mockReturnValue({
+          sessionId: SESSION_ID,
+          generation: 1,
+        }),
         connect: vi.fn().mockRejectedValue(new Error('private failure')),
       },
       registry,
@@ -171,18 +236,18 @@ describe('terminal websocket server', () => {
     const port = await listen(server);
     track(server, gateway);
     const client = await connect(
-      `ws://127.0.0.1:${port}/ws/sessions/${FIXED_SESSION_ID}`,
+      `ws://127.0.0.1:${port}/ws/sessions/${SESSION_ID}`,
     );
 
     expect(JSON.parse(await nextMessage(client))).toEqual({
       v: PROTOCOL_VERSION,
       type: 'error',
-      sessionId: FIXED_SESSION_ID,
+      sessionId: SESSION_ID,
       code: 'terminal_unavailable',
     });
     const [code] = (await once(client, 'close')) as [number, Buffer];
     expect(code).toBe(1011);
-    expect(registry.get(FIXED_SESSION_ID)).toBeUndefined();
+    expect(registry.get(SESSION_ID)).toBeUndefined();
   });
 
   it('cleans a bridge and registration exactly once after socket close', async () => {
@@ -196,7 +261,7 @@ describe('terminal websocket server', () => {
 
     await vi.waitFor(() => expect(remove).toHaveBeenCalledOnce());
     expect(harness.pty.kill).toHaveBeenCalledOnce();
-    expect(harness.registry.get(FIXED_SESSION_ID)).toBeUndefined();
+    expect(harness.registry.get(SESSION_ID)).toBeUndefined();
   });
 
   it('terminates a client that misses a pong on the next heartbeat tick', async () => {
@@ -241,6 +306,25 @@ describe('terminal websocket server', () => {
     expect(harness.preparer).toHaveBeenCalledTimes(2);
     expect(harness.spawn).toHaveBeenCalledTimes(2);
   });
+
+  it('rejects frames for a different tab before writing to the PTY', async () => {
+    const harness = await createHarness();
+    const client = await connect(harness.url);
+    await nextMessage(client);
+
+    client.send(
+      JSON.stringify({
+        v: PROTOCOL_VERSION,
+        type: 'input',
+        sessionId: OTHER_SESSION_ID,
+        data: 'must not be written',
+      }),
+    );
+
+    const [code] = (await once(client, 'close')) as [number, Buffer];
+    expect(code).toBe(1008);
+    expect(harness.pty.write).not.toHaveBeenCalled();
+  });
 });
 
 async function createHarness(
@@ -262,19 +346,47 @@ async function createHarness(
     }),
   };
   const registry = new BridgeRegistry();
-  const preparer = vi.fn(async () => ({
+  const prepare = vi.fn(async () => ({
     executable: '/usr/bin/tmux',
     args: ['attach'],
     cwd: '/tmp',
     env: {},
   }));
+  const preparer = {
+    prepare,
+    exists: vi.fn(async () => true),
+    kill: vi.fn(async () => undefined),
+    listActiveSessionIds: vi.fn(async () => [SESSION_ID]),
+    attachSpec: vi.fn(() => ({
+      executable: '/usr/bin/tmux',
+      args: ['attach'],
+      cwd: '/tmp',
+      env: {},
+    })),
+  };
   const spawn = vi.fn(() => pty);
   const log = logger();
+  const record: TabRecord = Object.freeze({
+    id: SESSION_ID,
+    displayName: 'Terminal 1',
+    position: 0,
+    createdAt: '2026-07-11T00:00:00.000Z',
+    lastActivityAt: '2026-07-11T00:00:00.000Z',
+    desiredState: 'active',
+  });
+  const store = {
+    snapshot: vi.fn(() => ({ structureRevision: 0, tabs: [record] })),
+    has: vi.fn((id: string) => id === SESSION_ID),
+    setDesiredState: vi.fn(async () => record),
+    remove: vi.fn(async () => undefined),
+  };
   const manager = new SessionManager({
-    preparer: { prepare: preparer },
+    preparer,
     ptyFactory: { spawn },
     registry,
     bridgeFactory: new TerminalBridgeFactory(log, 1_048_576),
+    store,
+    activity: { mark: vi.fn() },
   });
   const server = createServer();
   const gateway = createTerminalWebSocketServer({
@@ -292,11 +404,11 @@ async function createHarness(
   const port = await listen(server);
   track(server, gateway);
   return {
-    url: `ws://127.0.0.1:${port}/terminal/ws/sessions/${FIXED_SESSION_ID}`,
+    url: `ws://127.0.0.1:${port}/terminal/ws/sessions/${SESSION_ID}`,
     server,
     gateway,
     registry,
-    preparer,
+    preparer: prepare,
     spawn,
     pty,
     logger: log.info,

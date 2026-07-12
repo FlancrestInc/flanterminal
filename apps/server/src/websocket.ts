@@ -2,7 +2,6 @@ import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 
 import {
-  FIXED_SESSION_ID,
   MAX_WS_PAYLOAD_BYTES,
   PROTOCOL_VERSION,
   type ServerMessage,
@@ -12,7 +11,7 @@ import WebSocket, { WebSocketServer, type RawData } from 'ws';
 import type { BridgeRegistry } from './bridge-registry.js';
 import type { LifecycleLogger } from './logger.js';
 import { authorizeUpgrade } from './origin.js';
-import type { SessionManager } from './session-manager.js';
+import type { AttachToken, SessionManager } from './session-manager.js';
 import type { BridgeOwner, SocketPort } from './terminal-bridge.js';
 
 export interface HeartbeatScheduler {
@@ -33,7 +32,7 @@ export type TerminalWebSocketServerOptions = Readonly<{
   server: Server;
   publicOrigin: string;
   basePath: string;
-  sessionManager: Pick<SessionManager, 'connect'>;
+  sessionManager: Pick<SessionManager, 'authorize' | 'connect'>;
   registry: BridgeRegistry;
   logger: LifecycleLogger;
   heartbeatIntervalMs: number;
@@ -97,6 +96,10 @@ export function createTerminalWebSocketServer(
     maxPayload: MAX_WS_PAYLOAD_BYTES,
   });
   const alive = new WeakMap<WebSocket, boolean>();
+  const connections = new WeakMap<
+    WebSocket,
+    Readonly<{ sessionId: string; token: AttachToken }>
+  >();
   let accepting = true;
   let heartbeat: unknown;
 
@@ -117,13 +120,27 @@ export function createTerminalWebSocketServer(
       rejectUpgrade(socket, authorization.status);
       return;
     }
+    const token = options.sessionManager.authorize(authorization.sessionId);
+    if (token === undefined) {
+      rejectUpgrade(socket, 404);
+      return;
+    }
     websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+      connections.set(websocket, {
+        sessionId: authorization.sessionId,
+        token,
+      });
       websocketServer.emit('connection', websocket, request);
     });
   };
 
   options.server.on('upgrade', onUpgrade);
   websocketServer.on('connection', (socket) => {
+    const connection = connections.get(socket);
+    if (connection === undefined) {
+      socket.close(1011, 'terminal_unavailable');
+      return;
+    }
     alive.set(socket, true);
     socket.on('pong', () => alive.set(socket, true));
     const port = new WsSocketPort(socket);
@@ -135,17 +152,18 @@ export function createTerminalWebSocketServer(
       ended = true;
       if (owner === undefined || removed) return;
       removed = true;
-      void options.registry.remove(FIXED_SESSION_ID, owner);
+      void options.registry.remove(connection.sessionId, owner);
     };
     socket.once('close', removeRegistration);
     socket.once('error', removeRegistration);
 
-    void options.sessionManager
-      .connect({
-        sessionId: FIXED_SESSION_ID,
-        socket: port,
-        dimensions: { cols: 80, rows: 24 },
-      })
+    void Promise.resolve()
+      .then(() =>
+        options.sessionManager.connect(connection.token, port, {
+          cols: 80,
+          rows: 24,
+        }),
+      )
       .then(async (connectedOwner) => {
         owner = connectedOwner;
         if (ended) {
@@ -153,13 +171,13 @@ export function createTerminalWebSocketServer(
           removeRegistration();
           return;
         }
-        sendReady(socket);
+        sendReady(socket, connection.sessionId);
       })
       .catch(() => {
         options.logger.error('terminal_connection_failed', {
-          sessionId: FIXED_SESSION_ID,
+          sessionId: connection.sessionId,
         });
-        sendConnectionError(socket);
+        sendConnectionError(socket, connection.sessionId);
         if (socket.readyState === WebSocket.OPEN) {
           socket.close(1011, 'terminal_unavailable');
         }
@@ -207,22 +225,22 @@ export function createTerminalWebSocketServer(
   };
 }
 
-function sendReady(socket: WebSocket): void {
+function sendReady(socket: WebSocket, sessionId: string): void {
   if (socket.readyState !== WebSocket.OPEN) return;
   const message: ServerMessage = {
     v: PROTOCOL_VERSION,
     type: 'ready',
-    sessionId: FIXED_SESSION_ID,
+    sessionId,
   };
   socket.send(JSON.stringify(message));
 }
 
-function sendConnectionError(socket: WebSocket): void {
+function sendConnectionError(socket: WebSocket, sessionId: string): void {
   if (socket.readyState !== WebSocket.OPEN) return;
   const message: ServerMessage = {
     v: PROTOCOL_VERSION,
     type: 'error',
-    sessionId: FIXED_SESSION_ID,
+    sessionId,
     code: 'terminal_unavailable',
   };
   socket.send(JSON.stringify(message));

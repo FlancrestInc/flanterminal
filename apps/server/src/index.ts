@@ -4,14 +4,14 @@ import { createServer } from 'node:http';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { FIXED_SESSION_ID } from '@flanterminal/shared';
-
+import { ActivityTracker } from './activity-tracker.js';
 import { createApp } from './app.js';
 import { BridgeRegistry } from './bridge-registry.js';
 import { loadConfig, type ConfigEnvironment } from './config.js';
 import { createLifecycleLogger } from './logger.js';
 import { NodePtyFactory } from './pty.js';
 import { SessionManager, TerminalBridgeFactory } from './session-manager.js';
+import { TabStore } from './tab-store.js';
 import { ExecFileCommandRunner, TmuxSessionPreparer } from './tmux.js';
 import {
   createTerminalWebSocketServer,
@@ -37,7 +37,9 @@ export type ServerLifecycleOptions = Readonly<{
     TerminalWebSocketServer,
     'stopAccepting' | 'stopHeartbeat' | 'closeClients'
   >;
+  activity: Readonly<{ shutdown(): Promise<void> }>;
   registry: Readonly<{ closeAll(): Promise<void> }>;
+  durabilityReady: () => boolean;
   closeTimeoutMs: number;
 }>;
 
@@ -61,7 +63,7 @@ export function createServerLifecycle(
   };
 
   return {
-    isReady: () => ready,
+    isReady: () => ready && options.durabilityReady(),
     async start(host, port) {
       try {
         await listenHttpServer(options.httpServer, host, port);
@@ -108,6 +110,7 @@ async function performShutdown(options: ServerLifecycleOptions): Promise<void> {
   const errors: unknown[] = [];
   runCleanup(() => options.websocket.stopAccepting(), errors);
   runCleanup(() => options.websocket.stopHeartbeat(), errors);
+  await runAsyncCleanup(() => options.activity.shutdown(), errors);
   runCleanup(() => options.websocket.closeClients(), errors);
   await runAsyncCleanup(() => options.registry.closeAll(), errors);
   await runAsyncCleanup(
@@ -212,6 +215,12 @@ export async function startProductionServer(
 ): Promise<ServerLifecycle> {
   const config = loadConfig(environment);
   const logger = createLifecycleLogger(config.logLevel);
+  const tabStore = new TabStore({
+    dataDir: config.dataDir,
+    sessionMaxCount: config.sessionMaxCount,
+    onDurabilityEvent: (event) => logger.warn(event.type),
+  });
+  await tabStore.initialize();
   await verifyRuntimeExecutables([
     config.defaultShell,
     TMUX_EXECUTABLE,
@@ -219,6 +228,7 @@ export async function startProductionServer(
   ]);
 
   const registry = new BridgeRegistry();
+  const activity = new ActivityTracker({ store: tabStore });
   const runner = new ExecFileCommandRunner();
   const preparer = new TmuxSessionPreparer(
     {
@@ -233,7 +243,13 @@ export async function startProductionServer(
     preparer,
     ptyFactory: new NodePtyFactory(undefined, environment),
     registry,
-    bridgeFactory: new TerminalBridgeFactory(logger, config.wsMaxBufferBytes),
+    bridgeFactory: new TerminalBridgeFactory(
+      logger,
+      config.wsMaxBufferBytes,
+      activity,
+    ),
+    store: tabStore,
+    activity,
   });
 
   const runtime: {
@@ -248,11 +264,11 @@ export async function startProductionServer(
     config,
     readiness: { isReady: () => runtime.lifecycle?.isReady() ?? false },
     metrics: {
-      activeSessionCount: () =>
-        registry.get(FIXED_SESSION_ID) === undefined ? 0 : 1,
+      activeSessionCount: () => registry.entries().length,
       connectedWebSocketCount: () => runtime.websocket?.connectedCount() ?? 0,
     },
     clientDist,
+    tabs: { store: tabStore, sessions: sessionManager },
   });
   const httpServer = createServer(app);
   const websocket = createTerminalWebSocketServer({
@@ -268,7 +284,9 @@ export async function startProductionServer(
   const lifecycle = createServerLifecycle({
     httpServer,
     websocket,
+    activity,
     registry,
+    durabilityReady: () => tabStore.durabilityReady(),
     closeTimeoutMs: 5000,
   });
   runtime.lifecycle = lifecycle;
