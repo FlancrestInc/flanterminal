@@ -13,6 +13,7 @@ import type {
 } from '@flanterminal/shared';
 
 import { createApp } from './app.js';
+import type { AdminRouterOptions } from './admin-routes.js';
 import type { AuthMiddlewareOptions } from './auth-middleware.js';
 import type { AuthRouterOptions } from './auth-routes.js';
 import type {
@@ -77,6 +78,51 @@ describe('createApp', () => {
     expect(await response.json()).toEqual(body);
   });
 
+  it('fails readiness closed without exposing durability errors', async () => {
+    const response = await request('/ready', {
+      readiness: {
+        isReady: vi.fn(async () => {
+          throw new Error('/app/data/settings.json private failure');
+        }),
+      },
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      status: 'not_ready',
+      ready: false,
+    });
+  });
+
+  it('keeps health orchestration-safe when aggregate probes fail', async () => {
+    const response = await request('/health', {
+      metrics: {
+        activeSessionCount: () => {
+          throw new Error('private tmux failure');
+        },
+        connectedWebSocketCount: () => Number.POSITIVE_INFINITY,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: 'degraded',
+      activeSessions: 0,
+      connectedWebSockets: 0,
+    });
+  });
+
+  it('mounts the authenticated administration namespace', async () => {
+    const http = httpDependencies();
+    const response = await request('/terminal/api/admin', {
+      http,
+      init: { headers: { Cookie: `flanterminal_session=${COOKIE}` } },
+    });
+
+    expect(response.status).toBe(200);
+    expect(http.admin.admin.snapshot).toHaveBeenCalledOnce();
+  });
+
   it('serves only strict browser-safe configuration to an authenticated session with no-store', async () => {
     const response = await request('/terminal/api/config', {
       http: httpDependencies(),
@@ -139,6 +185,7 @@ describe('createApp', () => {
         ['GET', `${api}/config`],
         ['GET', `${api}/settings`],
         ['GET', `${api}/tabs`],
+        ['GET', `${api}/admin`],
         ['POST', `${api}/auth/refresh`],
         ['POST', `${api}/auth/logout`],
         ['PUT', `${api}/auth/password`],
@@ -776,6 +823,10 @@ type AppHttpDependencies = Readonly<{
   auth: Omit<AuthRouterOptions, 'basePath' | 'publicOrigin' | 'secureCookie'>;
   settings: Omit<SettingsRouterOptions, keyof AuthMiddlewareOptions>;
   tabs: Omit<TabRouterOptions, keyof AuthMiddlewareOptions>;
+  admin: Omit<
+    AdminRouterOptions,
+    Exclude<keyof AuthMiddlewareOptions, 'logger'>
+  >;
 }>;
 
 function httpDependencies(failure?: AppTabFailure): AppHttpDependencies {
@@ -825,6 +876,41 @@ function httpDependencies(failure?: AppTabFailure): AppHttpDependencies {
       constraints: SETTINGS_CONSTRAINTS,
     },
     tabs: tabDependencies(failure),
+    admin: {
+      admin: {
+        snapshot: vi.fn(async () => ({
+          generatedAt: NOW,
+          uptimeSeconds: 1,
+          memory: { rss: 1, heapUsed: 1 },
+          totals: { tabs: 0, runningSessions: 0, bridges: 0, webSockets: 0 },
+          cleanup: {
+            enabled: false,
+            running: false,
+            lastRunAt: null,
+          },
+          sessions: [],
+        })),
+        recordLifecycleError: vi.fn(),
+        clearLifecycleError: vi.fn(),
+      },
+      sessions: {
+        restartBridge: vi.fn(async () => undefined),
+        terminate: vi.fn(async () => undefined),
+        recreate: vi.fn(async () => undefined),
+        restart: vi.fn(async () => undefined),
+      },
+      cleanup: {
+        runNow: vi.fn(async () => ({
+          disabled: false,
+          examined: 0,
+          terminated: 0,
+          skipped: 0,
+          failed: 0,
+          startedAt: NOW,
+          finishedAt: NOW,
+        })),
+      },
+    },
   };
 }
 

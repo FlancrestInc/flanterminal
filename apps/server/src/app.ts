@@ -12,6 +12,7 @@ import {
   touchHttpActivity,
   type AuthMiddlewareOptions,
 } from './auth-middleware.js';
+import { createAdminRouter, type AdminRouterOptions } from './admin-routes.js';
 import { createAuthRouter, type AuthRouterOptions } from './auth-routes.js';
 import { toClientConfig, type AppConfig } from './config.js';
 import {
@@ -33,6 +34,10 @@ export type Phase3HttpOptions = Readonly<{
   auth: Omit<AuthRouterOptions, 'basePath' | 'publicOrigin' | 'secureCookie'>;
   settings: Omit<SettingsRouterOptions, keyof AuthMiddlewareOptions>;
   tabs: Omit<TabRouterOptions, keyof AuthMiddlewareOptions>;
+  admin: Omit<
+    AdminRouterOptions,
+    Exclude<keyof AuthMiddlewareOptions, 'logger'>
+  >;
 }>;
 
 export type CreateAppOptions = Readonly<{
@@ -65,17 +70,31 @@ export function createApp(options: CreateAppOptions): Express {
 
   app.get('/health', (_request, response) => {
     const memory = process.memoryUsage();
+    const activeSessions = safeMetric(
+      options.metrics.activeSessionCount,
+      options.config.sessionMaxCount,
+    );
+    const connectedWebSockets = safeMetric(
+      options.metrics.connectedWebSocketCount,
+      1_024,
+    );
     response.json({
-      status: 'ok',
+      status:
+        activeSessions.valid && connectedWebSockets.valid ? 'ok' : 'degraded',
       uptimeSeconds: process.uptime(),
       memory: { rss: memory.rss, heapUsed: memory.heapUsed },
-      activeSessions: options.metrics.activeSessionCount(),
-      connectedWebSockets: options.metrics.connectedWebSocketCount(),
+      activeSessions: activeSessions.value,
+      connectedWebSockets: connectedWebSockets.value,
     });
   });
 
   app.get('/ready', async (_request, response) => {
-    const ready = await options.readiness.isReady();
+    let ready = false;
+    try {
+      ready = (await options.readiness.isReady()) === true;
+    } catch {
+      ready = false;
+    }
     response.status(ready ? 200 : 503).json({
       status: ready ? 'ready' : 'not_ready',
       ready,
@@ -137,6 +156,26 @@ export function createApp(options: CreateAppOptions): Express {
         }),
       ),
     );
+    app.use(
+      apiPrefix,
+      dispatchNamespace(
+        '/admin',
+        createAdminRouter({
+          mode: sharedAuth.mode,
+          publicOrigin: sharedAuth.publicOrigin,
+          authService: sharedAuth.authService,
+          ...(sharedAuth.cloudflareAccessProvider === undefined
+            ? {}
+            : {
+                cloudflareAccessProvider: sharedAuth.cloudflareAccessProvider,
+              }),
+          ...(sharedAuth.trustedHeaderProvider === undefined
+            ? {}
+            : { trustedHeaderProvider: sharedAuth.trustedHeaderProvider }),
+          ...options.http.admin,
+        }),
+      ),
+    );
   }
 
   app.use(
@@ -180,6 +219,21 @@ export function createApp(options: CreateAppOptions): Express {
 
   app.use((_request, response) => response.sendStatus(404));
   return app;
+}
+
+function safeMetric(
+  read: () => number,
+  maximum: number,
+): Readonly<{ valid: boolean; value: number }> {
+  try {
+    const value = read();
+    if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+      return Object.freeze({ valid: false, value: 0 });
+    }
+    return Object.freeze({ valid: true, value });
+  } catch {
+    return Object.freeze({ valid: false, value: 0 });
+  }
 }
 
 function withBase(basePath: string, path: string): string {
