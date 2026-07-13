@@ -99,7 +99,7 @@ describe('AuthService', () => {
       rateLimiter: limiter,
       idleDurationMs: 100,
       absoluteDurationMs: 1000,
-      maxSessions: 1,
+      maxSessions: 2,
     });
 
     const firstAdmitted = service.login(login());
@@ -134,12 +134,131 @@ describe('AuthService', () => {
     firstVerification.resolve(true);
     secondVerification.resolve(true);
     const [first, second] = await Promise.all([firstAdmitted, secondAdmitted]);
-    expect(service.authenticateCookie(first.cookieValue)).toBeUndefined();
+    expect(service.authenticateCookie(first.cookieValue)).toBeDefined();
     expect(service.authenticateCookie(second.cookieValue)).toBeDefined();
     expect(verify).toHaveBeenCalledTimes(2);
     expect(random).toHaveBeenCalledTimes(4);
     expect(createCsrf).toHaveBeenCalledTimes(2);
   });
+
+  it('reserves admitted login commits in FIFO order without preparing secrets early', async () => {
+    const h = setup('local', { maxSessions: 2 });
+    const firstVerification = deferred<boolean>();
+    h.credentials.verify
+      .mockReturnValueOnce(firstVerification.promise)
+      .mockResolvedValueOnce(true);
+    const createCsrf = vi.spyOn(h.csrf, 'create');
+    const settled: string[] = [];
+
+    const first = h.service
+      .login(login())
+      .then((result) => (settled.push('first'), result));
+    const second = h.service
+      .login({ ...login(), address: '127.0.0.2' })
+      .then((result) => (settled.push('second'), result));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.credentials.verify).toHaveBeenCalledTimes(2);
+    expect(settled).toEqual([]);
+    expect(h.random).not.toHaveBeenCalled();
+    expect(createCsrf).not.toHaveBeenCalled();
+
+    firstVerification.resolve(true);
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(settled).toEqual(['first', 'second']);
+    expect(h.service.authenticateCookie(firstResult.cookieValue)).toBeDefined();
+    expect(
+      h.service.authenticateCookie(secondResult.cookieValue),
+    ).toBeDefined();
+    expect(h.random).toHaveBeenCalledTimes(4);
+    expect(createCsrf).toHaveBeenCalledTimes(2);
+  });
+
+  it('caps pending logins before limiter admission and recovers after settlement', async () => {
+    let now = 0;
+    let byte = 1;
+    const firstVerification = deferred<boolean>();
+    const verify = vi
+      .fn()
+      .mockReturnValueOnce(firstVerification.promise)
+      .mockResolvedValueOnce(true);
+    const limiter = new LoginRateLimiter({
+      clock: () => now,
+      global: { capacity: 1, refillPerSecond: 1 },
+      address: { capacity: 1, refillPerSecond: 1 },
+      maxAddresses: 2,
+    });
+    const consume = vi.spyOn(limiter, 'consume');
+    const service = new AuthService({
+      mode: 'local',
+      clock: () => now,
+      randomBytes: (size) => Buffer.alloc(size, byte++),
+      credentialStore: { verify, replacePassword: vi.fn() },
+      csrfService: new CsrfService(),
+      rateLimiter: limiter,
+      idleDurationMs: 100,
+      absoluteDurationMs: 1000,
+      maxSessions: 1,
+    });
+
+    const pending = service.login(login());
+    now = 1000;
+    const denied = await service.login({
+      ...login(),
+      address: '127.0.0.2',
+    });
+    expect(denied.bootstrap.authenticated).toBe(false);
+    expect(consume).toHaveBeenCalledOnce();
+    expect(verify).toHaveBeenCalledOnce();
+
+    firstVerification.resolve(false);
+    expect((await pending).bootstrap.authenticated).toBe(false);
+    now = 2000;
+    const recovered = await service.login({
+      ...login(),
+      address: '127.0.0.2',
+    });
+    expect(recovered.bootstrap.authenticated).toBe(true);
+    expect(consume).toHaveBeenCalledTimes(2);
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['invalid', 'throwing'] as const)(
+    'lets a second FIFO login recover after an %s head verification',
+    async (outcome) => {
+      const h = setup('local', { maxSessions: 2 });
+      const firstVerification = deferred<boolean>();
+      h.credentials.verify
+        .mockReturnValueOnce(firstVerification.promise)
+        .mockResolvedValueOnce(true);
+      const first = h.service.login(login());
+      let secondSettled = false;
+      const second = h.service
+        .login({ ...login(), address: '127.0.0.2' })
+        .then((result) => {
+          secondSettled = true;
+          return result;
+        });
+      await Promise.resolve();
+      await Promise.resolve();
+      const settledBeforeHead = secondSettled;
+      const secretsPreparedBeforeHead = h.random.mock.calls.length;
+
+      if (outcome === 'invalid') firstVerification.resolve(false);
+      else firstVerification.reject(new Error('verification failure'));
+      if (outcome === 'invalid')
+        expect((await first).bootstrap.authenticated).toBe(false);
+      else
+        await expect(first).rejects.toThrow('Authentication operation failed');
+      const recovered = await second;
+
+      expect(settledBeforeHead).toBe(false);
+      expect(secretsPreparedBeforeHead).toBe(0);
+      expect(recovered.bootstrap.authenticated).toBe(true);
+      expect(h.service.authenticateCookie(recovered.cookieValue)).toBeDefined();
+    },
+  );
 
   it('handles local failure, success reset, and wrong-mode calls generically', async () => {
     const h = setup('local');
@@ -640,14 +759,16 @@ function setup(
     replacePassword: vi.fn(async () => ({ state: 'committed' as const })),
   };
   const limiter = { consume: vi.fn(() => true), resetAddress: vi.fn() };
+  const random = vi.fn((size: number) => Buffer.alloc(size, byte++));
+  const csrf = new CsrfService({
+    randomBytes: (size) => Buffer.alloc(size, byte++),
+  });
   const service = new AuthService({
     mode,
     clock: () => time.now,
-    randomBytes: (size) => Buffer.alloc(size, byte++),
+    randomBytes: random,
     credentialStore: credentials,
-    csrfService: new CsrfService({
-      randomBytes: (size) => Buffer.alloc(size, byte++),
-    }),
+    csrfService: csrf,
     rateLimiter: limiter,
     idleDurationMs: overrides.idleDurationMs ?? 100,
     absoluteDurationMs: overrides.absoluteDurationMs ?? 1000,
@@ -656,7 +777,7 @@ function setup(
       ? {}
       : { maxObservers: overrides.maxObservers }),
   });
-  return { service, credentials, limiter, time };
+  return { service, credentials, limiter, time, random, csrf };
 }
 
 function deferred<T>() {

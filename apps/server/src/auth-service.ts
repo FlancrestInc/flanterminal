@@ -76,6 +76,7 @@ export class AuthService {
     }>
   >();
   #establishmentTail: Promise<void> = Promise.resolve();
+  #pendingLogins = 0;
   #passwordChangeActive = false;
   constructor(o: AuthServiceOptions) {
     if (
@@ -135,25 +136,37 @@ export class AuthService {
   }
   login(input: LocalLoginAttempt): Promise<AuthBootstrapResult> {
     if (this.#mode !== 'local') return Promise.reject(new AuthServiceError());
+    if (this.#pendingLogins >= this.#max)
+      return Promise.resolve(localLoginFailure());
+    let label: string;
+    try {
+      label = normalizeLabel(input.username);
+    } catch {
+      return Promise.reject(new AuthServiceError());
+    }
+    const address = boundedAddress(input.address);
     let allowed: boolean;
     try {
-      allowed = this.#limiter.consume(input.address);
+      allowed = this.#limiter.consume(address);
     } catch {
       return Promise.reject(new AuthServiceError());
     }
-    if (!allowed)
-      return Promise.resolve(
-        frozen({
-          bootstrap: frozen({ authenticated: false, mode: 'local' }),
-        }),
-      );
-    let verification: Promise<boolean>;
+    if (!allowed) return Promise.resolve(localLoginFailure());
+    const verification = promiseBridge<boolean>();
+    const result = this.#reserveLoginSlot(verification.promise, label, address);
     try {
-      verification = this.#credentials.verify(input.username, input.password);
-    } catch {
-      return Promise.reject(new AuthServiceError());
+      const credentialVerification = this.#credentials.verify(
+        input.username,
+        input.password,
+      );
+      void credentialVerification.then(
+        verification.resolve,
+        verification.reject,
+      );
+    } catch (error) {
+      verification.reject(error);
     }
-    return this.#completeLogin(input.username, input.address, verification);
+    return result;
   }
   authenticateCookie(
     rawCookie: string | undefined,
@@ -364,31 +377,23 @@ export class AuthService {
       throw new AuthServiceError();
     }
   }
-  #safePrepareSession(
-    mode: AuthMode,
-    label: string,
-    upstreamExpiresAt?: number,
-  ): PreparedSession {
-    try {
-      return this.#prepareSession(mode, label, upstreamExpiresAt);
-    } catch {
-      throw new AuthServiceError();
-    }
-  }
-  #safeCommitSession(
-    prepared: PreparedSession,
-    beforeCommit?: () => void,
-  ): AuthBootstrapResult {
-    try {
-      return this.#commitSession(prepared, beforeCommit);
-    } catch {
-      throw new AuthServiceError();
-    }
-  }
-  async #completeLogin(
-    username: string,
-    address: string,
+  #reserveLoginSlot(
     verification: Promise<boolean>,
+    label: string,
+    address: string,
+  ): Promise<AuthBootstrapResult> {
+    this.#pendingLogins += 1;
+    const result = this.#enqueueEstablishment(() =>
+      this.#completeLoginSlot(verification, label, address),
+    );
+    return result.finally(() => {
+      this.#pendingLogins -= 1;
+    });
+  }
+  async #completeLoginSlot(
+    verification: Promise<boolean>,
+    label: string,
+    address: string,
   ): Promise<AuthBootstrapResult> {
     let valid: boolean;
     try {
@@ -396,18 +401,9 @@ export class AuthService {
     } catch {
       throw new AuthServiceError();
     }
-    if (!valid)
-      return frozen({
-        bootstrap: frozen({ authenticated: false, mode: 'local' }),
-      });
-    const prepared = this.#safePrepareSession(
-      'local',
-      normalizeLabel(username),
-    );
-    return this.#enqueueEstablishment(async () =>
-      this.#safeCommitSession(prepared, () =>
-        this.#limiter.resetAddress(address),
-      ),
+    if (!valid) return localLoginFailure();
+    return this.#safeEstablish('local', label, undefined, () =>
+      this.#limiter.resetAddress(address),
     );
   }
   async #runPasswordChange(
@@ -533,6 +529,27 @@ function expiredReasonAt(s: Stored, now: number): RevocationReason | undefined {
   ];
   candidates.sort((a, b) => a[0] - b[0]);
   return now >= candidates[0]![0] ? candidates[0]![1] : undefined;
+}
+function localLoginFailure(): AuthBootstrapResult {
+  return frozen({
+    bootstrap: frozen({ authenticated: false, mode: 'local' }),
+  });
+}
+function boundedAddress(value: string): string {
+  return typeof value === 'string' && value.length <= 256 ? value : 'unknown';
+}
+function promiseBridge<T>(): Readonly<{
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+}> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((accept, decline) => {
+    resolve = accept;
+    reject = decline;
+  });
+  return frozen({ promise, resolve, reject });
 }
 function frozen<T>(v: T): T {
   return Object.freeze(v);
