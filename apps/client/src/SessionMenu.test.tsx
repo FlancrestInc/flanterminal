@@ -35,6 +35,9 @@ function setup(desiredState: 'active' | 'stopped' = 'active') {
 describe('SessionMenu', () => {
   it('offers client, bridge, session, and ordering commands for active tabs', () => {
     const actions = setup();
+    expect(
+      screen.getByRole('menuitem', { name: 'Restart bridge' }),
+    ).toHaveAttribute('title', 'Restart bridge');
     fireEvent.click(screen.getByRole('menuitem', { name: 'Reconnect' }));
     expect(actions.onReconnect).toHaveBeenCalledOnce();
 

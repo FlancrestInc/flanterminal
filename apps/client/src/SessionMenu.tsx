@@ -38,6 +38,7 @@ export function SessionMenu(props: SessionMenuProps) {
     <button
       type="button"
       role="menuitem"
+      title={label}
       disabled={disabled}
       onClick={() => {
         setOpen(false);

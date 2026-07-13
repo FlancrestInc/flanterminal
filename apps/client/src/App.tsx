@@ -4,10 +4,12 @@ import type {
   SettingsResponse,
   WorkspaceSettings,
 } from '@flanterminal/shared';
-import { Settings } from 'lucide-react';
+import { Activity, Settings } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ConfirmDialog } from './ConfirmDialog.js';
+import { AdminView } from './AdminView.js';
+import { createAdminApi, type AdminApi } from './admin-api.js';
 import { SessionMenu } from './SessionMenu.js';
 import { SettingsView } from './SettingsView.js';
 import { TabBar } from './TabBar.js';
@@ -17,11 +19,15 @@ import {
   type TerminalSessionHandle,
 } from './TerminalSession.js';
 import { useTabs } from './useTabs.js';
+import { useAdmin } from './useAdmin.js';
 import type { ConnectionStatus } from './useTerminalSocket.js';
 
 export interface AppProps {
   readonly config: ClientConfig;
   readonly api?: TabsApi;
+  readonly adminApi?: AdminApi;
+  readonly privateFetch?: typeof fetch;
+  readonly onAuthenticationRequired?: () => void;
   readonly settingsResponse: SettingsResponse;
   readonly settingsBusy: boolean;
   readonly settingsError: string | null;
@@ -43,6 +49,9 @@ type Confirmation = Readonly<{
 export function App({
   config,
   api: suppliedApi,
+  adminApi: suppliedAdminApi,
+  privateFetch,
+  onAuthenticationRequired,
   settingsResponse,
   settingsBusy,
   settingsError,
@@ -56,6 +65,10 @@ export function App({
     () => createTabsApi(config.basePath),
     [config.basePath],
   );
+  const defaultAdminApi = useMemo(
+    () => createAdminApi(config.basePath, privateFetch ?? fetch),
+    [config.basePath, privateFetch],
+  );
   const tabs = useTabs(suppliedApi ?? defaultApi);
   const [statuses, setStatuses] = useState<
     Readonly<Record<string, ConnectionStatus>>
@@ -64,7 +77,15 @@ export function App({
     Readonly<Record<string, number>>
   >({});
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
-  const [view, setView] = useState<'terminal' | 'settings'>('terminal');
+  const [view, setView] = useState<'terminal' | 'settings' | 'admin'>(
+    'terminal',
+  );
+  const admin = useAdmin(suppliedAdminApi ?? defaultAdminApi, {
+    active: view === 'admin',
+    ...(onAuthenticationRequired === undefined
+      ? {}
+      : { onAuthenticationRequired }),
+  });
   const sessionRefs = useRef(new Map<string, TerminalSessionHandle>());
   const healthRef = useRef(tabs.health);
   useEffect(() => {
@@ -170,6 +191,15 @@ export function App({
           {...(onChangePassword === undefined ? {} : { onChangePassword })}
         />
       ) : null}
+      {view === 'admin' ? (
+        <AdminView
+          controller={admin}
+          onBack={() => {
+            setView('terminal');
+            void tabs.refresh();
+          }}
+        />
+      ) : null}
       <main className="app-shell" hidden={view !== 'terminal'}>
         <header className="top-bar">
           <TabBar
@@ -216,15 +246,26 @@ export function App({
               onMoveRight={() => reorderBy(1)}
             />
           ) : null}
-          <button
-            className="icon-button"
-            type="button"
-            title="Settings"
-            aria-label="Settings"
-            onClick={() => setView('settings')}
-          >
-            <Settings size={17} aria-hidden="true" />
-          </button>
+          <div className="top-bar-actions">
+            <button
+              className="icon-button"
+              type="button"
+              title="Administration"
+              aria-label="Administration"
+              onClick={() => setView('admin')}
+            >
+              <Activity size={17} aria-hidden="true" />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              title="Settings"
+              aria-label="Settings"
+              onClick={() => setView('settings')}
+            >
+              <Settings size={17} aria-hidden="true" />
+            </button>
+          </div>
         </header>
 
         {tabs.error ? (

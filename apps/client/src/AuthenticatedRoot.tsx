@@ -168,6 +168,8 @@ function SettingsWorkspace({
       <App
         config={config}
         api={tabsApi}
+        privateFetch={privateFetch}
+        onAuthenticationRequired={onAuthenticationRequired}
         settingsResponse={settings.response}
         settingsBusy={settings.busy}
         settingsError={settings.error}

@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './test/setup.js';
 import type { TabsApi } from './tabs-api.js';
+import type { AdminApi } from './admin-api.js';
 import type { TerminalSessionHandle } from './TerminalSession.js';
 
 const A = '123e4567-e89b-42d3-a456-426614174000';
@@ -142,6 +143,29 @@ function api(initial = [tab(A, 0), tab(B, 1), tab(C, 2, 'stopped')]) {
   return client;
 }
 
+function adminApi(): AdminApi {
+  return {
+    load: vi.fn(async () => ({
+      generatedAt: '2026-07-13T12:00:00.000Z',
+      uptimeSeconds: 3600,
+      memory: { rss: 64_000_000, heapUsed: 24_000_000 },
+      totals: { tabs: 0, runningSessions: 0, bridges: 0, webSockets: 0 },
+      cleanup: { enabled: false, running: false, lastRunAt: null },
+      sessions: [],
+    })),
+    sessionAction: vi.fn(async () => undefined),
+    cleanup: vi.fn(async () => ({
+      disabled: true,
+      examined: 0,
+      terminated: 0,
+      skipped: 0,
+      failed: 0,
+      startedAt: '2026-07-13T12:00:00.000Z',
+      finishedAt: '2026-07-13T12:00:00.000Z',
+    })),
+  };
+}
+
 beforeEach(() => vi.clearAllMocks());
 
 describe('App', () => {
@@ -224,6 +248,36 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back to terminal' }));
     expect(screen.getByRole('tab', { name: 'Terminal 1' })).toBeInTheDocument();
     expect(screen.getByLabelText(`Terminal ${A}`)).toBe(terminal);
+  });
+
+  it('opens administration on demand while preserving exact terminal identity', async () => {
+    const administration = adminApi();
+    const tabs = api();
+    render(
+      <App
+        config={config}
+        api={tabs}
+        adminApi={administration}
+        {...settingsProps}
+      />,
+    );
+    const terminal = await screen.findByLabelText(`Terminal ${A}`);
+    expect(administration.load).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Administration' }));
+    expect(
+      await screen.findByRole('heading', { name: 'Administration' }),
+    ).toBeVisible();
+    expect(terminal).toBeInTheDocument();
+    expect(terminal.closest('.app-shell')).toHaveAttribute('hidden');
+    expect(administration.load).toHaveBeenCalledOnce();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to terminal' }));
+    expect(screen.getByLabelText(`Terminal ${A}`)).toBe(terminal);
+    expect(
+      screen.queryByRole('heading', { name: 'Administration' }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => expect(tabs.list).toHaveBeenCalledTimes(2));
   });
 
   it('does not intercept workspace shortcuts when they are disabled', async () => {
