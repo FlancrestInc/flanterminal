@@ -117,15 +117,35 @@ export function requirePublicMutationSecurity(
 export function touchHttpActivity(
   options: Pick<AuthMiddlewareOptions, 'authService' | 'logger'>,
 ): RequestHandler {
-  return (_request, response, next) => {
+  return (request, response, next) => {
     const session = response.locals.authSession as
       AuthenticatedSession | undefined;
     if (session === undefined) {
       reject(options, response, 401, 'authentication_required');
       return;
     }
+    let current: AuthenticatedSession | undefined;
     try {
-      options.authService.touch(session.id, 'http');
+      current = options.authService.authenticateCookie(
+        readSessionCookie(request),
+      );
+    } catch {
+      reject(options, response, 401, 'authentication_required');
+      return;
+    }
+    const upstreamIdentity = response.locals.upstreamIdentity as
+      UpstreamIdentity | undefined;
+    if (
+      current === undefined ||
+      !sameAuthority(session, current) ||
+      !identityMatches(current, upstreamIdentity)
+    ) {
+      reject(options, response, 401, 'authentication_required');
+      return;
+    }
+    response.locals.authSession = immutableSession(current);
+    try {
+      options.authService.touch(current.id, 'http');
     } catch {
       log(options.logger, 'error', 'authentication_activity_failed', {
         category: 'operation_failed',
@@ -205,8 +225,15 @@ export async function resolveAuthentication(
   if (session === undefined || session.mode !== options.mode) return undefined;
   const upstreamIdentity = await currentUpstreamIdentity(options, request);
   if (!identityMatches(session, upstreamIdentity)) return undefined;
+  const current = options.authService.authenticateCookie(cookie);
+  if (
+    current === undefined ||
+    !sameAuthority(session, current) ||
+    !identityMatches(current, upstreamIdentity)
+  )
+    return undefined;
   return Object.freeze({
-    authSession: immutableSession(session),
+    authSession: immutableSession(current),
     ...(upstreamIdentity === undefined
       ? {}
       : { upstreamIdentity: immutableIdentity(upstreamIdentity) }),
@@ -256,6 +283,17 @@ function identityMatches(
     upstream !== undefined &&
     upstream.mode === session.mode &&
     upstream.identityLabel === session.identityLabel
+  );
+}
+
+function sameAuthority(
+  expected: AuthenticatedSession,
+  current: AuthenticatedSession,
+): boolean {
+  return (
+    current.id === expected.id &&
+    current.mode === expected.mode &&
+    current.identityLabel === expected.identityLabel
   );
 }
 

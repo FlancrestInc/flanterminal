@@ -41,7 +41,12 @@ describe('authentication middleware', () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ identityLabel: 'admin' });
-    expect(calls).toEqual([`authenticate:${COOKIE}`, 'touch:session-id:http']);
+    expect(calls).toEqual([
+      `authenticate:${COOKIE}`,
+      `authenticate:${COOKIE}`,
+      `authenticate:${COOKIE}`,
+      'touch:session-id:http',
+    ]);
   });
 
   it.each([
@@ -115,6 +120,55 @@ describe('authentication middleware', () => {
     expect(options.authService.touch).not.toHaveBeenCalled();
   });
 
+  it.each(['cloudflare-access', 'trusted-header'] as const)(
+    'rejects %s authority revoked while upstream validation is pending',
+    async (mode) => {
+      const identity = {
+        mode,
+        identityLabel: 'person@example.com',
+        ...(mode === 'cloudflare-access' ? { expiresAt: 2_000 } : {}),
+      };
+      const provider = deferred<typeof identity>();
+      const authenticate = vi.fn(() => provider.promise);
+      let authority: AuthenticatedSession | undefined = session({
+        mode,
+        identityLabel: identity.identityLabel,
+        ...(identity.expiresAt === undefined
+          ? {}
+          : { upstreamExpiresAt: identity.expiresAt }),
+      });
+      const options = middlewareOptions(
+        { authenticateCookie: vi.fn(() => authority) },
+        {
+          mode,
+          ...(mode === 'cloudflare-access'
+            ? { cloudflareAccessProvider: { authenticate } }
+            : { trustedHeaderProvider: { authenticate } }),
+        },
+      );
+      const response = responseStub();
+      const next = vi.fn();
+
+      const pending = requireAuthentication(options)(
+        requestStub(['Cookie', `flanterminal_session=${COOKIE}`]),
+        response,
+        next,
+      );
+      await vi.waitFor(() => expect(authenticate).toHaveBeenCalledOnce());
+      authority = undefined;
+      provider.resolve(identity);
+      await pending;
+
+      expect(response.status).toHaveBeenCalledWith(401);
+      expect(response.json).toHaveBeenCalledWith({
+        error: 'authentication_required',
+      });
+      expect(response.locals).not.toHaveProperty('authSession');
+      expect(next).not.toHaveBeenCalled();
+      expect(options.authService.authenticateCookie).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it('checks exact origin and CSRF before mutation activity', async () => {
     const calls: string[] = [];
     const options = middlewareOptions({
@@ -150,6 +204,50 @@ describe('authentication middleware', () => {
     expect(calls).toEqual([`csrf:${CSRF}`, 'touch']);
   });
 
+  it('rejects authority revoked while a JSON mutation body is pending', async () => {
+    let authority: AuthenticatedSession | undefined = session();
+    const touch = vi.fn();
+    const options = middlewareOptions({
+      authenticateCookie: vi.fn(() => authority),
+      touch,
+    });
+    const bodyPending = deferred<void>();
+    const handler = vi.fn(
+      (_request: express.Request, response: express.Response) =>
+        response.json({ ok: true }),
+    );
+    const app = express();
+    app.post(
+      '/slow',
+      requireAuthentication(options),
+      requireMutationSecurity(options),
+      (_request, _response, next) => {
+        bodyPending.resolve();
+        next();
+      },
+      express.json({ limit: 16 * 1024, strict: true }),
+      touchHttpActivity(options),
+      handler,
+    );
+    server = createServer(app);
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as { port: number }).port;
+    const pending = streamedMutation(port);
+
+    await bodyPending.promise;
+    authority = undefined;
+    pending.request.end('"value"}');
+    const response = await pending.response;
+
+    expect(response.status).toBe(401);
+    expect(JSON.parse(response.body)).toEqual({
+      error: 'authentication_required',
+    });
+    expect(touch).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('propagates a downstream authentication error exactly once', async () => {
     const marker = new Error('downstream private error');
     const options = middlewareOptions();
@@ -180,7 +278,7 @@ describe('authentication middleware', () => {
 
     await dispatchWithErrorHandler(
       touchHttpActivity(options),
-      requestStub([]),
+      requestStub(['Cookie', `flanterminal_session=${COOKIE}`]),
       response,
       marker,
       errorHandler,
@@ -487,4 +585,52 @@ async function dispatchWithErrorHandler(
   } catch (error) {
     errorHandler(error);
   }
+}
+
+function streamedMutation(port: number): Readonly<{
+  request: ReturnType<typeof httpRequest>;
+  response: Promise<{ status: number; body: string }>;
+}> {
+  let request!: ReturnType<typeof httpRequest>;
+  const response = new Promise<{ status: number; body: string }>(
+    (resolve, reject) => {
+      request = httpRequest(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/slow',
+          method: 'POST',
+          headers: {
+            Cookie: `flanterminal_session=${COOKIE}`,
+            Origin: ORIGIN,
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': CSRF,
+          },
+        },
+        (incoming) => {
+          const chunks: Buffer[] = [];
+          incoming.on('data', (chunk: Buffer) => chunks.push(chunk));
+          incoming.on('end', () =>
+            resolve({
+              status: incoming.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString('utf8'),
+            }),
+          );
+        },
+      );
+      request.on('error', reject);
+      request.write('{"value":');
+    },
+  );
+  return Object.freeze({ request, response });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((accept, decline) => {
+    resolve = accept;
+    reject = decline;
+  });
+  return { promise, resolve, reject };
 }
