@@ -220,4 +220,36 @@ describe('workspace settings contracts', () => {
       }),
     ).toThrow();
   });
+
+  it('NFC-normalizes default and allowed shell paths', () => {
+    expect(
+      parseWorkspaceSettings({ ...settings, defaultShell: '/bin/Cafe\u0301' })
+        .defaultShell,
+    ).toBe('/bin/Caf\u00e9');
+    expect(
+      parseWorkspaceSettingsResponse({
+        settings: { ...settings, defaultShell: '/bin/Cafe\u0301' },
+        limits,
+        allowedShells: ['/bin/Cafe\u0301'],
+      }).allowedShells,
+    ).toEqual(['/bin/Caf\u00e9']);
+  });
+
+  it.each([
+    '/bin/bash\n--login',
+    '/bin/override\u202eeman',
+    '/bin/zero\u200bwidth',
+    `/${'\ud83d\ude80'.repeat(1_024)}`,
+  ])('rejects unsafe or over-4096-byte shell path %j', (defaultShell) => {
+    expect(() =>
+      parseWorkspaceSettings({ ...settings, defaultShell }),
+    ).toThrow();
+    expect(() =>
+      parseWorkspaceSettingsResponse({
+        settings,
+        limits,
+        allowedShells: ['/bin/bash', defaultShell],
+      }),
+    ).toThrow();
+  });
 });

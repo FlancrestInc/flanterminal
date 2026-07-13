@@ -1,17 +1,17 @@
 import { z } from 'zod';
 
-import { desiredStateSchema, sessionStateSchema, tabIdSchema } from './tabs.js';
+import { safeNormalizedStringSchema } from './safe-string.js';
+import {
+  desiredStateSchema,
+  displayNameSchema,
+  sessionStateSchema,
+  tabIdSchema,
+} from './tabs.js';
 
-const utf8Encoder = new TextEncoder();
-const forbiddenDisplayCharacterPattern = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/u;
 const utcTimestampSchema = z.iso.datetime({ offset: false });
 
 function boundedDisplayString(maximumBytes: number) {
-  return z
-    .string()
-    .min(1)
-    .refine((value) => !forbiddenDisplayCharacterPattern.test(value))
-    .refine((value) => utf8Encoder.encode(value).byteLength <= maximumBytes);
+  return safeNormalizedStringSchema({ maxUtf8Bytes: maximumBytes });
 }
 
 const nonnegativeIntegerSchema = z.number().int().nonnegative();
@@ -29,7 +29,7 @@ export type AdminAction = z.infer<typeof adminActionSchema>;
 export const adminSessionRowSchema = z
   .object({
     id: tabIdSchema,
-    displayName: boundedDisplayString(128),
+    displayName: displayNameSchema,
     tmuxSessionName: boundedDisplayString(128),
     desiredState: desiredStateSchema,
     observedState: sessionStateSchema,

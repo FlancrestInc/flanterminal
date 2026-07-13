@@ -85,20 +85,58 @@ describe('administration contracts', () => {
     ).toThrow();
   });
 
-  it('bounds display fields by UTF-8 bytes', () => {
+  it('preserves the existing tab display policy and normalizes display values', () => {
     expect(
       parseAdminSnapshot({
         ...snapshot,
-        sessions: [{ ...row, displayName: '\ud83d\ude80'.repeat(32) }],
+        sessions: [
+          {
+            ...row,
+            displayName: '\ud83d\ude80'.repeat(80),
+            lifecycleError: 'Cafe\u0301',
+          },
+        ],
       }).sessions[0]?.displayName,
-    ).toBe('\ud83d\ude80'.repeat(32));
+    ).toBe('\ud83d\ude80'.repeat(80));
+    expect(
+      parseAdminSnapshot({
+        ...snapshot,
+        sessions: [
+          { ...row, displayName: 'Developer \ud83d\udc69\u200d\ud83d\udcbb' },
+        ],
+      }).sessions[0]?.displayName,
+    ).toBe('Developer \ud83d\udc69\u200d\ud83d\udcbb');
+    expect(
+      parseAdminSnapshot({
+        ...snapshot,
+        sessions: [{ ...row, lifecycleError: 'Cafe\u0301' }],
+      }).sessions[0]?.lifecycleError,
+    ).toBe('Caf\u00e9');
     expect(() =>
       parseAdminSnapshot({
         ...snapshot,
-        sessions: [{ ...row, displayName: '\ud83d\ude80'.repeat(33) }],
+        sessions: [{ ...row, displayName: '\ud83d\ude80'.repeat(81) }],
       }),
     ).toThrow();
   });
+
+  it.each(['line\nfeed', 'override\u202ename', 'zero-width\u200bname'])(
+    'rejects misleading control or format characters in admin value %j',
+    (value) => {
+      expect(() =>
+        parseAdminSnapshot({
+          ...snapshot,
+          sessions: [{ ...row, lifecycleError: value }],
+        }),
+      ).toThrow();
+      expect(() =>
+        parseAdminSnapshot({
+          ...snapshot,
+          sessions: [{ ...row, displayName: value }],
+        }),
+      ).toThrow();
+    },
+  );
 
   it('parses and freezes a strict cleanup result', () => {
     const result = {

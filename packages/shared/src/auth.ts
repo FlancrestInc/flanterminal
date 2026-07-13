@@ -1,20 +1,15 @@
 import { z } from 'zod';
 
-const utf8Encoder = new TextEncoder();
-const forbiddenDisplayCharacterPattern = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/u;
+import { safeNormalizedStringSchema, utf8ByteLength } from './safe-string.js';
 
 function boundedDisplayString(maximumBytes: number) {
-  return z
-    .string()
-    .min(1)
-    .refine((value) => !forbiddenDisplayCharacterPattern.test(value))
-    .refine((value) => utf8Encoder.encode(value).byteLength <= maximumBytes);
+  return safeNormalizedStringSchema({ maxUtf8Bytes: maximumBytes });
 }
 
 const secretStringSchema = z
   .string()
   .min(1)
-  .refine((value) => utf8Encoder.encode(value).byteLength <= 4_096);
+  .refine((value) => utf8ByteLength(value) <= 4_096);
 const csrfTokenSchema = z
   .string()
   .min(1)

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { safeNormalizedStringSchema } from './safe-string.js';
+
 const fontFamilySchema = z.enum(['jetbrains-mono-nerd', 'system-monospace']);
 const themeSchema = z.enum(['dark', 'light', 'ubuntu']);
 const cursorStyleSchema = z.enum(['block', 'underline', 'bar']);
@@ -7,12 +9,11 @@ const bellBehaviorSchema = z.enum(['none', 'visual', 'sound']);
 const reconnectBehaviorSchema = z.enum(['automatic', 'manual']);
 const workspaceShortcutModeSchema = z.enum(['default', 'disabled']);
 
-const absoluteShellSchema = z
-  .string()
-  .min(1)
-  .max(4_096)
-  .startsWith('/')
-  .refine((value) => !value.includes('\u0000'));
+const absoluteShellSchema = safeNormalizedStringSchema({
+  maxUtf8Bytes: 4_096,
+}).refine((value) => value.startsWith('/'), {
+  message: 'Shell path must be absolute',
+});
 
 function steppedNumber(minimum: number, maximum: number, step: number) {
   return z

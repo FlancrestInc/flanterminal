@@ -54,6 +54,40 @@ describe('authentication contracts', () => {
     ).toThrow();
   });
 
+  it('NFC-normalizes safe identity and username display values', () => {
+    const bootstrap = parseAuthBootstrap({
+      authenticated: true,
+      mode: 'local',
+      identityLabel: 'Cafe\u0301',
+      csrfToken: 'csrf-token',
+    });
+    if (!bootstrap.authenticated)
+      throw new Error('expected authenticated result');
+
+    expect(bootstrap.identityLabel).toBe('Caf\u00e9');
+    expect(
+      parseLoginRequest({ username: 'Cafe\u0301', password: 'secret' })
+        .username,
+    ).toBe('Caf\u00e9');
+  });
+
+  it.each(['line\nfeed', 'override\u202ename', 'zero-width\u200bname'])(
+    'rejects control and format characters in identity display value %j',
+    (identityLabel) => {
+      expect(() =>
+        parseAuthBootstrap({
+          authenticated: true,
+          mode: 'local',
+          identityLabel,
+          csrfToken: 'csrf-token',
+        }),
+      ).toThrow();
+      expect(() =>
+        parseLoginRequest({ username: identityLabel, password: 'secret' }),
+      ).toThrow();
+    },
+  );
+
   it.each([
     { authenticated: false, mode: 'none' },
     { authenticated: false, mode: 'local', csrfToken: 'leak' },
