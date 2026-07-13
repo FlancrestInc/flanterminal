@@ -260,6 +260,120 @@ describe('AuthService', () => {
     },
   );
 
+  it('bounds bootstrap slots behind an unresolved admitted login', async () => {
+    const h = setup('local', { maxSessions: 1 });
+    const verification = deferred<boolean>();
+    h.credentials.verify.mockReturnValueOnce(verification.promise);
+    const createCsrf = vi.spyOn(h.csrf, 'create');
+    const loginResult = h.service.login(login());
+    const bootstraps = Array.from({ length: 12 }, () =>
+      h.service.bootstrap({ type: 'none' }),
+    );
+    const observed = bootstraps.map((bootstrap) =>
+      bootstrap.then(
+        () => 'fulfilled' as const,
+        (error: unknown) =>
+          error instanceof Error ? error.message : 'unknown error',
+      ),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const immediate = await Promise.all(
+      observed
+        .slice(7)
+        .map(async (outcome) =>
+          Promise.race([outcome, Promise.resolve('pending' as const)]),
+        ),
+    );
+    expect(immediate).toEqual(Array(5).fill('Authentication operation failed'));
+    expect(h.random).not.toHaveBeenCalled();
+    expect(createCsrf).not.toHaveBeenCalled();
+
+    verification.resolve(true);
+    const established = await loginResult;
+    const outcomes = await Promise.all(observed);
+    expect(outcomes.slice(0, 7)).toEqual(Array(7).fill('fulfilled'));
+    expect(outcomes.slice(7)).toEqual(
+      Array(5).fill('Authentication operation failed'),
+    );
+    expect(h.service.authenticateCookie(established.cookieValue)).toBeDefined();
+    expect(h.random).toHaveBeenCalledTimes(2);
+    expect(createCsrf).toHaveBeenCalledOnce();
+    await expect(h.service.bootstrap({ type: 'none' })).resolves.toMatchObject({
+      bootstrap: { authenticated: false, mode: 'local' },
+    });
+  });
+
+  it('bounds a bootstrap-only flood before preparing secrets', async () => {
+    const h = setup('none', { maxSessions: 2 });
+    const createCsrf = vi.spyOn(h.csrf, 'create');
+    const attempts = Array.from({ length: 12 }, () =>
+      h.service.bootstrap({ type: 'none' }),
+    );
+    expect(h.random).not.toHaveBeenCalled();
+    expect(createCsrf).not.toHaveBeenCalled();
+
+    const outcomes = await Promise.allSettled(attempts);
+    const fulfilled = outcomes.filter(
+      (
+        outcome,
+      ): outcome is PromiseFulfilledResult<
+        Awaited<(typeof attempts)[number]>
+      > => outcome.status === 'fulfilled',
+    );
+    const rejected = outcomes.filter(
+      (outcome): outcome is PromiseRejectedResult =>
+        outcome.status === 'rejected',
+    );
+    expect(fulfilled).toHaveLength(8);
+    expect(rejected).toHaveLength(4);
+    expect(rejected.map((outcome) => outcome.reason)).toEqual(
+      Array(4).fill(
+        expect.objectContaining({ message: 'Authentication operation failed' }),
+      ),
+    );
+    expect(h.random).toHaveBeenCalledTimes(16);
+    expect(createCsrf).toHaveBeenCalledTimes(8);
+    const results = fulfilled.map((outcome) => outcome.value);
+    for (const result of results.slice(0, -2))
+      expect(h.service.authenticateCookie(result.cookieValue)).toBeUndefined();
+    for (const result of results.slice(-2))
+      expect(h.service.authenticateCookie(result.cookieValue)).toBeDefined();
+    await expect(h.service.bootstrap({ type: 'none' })).resolves.toMatchObject({
+      bootstrap: { authenticated: true, mode: 'none' },
+    });
+  });
+
+  it('recovers the bounded bootstrap queue after a throwing head slot', async () => {
+    let calls = 0;
+    const service = new AuthService({
+      mode: 'none',
+      clock: () => 0,
+      randomBytes: (size) => {
+        calls += 1;
+        if (calls === 1) throw new Error('random failure');
+        return Buffer.alloc(size, calls);
+      },
+      credentialStore: { verify: vi.fn(), replacePassword: vi.fn() },
+      csrfService: new CsrfService(),
+      rateLimiter: { consume: vi.fn(), resetAddress: vi.fn() },
+      idleDurationMs: 100,
+      absoluteDurationMs: 1000,
+      maxSessions: 2,
+    });
+
+    const first = service.bootstrap({ type: 'none' });
+    const second = service.bootstrap({ type: 'none' });
+    await expect(first).rejects.toThrow('Authentication operation failed');
+    await expect(second).resolves.toMatchObject({
+      bootstrap: { authenticated: true, mode: 'none' },
+    });
+    await expect(service.bootstrap({ type: 'none' })).resolves.toMatchObject({
+      bootstrap: { authenticated: true, mode: 'none' },
+    });
+  });
+
   it('handles local failure, success reset, and wrong-mode calls generically', async () => {
     const h = setup('local');
     h.credentials.verify

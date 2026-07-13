@@ -37,6 +37,8 @@ type PreparedSession = Readonly<{
   session: Stored;
   result: AuthBootstrapResult;
 }>;
+const MIN_PENDING_ESTABLISHMENTS = 8;
+const MAX_PENDING_ESTABLISHMENTS = 256;
 export type AuthServiceOptions = Readonly<{
   mode: AuthMode;
   clock: () => number;
@@ -67,6 +69,7 @@ export class AuthService {
   readonly #idle: number;
   readonly #absolute: number;
   readonly #max: number;
+  readonly #maxPendingEstablishments: number;
   readonly #observerMax: number;
   readonly #byDigest = new Map<string, Stored>();
   readonly #byId = new Map<string, Stored>();
@@ -76,6 +79,7 @@ export class AuthService {
     }>
   >();
   #establishmentTail: Promise<void> = Promise.resolve();
+  #pendingEstablishments = 0;
   #pendingLogins = 0;
   #passwordChangeActive = false;
   constructor(o: AuthServiceOptions) {
@@ -102,11 +106,18 @@ export class AuthService {
     this.#idle = o.idleDurationMs;
     this.#absolute = o.absoluteDurationMs;
     this.#max = o.maxSessions;
+    // Keep queue retention bounded while preserving room for observer reentry.
+    this.#maxPendingEstablishments = Math.min(
+      MAX_PENDING_ESTABLISHMENTS,
+      Math.max(MIN_PENDING_ESTABLISHMENTS, o.maxSessions),
+    );
     this.#observerMax = Math.min(64, Math.max(1, o.maxObservers ?? 64));
   }
 
   bootstrap(input: UpstreamAuthentication): Promise<AuthBootstrapResult> {
-    return this.#enqueueEstablishment(async () => {
+    const release = this.#reserveEstablishment();
+    if (!release) return Promise.reject(new AuthServiceError());
+    const result = this.#enqueueEstablishment<AuthBootstrapResult>(async () => {
       if (this.#mode === 'local') {
         if (input.type !== 'none') throw new AuthServiceError();
         return frozen({
@@ -133,15 +144,20 @@ export class AuthService {
         identity.expiresAt,
       );
     });
+    void result.finally(release).catch(() => undefined);
+    return result;
   }
   login(input: LocalLoginAttempt): Promise<AuthBootstrapResult> {
     if (this.#mode !== 'local') return Promise.reject(new AuthServiceError());
     if (this.#pendingLogins >= this.#max)
       return Promise.resolve(localLoginFailure());
+    const releaseEstablishment = this.#reserveEstablishment();
+    if (!releaseEstablishment) return Promise.resolve(localLoginFailure());
     let label: string;
     try {
       label = normalizeLabel(input.username);
     } catch {
+      releaseEstablishment();
       return Promise.reject(new AuthServiceError());
     }
     const address = boundedAddress(input.address);
@@ -149,11 +165,20 @@ export class AuthService {
     try {
       allowed = this.#limiter.consume(address);
     } catch {
+      releaseEstablishment();
       return Promise.reject(new AuthServiceError());
     }
-    if (!allowed) return Promise.resolve(localLoginFailure());
+    if (!allowed) {
+      releaseEstablishment();
+      return Promise.resolve(localLoginFailure());
+    }
     const verification = promiseBridge<boolean>();
-    const result = this.#reserveLoginSlot(verification.promise, label, address);
+    const result = this.#reserveLoginSlot(
+      verification.promise,
+      label,
+      address,
+      releaseEstablishment,
+    );
     try {
       const credentialVerification = this.#credentials.verify(
         input.username,
@@ -381,14 +406,19 @@ export class AuthService {
     verification: Promise<boolean>,
     label: string,
     address: string,
+    releaseEstablishment: () => void,
   ): Promise<AuthBootstrapResult> {
     this.#pendingLogins += 1;
     const result = this.#enqueueEstablishment(() =>
       this.#completeLoginSlot(verification, label, address),
     );
-    return result.finally(() => {
-      this.#pendingLogins -= 1;
-    });
+    void result
+      .finally(() => {
+        this.#pendingLogins -= 1;
+        releaseEstablishment();
+      })
+      .catch(() => undefined);
+    return result;
   }
   async #completeLoginSlot(
     verification: Promise<boolean>,
@@ -484,6 +514,17 @@ export class AuthService {
       () => undefined,
     );
     return result;
+  }
+  #reserveEstablishment(): (() => void) | undefined {
+    if (this.#pendingEstablishments >= this.#maxPendingEstablishments)
+      return undefined;
+    this.#pendingEstablishments += 1;
+    let reserved = true;
+    return () => {
+      if (!reserved) return;
+      reserved = false;
+      this.#pendingEstablishments -= 1;
+    };
   }
 }
 function validateIdentity(i: UpstreamIdentity): UpstreamIdentity {
