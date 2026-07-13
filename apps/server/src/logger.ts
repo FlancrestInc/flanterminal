@@ -9,6 +9,11 @@ export interface LifecycleLogger {
 }
 
 const recognizedEvents = new Set([
+  'administration_action_failed',
+  'administration_action_succeeded',
+  'administration_cleanup_failed',
+  'administration_cleanup_succeeded',
+  'administration_read_failed',
   'authentication_activity_failed',
   'authentication_request_rejected',
   'authentication_route_failed',
@@ -34,6 +39,11 @@ const recognizedEvents = new Set([
   'terminal_write_failed',
 ]);
 const allowedCategories = new Set([
+  'restart_bridge',
+  'restart_session',
+  'terminate',
+  'recreate',
+  'cleanup_completed',
   'invalid_request',
   'origin_forbidden',
   'tab_not_found',

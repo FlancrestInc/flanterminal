@@ -1,0 +1,124 @@
+services:
+  fixture:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    user: ${E2E_FIXTURE_UID:?Cloudflare fixture UID is required}:${E2E_FIXTURE_GID:?Cloudflare fixture GID is required}
+    command: [node, scripts/cloudflare-jwks-fixture.mjs]
+    environment:
+      CLOUDFLARE_FIXTURE_ISSUER: https://access-test.cloudflareaccess.com
+      CLOUDFLARE_FIXTURE_AUDIENCE: flanterminal_e2e_audience
+      CLOUDFLARE_FIXTURE_APP_ORIGIN: http://app:3000
+      TLS_CERT_FILE: /run/cloudflare/server.crt
+      TLS_KEY_FILE: /run/cloudflare/server.key
+      NODE_EXTRA_CA_CERTS: /run/cloudflare/ca.crt
+    volumes:
+      - ${E2E_CLOUDFLARE_CERT_FILE:?Cloudflare fixture certificate is required}:/run/cloudflare/server.crt:ro
+      - ${E2E_CLOUDFLARE_KEY_FILE:?Cloudflare fixture key is required}:/run/cloudflare/server.key:ro
+      - ${E2E_CLOUDFLARE_CA_FILE:?Cloudflare fixture CA is required}:/run/cloudflare/ca.crt:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      default:
+        aliases:
+          - access-test.cloudflareaccess.com
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('https://access-test.cloudflareaccess.com/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 2s
+
+  app:
+    build:
+      context: .
+      args:
+        PUID: 1000
+        PGID: 1000
+        APP_PORT: 3000
+    environment:
+      APP_PORT: 3000
+      APP_BIND_HOST: 0.0.0.0
+      APP_BASE_PATH: ${E2E_APP_BASE_PATH:-/}
+      APP_PUBLIC_URL: http://fixture:3001
+      AUTH_MODE: cloudflare-access
+      CLOUDFLARE_TEAM_DOMAIN: https://access-test.cloudflareaccess.com
+      CLOUDFLARE_ACCESS_AUD: flanterminal_e2e_audience
+      AUTH_IDLE_MINUTES: 60
+      AUTH_ABSOLUTE_HOURS: 24
+      AUTH_SESSION_MAX_COUNT: 32
+      DEFAULT_SHELL: /bin/bash
+      ALLOWED_SHELLS: /bin/bash
+      DEFAULT_FONT_SIZE: 14
+      MAX_FONT_SIZE: 32
+      XTERM_SCROLLBACK: 10000
+      MAX_XTERM_SCROLLBACK: 100000
+      TMUX_HISTORY_LIMIT: 20000
+      MAX_TMUX_HISTORY_LIMIT: 1000000
+      MAX_STALE_SESSION_CLEANUP_HOURS: 8760
+      SESSION_CLEANUP_INTERVAL_MINUTES: 15
+      WS_HEARTBEAT_SECONDS: 5
+      WS_MAX_BUFFER_BYTES: 1048576
+      RESIZE_DEBOUNCE_MS: 50
+      RECONNECT_MAX_SECONDS: 2
+      LOG_LEVEL: info
+      TZ: UTC
+      HOME_DIR: /home/webterm
+      DATA_DIR: /app/data
+      SESSION_MAX_COUNT: 20
+      TRUST_PROXY: 'false'
+      NODE_EXTRA_CA_CERTS: /run/cloudflare/ca.crt
+    volumes:
+      - cloudflare-e2e-app:/app/data
+      - cloudflare-e2e-home:/home/webterm
+      - ${E2E_CLOUDFLARE_CA_FILE:?Cloudflare fixture CA is required}:/run/cloudflare/ca.crt:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+      - /run:rw,noexec,nosuid,nodev,size=1m,mode=0755,uid=1000,gid=1000
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 512m
+    depends_on:
+      fixture:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3000/health').then(async r=>{const v=await r.json();if(!r.ok||v.status!=='ok')process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    environment:
+      E2E_BASE_URL: http://fixture:3001/
+      E2E_BASE_PATH: ${E2E_WORKSPACE_PATH:-/}
+      E2E_MODE: cloudflare
+      E2E_CLOUDFLARE_CONTROL_URL: https://access-test.cloudflareaccess.com/
+      NODE_EXTRA_CA_CERTS: /run/cloudflare/ca.crt
+    volumes:
+      - ${E2E_CLOUDFLARE_CA_FILE:?Cloudflare fixture CA is required}:/run/cloudflare/ca.crt:ro
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  cloudflare-e2e-app:
+  cloudflare-e2e-home:

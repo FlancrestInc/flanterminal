@@ -8,6 +8,7 @@ export default defineConfig({
     ['html', { open: 'never', outputFolder: '/tmp/flanterminal-report' }],
   ],
   timeout: 60_000,
+  workers: 1,
   expect: { timeout: 15_000 },
   use: {
     baseURL: process.env.E2E_BASE_URL ?? 'http://app:3000/',

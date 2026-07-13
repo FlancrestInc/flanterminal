@@ -7,5 +7,6 @@ COPY packages/shared/package.json packages/shared/package.json
 RUN npm ci --ignore-scripts
 COPY playwright.config.ts ./
 COPY e2e e2e
+COPY scripts/cloudflare-jwks-fixture.mjs scripts/cloudflare-jwks-fixture.mjs
 USER pwuser
 CMD ["npm", "run", "test:e2e:run"]

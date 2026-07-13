@@ -11,7 +11,10 @@ services:
       APP_BIND_HOST: 0.0.0.0
       APP_BASE_PATH: ${E2E_APP_BASE_PATH:-/}
       APP_PUBLIC_URL: http://localhost:3000
-      AUTH_MODE: none
+      AUTH_MODE: local
+      LOCAL_AUTH_USERNAME: ${E2E_LOCAL_USERNAME:-webterm}
+      LOCAL_AUTH_PASSWORD_FILE: /run/secrets/local_auth_password
+      BCRYPT_COST: 10
       AUTH_IDLE_MINUTES: 60
       AUTH_ABSOLUTE_HOURS: 24
       AUTH_SESSION_MAX_COUNT: 32
@@ -38,6 +41,9 @@ services:
     volumes:
       - e2e-app:/app/data
       - e2e-home:/home/webterm
+    secrets:
+      - source: local_auth_password
+        target: local_auth_password
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
@@ -52,7 +58,7 @@ services:
           CMD,
           node,
           -e,
-          "const b=process.env.APP_BASE_PATH==='/'?'':process.env.APP_BASE_PATH;fetch('http://127.0.0.1:3000'+b+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:3000/health').then(async r=>{const v=await r.json();if(!r.ok||v.status!=='ok')process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 3s
       timeout: 2s
@@ -65,6 +71,9 @@ services:
     environment:
       E2E_BASE_URL: http://localhost:3000/
       E2E_BASE_PATH: ${E2E_WORKSPACE_PATH:-/}
+      E2E_MODE: ${E2E_MODE:-local}
+      E2E_LOCAL_USERNAME: ${E2E_LOCAL_USERNAME:-webterm}
+      E2E_LOCAL_PASSWORD: ${E2E_LOCAL_PASSWORD:-}
     depends_on:
       app:
         condition: service_healthy
@@ -73,3 +82,7 @@ services:
 volumes:
   e2e-app:
   e2e-home:
+
+secrets:
+  local_auth_password:
+    file: ${E2E_LOCAL_PASSWORD_FILE:?E2E local password file is required}

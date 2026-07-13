@@ -59,6 +59,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=production-dependencies /build/node_modules ./node_modules
+RUN chmod -R a-w /app/node_modules
 COPY --from=build /build/package.json /build/package-lock.json ./
 COPY --from=build /build/apps/server/package.json apps/server/package.json
 COPY --from=build /build/apps/server/dist apps/server/dist
@@ -70,7 +71,7 @@ COPY --from=build /build/packages/shared/dist packages/shared/dist
 RUN node --input-type=module -e "await import('bcrypt'); await import('jose')" \
   && test -n "$(find apps/client/dist/assets -type f -name 'JetBrainsMonoNerdFont-Regular-*.ttf' -print -quit)" \
   && test -n "$(find apps/client/dist/assets -type f -name 'terminal-bell-*.wav' -print -quit)" \
-  && chmod -R a-w /app \
+  && chmod -R a-w /app/package.json /app/package-lock.json /app/apps /app/packages \
   && chown webterm:webterm /app/data \
   && chmod 0700 /app/data
 
@@ -83,6 +84,6 @@ ENV HOME=/home/webterm \
 USER webterm
 EXPOSE ${APP_PORT}
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=6 \
-  CMD node -e "const b=process.env.APP_BASE_PATH==='/'?'':(process.env.APP_BASE_PATH||'');fetch('http://127.0.0.1:'+(process.env.APP_PORT||'3000')+b+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.APP_PORT||'3000')+'/health').then(async r=>{const v=await r.json();if(!r.ok||v.status!=='ok')process.exit(1)}).catch(()=>process.exit(1))"
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "apps/server/dist/index.js"]

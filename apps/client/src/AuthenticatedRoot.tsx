@@ -119,6 +119,7 @@ export function AuthenticatedRoot({
         authBusy={auth.busy}
         passwordError={auth.passwordError}
         onChangePassword={auth.changePassword}
+        onLogout={auth.logout}
       />
     </AuthenticationRequiredContext.Provider>
   );
@@ -135,6 +136,7 @@ function SettingsWorkspace({
   authBusy,
   passwordError,
   onChangePassword,
+  onLogout,
 }: Readonly<{
   config: ClientConfig;
   api: SettingsApi;
@@ -146,6 +148,7 @@ function SettingsWorkspace({
   authBusy: boolean;
   passwordError: string | null;
   onChangePassword: (current: string, replacement: string) => Promise<void>;
+  onLogout: () => Promise<void>;
 }>) {
   const settings = useSettings(api, { onAuthenticationRequired });
   if (settings.loading && settings.response === null)
@@ -178,6 +181,7 @@ function SettingsWorkspace({
         onSaveSettings={settings.save}
         authMode={authMode}
         onChangePassword={onChangePassword}
+        onLogout={onLogout}
       />
     )
   );

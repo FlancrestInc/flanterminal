@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
-const workspacePath = process.env.E2E_BASE_PATH ?? '/';
+import { openAuthenticatedWorkspace, workspacePath } from './fixtures/auth.js';
+
 const marker = `phase2-${Date.now()}`;
 
 function activePanel(page: Page) {
@@ -54,7 +55,7 @@ test('multiple terminal tabs preserve independent shells and lifecycle state', a
     }
   });
 
-  await page.goto(workspacePath);
+  await openAuthenticatedWorkspace(page);
   await expect(page).toHaveURL(
     new RegExp(`${workspacePath.replace('/', '\\/')}$`),
   );
@@ -112,7 +113,11 @@ test('multiple terminal tabs preserve independent shells and lifecycle state', a
   await page.reload();
   await expect(page.getByRole('tab').first()).toHaveText('Operations');
   await waitConnected(page);
+  const replacementSocket = page.waitForEvent('websocket', (socket) =>
+    socket.url().includes('/ws/sessions/'),
+  );
   await sessionAction(page, 'Restart bridge');
+  await replacementSocket;
   await waitConnected(page);
   await sendCommand(page, `printf 'SECOND_RESTORED_%s\\n' "$SECOND_MARKER"`);
   await expectTerminal(page, `SECOND_RESTORED_${marker}`);
@@ -156,7 +161,7 @@ for (const viewport of [
     page,
   }, testInfo) => {
     await page.setViewportSize(viewport);
-    await page.goto(workspacePath);
+    await openAuthenticatedWorkspace(page);
     await waitConnected(page);
     const header = await page.locator('.top-bar').boundingBox();
     const terminal = await activePanel(page).boundingBox();

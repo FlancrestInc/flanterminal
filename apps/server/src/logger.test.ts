@@ -7,6 +7,23 @@ import { createLifecycleLogger } from './logger.js';
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 
 describe('createLifecycleLogger', () => {
+  it.each([
+    ['administration_action_succeeded', 'restart_bridge'],
+    ['administration_cleanup_succeeded', 'cleanup_completed'],
+    ['administration_action_failed', 'operation_failed'],
+    ['administration_cleanup_failed', 'cleanup_disabled'],
+    ['administration_read_failed', 'authentication_required'],
+  ])('preserves the bounded %s lifecycle event', (event, category) => {
+    const capture = logCapture();
+    const logger = createLifecycleLogger('info', capture.destination);
+
+    logger.info(event, { sessionId: SESSION_ID, category });
+
+    expect(capture.records()).toEqual([
+      expect.objectContaining({ event, sessionId: SESSION_ID, category }),
+    ]);
+  });
+
   it('emits only validated operational metadata for recognized lifecycle events', () => {
     const capture = logCapture();
     const logger = createLifecycleLogger('info', capture.destination);

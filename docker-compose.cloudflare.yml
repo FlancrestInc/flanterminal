@@ -59,7 +59,7 @@ services:
           CMD,
           node,
           -e,
-          "const b=process.env.APP_BASE_PATH==='/'?'':process.env.APP_BASE_PATH;fetch('http://127.0.0.1:'+process.env.APP_PORT+b+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:'+process.env.APP_PORT+'/health').then(async r=>{const v=await r.json();if(!r.ok||v.status!=='ok')process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 10s
       timeout: 3s

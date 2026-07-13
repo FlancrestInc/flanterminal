@@ -6,7 +6,11 @@ project=${COMPOSE_PROJECT_NAME:-flanterminal_verify}
 : "${HOST_PORT:=3101}"
 : "${SESSION_MAX_COUNT:=20}"
 export HOST_PORT SESSION_MAX_COUNT
-secret=PHASE2_SECRET_NOT_IN_LOGS
+terminal_secret=PHASE3_TERMINAL_DATA_NOT_IN_LOGS
+bootstrap_password=$(openssl rand -hex 24)
+replacement_password=$(openssl rand -hex 24)
+auth_cookie=
+auth_csrf=
 hold_pid=
 hold_log=
 hold_stop=/tmp/.flanterminal-verify-stop
@@ -90,6 +94,9 @@ verify_static_hardening() {
   require_file_pattern Dockerfile 'JetBrainsMonoNerdFont-Regular' 'bundled font verification is unavailable'
   require_file_pattern Dockerfile 'terminal-bell' 'bundled bell verification is unavailable'
   require_file_pattern Dockerfile 'HEALTHCHECK' 'image health check is unavailable'
+  for health_file in Dockerfile docker-compose.yml docker-compose.cloudflare.yml docker-compose.e2e.yml docker-compose.cloudflare-e2e.yml; do
+    reject_file_pattern "$health_file" 'APP_BASE_PATH.*\/health' "health check incorrectly uses the application base path in $health_file"
+  done
   for dockerfile in Dockerfile Dockerfile.dev Dockerfile.e2e; do
     reject_file_pattern "$dockerfile" '^[[:space:]]*(ARG|ENV)[[:space:]].*(PASSWORD|SECRET)' "password or secret metadata is present in $dockerfile"
     reject_file_pattern "$dockerfile" '^[[:space:]]*COPY.*(secret|private.?key|id_(rsa|ecdsa|ed25519))' "secret material may be copied by $dockerfile"
@@ -202,18 +209,111 @@ verify_failed_local_bootstrap() {
   negative_volumes=$(printf '%s' "$negative_volumes" | sed "s/ $negative_data//; s/ $negative_home//")
 }
 
+login_response() {
+  password=$1
+  printf '%s' "$password" | dc exec -T app node --input-type=module -e '
+let password = "";
+for await (const chunk of process.stdin) password += chunk;
+const base = process.env.APP_BASE_PATH === "/" ? "" : process.env.APP_BASE_PATH;
+const response = await fetch(`http://127.0.0.1:${process.env.APP_PORT}${base}/api/auth/login`, {
+  method: "POST",
+  headers: { Origin: process.env.APP_PUBLIC_URL, "Content-Type": "application/json" },
+  body: JSON.stringify({ username: process.env.LOCAL_AUTH_USERNAME, password }),
+});
+const text = await response.text();
+const setCookie = response.headers.get("set-cookie");
+process.stdout.write(JSON.stringify({
+  status: response.status,
+  cookie: setCookie?.split(";", 1)[0] ?? null,
+  body: text === "" ? null : JSON.parse(text),
+}));
+'
+}
+
+json_value() {
+  path=$1
+  node -e '
+let input="";
+process.stdin.on("data", chunk => input += chunk).on("end", () => {
+  let value = JSON.parse(input);
+  for (const key of process.argv[1].split(".")) value = value?.[key];
+  if (typeof value === "object") process.stdout.write(JSON.stringify(value));
+  else if (value !== undefined && value !== null) process.stdout.write(String(value));
+});
+' "$path"
+}
+
+auth_login() {
+  response=$(login_response "$1")
+  [ "$(printf '%s' "$response" | json_value status)" = 200 ] ||
+    fail 'local authentication failed'
+  auth_cookie=$(printf '%s' "$response" | json_value cookie)
+  auth_csrf=$(printf '%s' "$response" | json_value body.csrfToken)
+  [ -n "$auth_cookie" ] && [ -n "$auth_csrf" ] ||
+    fail 'local authentication returned no cookie or CSRF token'
+}
+
+session_response() {
+  cookie=$1
+  printf '%s' "$cookie" | dc exec -T app node --input-type=module -e '
+let cookie = "";
+for await (const chunk of process.stdin) cookie += chunk;
+const base = process.env.APP_BASE_PATH === "/" ? "" : process.env.APP_BASE_PATH;
+const response = await fetch(`http://127.0.0.1:${process.env.APP_PORT}${base}/api/auth/session`, {
+  headers: { Cookie: cookie },
+});
+const text = await response.text();
+process.stdout.write(JSON.stringify({ status: response.status, body: text === "" ? null : JSON.parse(text) }));
+'
+}
+
+change_password() {
+  current=$1
+  replacement=$2
+  printf '%s\n%s' "$current" "$replacement" | \
+    dc exec -T \
+      -e VERIFY_AUTH_COOKIE="$auth_cookie" \
+      -e VERIFY_CSRF_TOKEN="$auth_csrf" \
+      app node --input-type=module -e '
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const newline = input.indexOf("\n");
+const currentPassword = input.slice(0, newline);
+const newPassword = input.slice(newline + 1);
+const base = process.env.APP_BASE_PATH === "/" ? "" : process.env.APP_BASE_PATH;
+const response = await fetch(`http://127.0.0.1:${process.env.APP_PORT}${base}/api/auth/password`, {
+  method: "PUT",
+  headers: {
+    Cookie: process.env.VERIFY_AUTH_COOKIE,
+    Origin: process.env.APP_PUBLIC_URL,
+    "X-CSRF-Token": process.env.VERIFY_CSRF_TOKEN,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ currentPassword, newPassword }),
+});
+process.stdout.write(String(response.status));
+'
+}
+
 api() {
   method=$1
   path=$2
   body=${3-}
-  dc exec -T app node --input-type=module - "$method" "$path" "$body" <<'NODE'
+  dc exec -T \
+    -e VERIFY_AUTH_COOKIE="$auth_cookie" \
+    -e VERIFY_CSRF_TOKEN="$auth_csrf" \
+    app node --input-type=module - "$method" "$path" "$body" <<'NODE'
 const [method, path, body] = process.argv.slice(2);
 const base = process.env.APP_BASE_PATH === '/' ? '' : process.env.APP_BASE_PATH;
 const response = await fetch(`http://127.0.0.1:${process.env.APP_PORT}${base}${path}`, {
   method,
-  headers: method === 'GET' || method === 'DELETE' ? {} : {
-    Origin: process.env.APP_PUBLIC_URL,
-    'Content-Type': 'application/json',
+  headers: {
+    Cookie: process.env.VERIFY_AUTH_COOKIE,
+    ...(method === 'GET' ? {} : {
+      Origin: process.env.APP_PUBLIC_URL,
+      'X-CSRF-Token': process.env.VERIFY_CSRF_TOKEN,
+      'Content-Type': 'application/json',
+    }),
   },
   ...(body === '' ? {} : { body }),
 });
@@ -235,14 +335,14 @@ ws_probe() {
   session_id=$1
   command=$2
   expected=$3
-  dc exec -T app node --input-type=module - "$session_id" "$command" "$expected" <<'NODE'
+  dc exec -T -e VERIFY_AUTH_COOKIE="$auth_cookie" app node --input-type=module - "$session_id" "$command" "$expected" <<'NODE'
 import WebSocket from 'ws';
 
 const [sessionId, command, expected] = process.argv.slice(2);
 const base = process.env.APP_BASE_PATH === '/' ? '' : process.env.APP_BASE_PATH;
 const socket = new WebSocket(
   `ws://127.0.0.1:${process.env.APP_PORT}${base}/ws/sessions/${sessionId}`,
-  { headers: { Origin: process.env.APP_PUBLIC_URL } },
+  { headers: { Origin: process.env.APP_PUBLIC_URL, Cookie: process.env.VERIFY_AUTH_COOKIE } },
 );
 let output = '';
 const timeout = setTimeout(() => socket.terminate(), 10_000);
@@ -267,17 +367,19 @@ NODE
 }
 
 hold_all_tabs() {
-  dc exec -T app node --input-type=module - "$hold_stop" <<'NODE'
+  dc exec -T -e VERIFY_AUTH_COOKIE="$auth_cookie" app node --input-type=module - "$hold_stop" <<'NODE'
 import { existsSync } from 'node:fs';
 import WebSocket from 'ws';
 
 const stopFile = process.argv[2];
 const base = process.env.APP_BASE_PATH === '/' ? '' : process.env.APP_BASE_PATH;
 const apiBase = `http://127.0.0.1:${process.env.APP_PORT}${base}`;
-const collection = await fetch(`${apiBase}/api/tabs`).then((response) => response.json());
+const collection = await fetch(`${apiBase}/api/tabs`, {
+  headers: { Cookie: process.env.VERIFY_AUTH_COOKIE },
+}).then((response) => response.json());
 const sockets = collection.tabs.map((tab) => new WebSocket(
   `ws://127.0.0.1:${process.env.APP_PORT}${base}/ws/sessions/${tab.id}`,
-  { headers: { Origin: process.env.APP_PUBLIC_URL } },
+  { headers: { Origin: process.env.APP_PUBLIC_URL, Cookie: process.env.VERIFY_AUTH_COOKIE } },
 ));
 let ready = 0;
 const timeout = setTimeout(() => process.exit(1), 30_000);
@@ -321,7 +423,7 @@ printf 'checking: hardening\n'
 rg -q "JetBrainsMonoNerdFont-Regular.ttf" apps/client/src/theme.css || fail 'bundled font unavailable'
 verify_static_hardening
 bootstrap_secret=$(mktemp)
-printf '%s\n' 'phase3-container-test-only' >"$bootstrap_secret"
+printf '%s\n' "$bootstrap_password" >"$bootstrap_secret"
 chmod 0600 "$bootstrap_secret"
 export LOCAL_AUTH_PASSWORD_FILE_HOST=$bootstrap_secret
 verify_compose_models
@@ -375,7 +477,7 @@ docker run --rm --entrypoint sh "$image" -c '
 ' || fail 'secret or private-key material is present in final image filesystem'
 
 exposure_marker=PHASE3_HTTP_PRIVATE_MARKER
-dc exec -T app sh -c "printf '%s' '$exposure_marker' > /app/data/http-private; printf '%s' '$exposure_marker' > \"\$HOME/.ssh/id_ed25519\""
+dc exec -T app sh -c "printf '%s' '$exposure_marker' > /app/data/http-private; printf '%s' '$exposure_marker' > \"\$HOME/.ssh/id_ed25519\"; chmod 600 \"\$HOME/.ssh/id_ed25519\""
 dc exec -T app node --input-type=module - "$exposure_marker" <<'NODE'
 const marker = process.argv[2];
 const base = `http://127.0.0.1:${process.env.APP_PORT}`;
@@ -405,16 +507,18 @@ printf '%s' "$health" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('e
 printf '%s' "$ready" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const v=JSON.parse(s);if(v.status!=='ready'||v.ready!==true)process.exit(1)})"
 dc exec -T app sh -c 'command -v tmux >/dev/null && command -v ssh >/dev/null && [ "$(id -u)" -ne 0 ] && [ "$(id -un)" = webterm ]'
 
+auth_login "$bootstrap_password"
 first_id=$(tab_ids | sed -n '1p')
 [ -n "$first_id" ] || fail 'initial tab metadata is unavailable'
-ws_probe "$first_id" "export PHASE2_MARKER=$secret; printf 'MARKER_SET\\n'" MARKER_SET
+ws_probe "$first_id" "export PHASE3_MARKER=$terminal_secret; printf 'MARKER_SET\\n'" MARKER_SET
 wait_for_bridge_count 0 'PTY bridge leaked after disconnect'
 first_tmux=$(tmux_name "$first_id")
 dc exec -T app tmux has-session -t "$first_tmux" || fail 'tmux session did not survive disconnect'
-ws_probe "$first_id" "printf 'MARKER_RESTORED_%s\\n' \"\$PHASE2_MARKER\"" "MARKER_RESTORED_$secret"
+ws_probe "$first_id" "printf 'MARKER_RESTORED_%s\\n' \"\$PHASE3_MARKER\"" "MARKER_RESTORED_$terminal_secret"
 
 created=$(api POST /api/tabs '{"displayName":"Independent"}')
-second_id=$(printf '%s' "$created" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).body.id))")
+[ "$(printf '%s' "$created" | json_value status)" = 201 ] || fail 'second tab was not created'
+second_id=$(printf '%s' "$created" | json_value body.id)
 ws_probe "$second_id" "printf 'SECOND_READY\\n'" SECOND_READY
 second_tmux=$(tmux_name "$second_id")
 dc exec -T app tmux has-session -t "$first_tmux" || fail 'first session was affected by second tab'
@@ -424,13 +528,99 @@ dc exec -T app tmux has-session -t "$first_tmux" || fail 'terminating second tab
 dc exec -T app tmux has-session -t "$second_tmux" >/dev/null 2>&1 && fail 'terminated tmux session still exists'
 api POST "/api/tabs/$second_id/session/recreate" '{}' >/dev/null
 
+settings=$(api GET /api/settings)
+[ "$(printf '%s' "$settings" | json_value status)" = 200 ] || fail 'settings are unavailable'
+settings_body=$(printf '%s' "$settings" | node -e '
+let input = "";
+process.stdin.on("data", chunk => input += chunk).on("end", () => {
+  const settings = JSON.parse(input).body.settings;
+  process.stdout.write(JSON.stringify({
+    settings: { ...settings, theme: "ubuntu", fontSize: 15, staleSessionCleanupHours: 1 },
+  }));
+});
+')
+updated_settings=$(api PUT /api/settings "$settings_body")
+[ "$(printf '%s' "$updated_settings" | json_value status)" = 200 ] || fail 'settings update failed'
+[ "$(printf '%s' "$updated_settings" | json_value body.settings.theme)" = ubuntu ] || fail 'theme update was not authoritative'
+[ "$(printf '%s' "$updated_settings" | json_value body.settings.staleSessionCleanupHours)" = 1 ] || fail 'cleanup setting was not authoritative'
+
+dc exec -T -e VERIFY_MARKER="$terminal_secret" app sh -c '
+  umask 077
+  printf "Host verify-only\n  HostName 192.0.2.1\n  User example-user\n" > "$HOME/.ssh/config"
+  printf "verify-only ssh-ed25519 %s\n" "$VERIFY_MARKER" > "$HOME/.ssh/known_hosts"
+  printf "export FLANTERMINAL_VERIFY=%s\n" "$VERIFY_MARKER" > "$HOME/.verify-shell-config"
+  printf "#!/bin/sh\nprintf %s\\n\n" "$VERIFY_MARKER" > "$HOME/scripts/verify-script"
+  chmod 600 "$HOME/.ssh/config" "$HOME/.ssh/known_hosts" "$HOME/.verify-shell-config"
+  chmod 750 "$HOME/scripts/verify-script"
+'
+
+[ "$(change_password "$bootstrap_password" "$replacement_password")" = 204 ] ||
+  fail 'password rotation failed'
+auth_login "$replacement_password"
+pre_recreate_cookie=$auth_cookie
+
+dc stop app >/dev/null
+dc run --rm --no-deps --entrypoint node app --input-type=module - "$second_id" <<'NODE'
+import { readFile, writeFile } from 'node:fs/promises';
+
+const id = process.argv[2];
+const path = `${process.env.DATA_DIR}/tabs.json`;
+const document = JSON.parse(await readFile(path, 'utf8'));
+const stale = new Date(Date.now() - 2 * 60 * 60 * 1_000).toISOString();
+document.tabs = document.tabs.map((tab) =>
+  tab.id === id ? { ...tab, createdAt: stale, lastActivityAt: stale } : tab,
+);
+await writeFile(path, JSON.stringify(document), { mode: 0o600 });
+NODE
+dc rm -f app >/dev/null
+dc up -d --wait
+
+lost_session=$(session_response "$pre_recreate_cookie")
+[ "$(printf '%s' "$lost_session" | json_value status)" = 200 ] &&
+  [ "$(printf '%s' "$lost_session" | json_value body.authenticated)" = false ] ||
+  fail 'application session survived container recreation'
+old_password=$(login_response "$bootstrap_password")
+[ "$(printf '%s' "$old_password" | json_value status)" = 401 ] ||
+  fail 'bootstrap password remained valid after recreation'
+auth_login "$replacement_password"
+
+[ "$(tab_ids | wc -l | tr -d ' ')" = 2 ] || fail 'tab metadata did not survive recreation'
+persisted_settings=$(api GET /api/settings)
+[ "$(printf '%s' "$persisted_settings" | json_value body.settings.theme)" = ubuntu ] ||
+  fail 'server-side theme did not survive recreation'
+[ "$(printf '%s' "$persisted_settings" | json_value body.settings.fontSize)" = 15 ] ||
+  fail 'server-side font setting did not survive recreation'
+[ "$(printf '%s' "$persisted_settings" | json_value body.settings.staleSessionCleanupHours)" = 1 ] ||
+  fail 'server-side cleanup setting did not survive recreation'
+dc exec -T -e VERIFY_MARKER="$terminal_secret" app sh -c '
+  grep -F -q "$VERIFY_MARKER" "$HOME/.ssh/known_hosts" &&
+  grep -F -q "$VERIFY_MARKER" "$HOME/.verify-shell-config" &&
+  grep -F -q "$VERIFY_MARKER" "$HOME/scripts/verify-script" &&
+  [ "$(stat -c %a "$HOME/.ssh/config")" = 600 ] &&
+  [ "$(stat -c %a "$HOME/.ssh/known_hosts")" = 600 ] &&
+  [ "$(stat -c %a "$HOME/scripts/verify-script")" = 750 ]
+' || fail 'home or SSH fixtures did not survive recreation'
+active_tmux=$(dc exec -T app tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+[ -z "$active_tmux" ] || fail 'tmux processes unexpectedly survived container recreation'
+
+dc exec -T app tmux new-session -d -s "$first_tmux"
+dc exec -T app tmux new-session -d -s "$second_tmux"
+cleanup_result=$(api POST /api/admin/cleanup '{}')
+[ "$(printf '%s' "$cleanup_result" | json_value status)" = 200 ] || fail 'stale cleanup failed'
+[ "$(printf '%s' "$cleanup_result" | json_value body.terminated)" = 1 ] || fail 'stale cleanup did not terminate exactly one session'
+[ "$(printf '%s' "$cleanup_result" | json_value body.failed)" = 0 ] || fail 'stale cleanup reported a failure'
+dc exec -T app tmux has-session -t "$first_tmux" || fail 'stale cleanup terminated a recent session'
+dc exec -T app tmux has-session -t "$second_tmux" >/dev/null 2>&1 && fail 'stale cleanup retained the stale session'
+api POST "/api/tabs/$second_id/session/recreate" '{}' >/dev/null
+
 count=$(tab_ids | wc -l | tr -d ' ')
 while [ "$count" -lt 20 ]; do
-  api POST /api/tabs '{}' >/dev/null
+  response=$(api POST /api/tabs '{}')
+  [ "$(printf '%s' "$response" | json_value status)" = 201 ] || fail 'tab creation failed before the configured limit'
   count=$((count + 1))
 done
 limit=$(api POST /api/tabs '{}')
-[ "$(printf '%s' "$limit" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(String(JSON.parse(s).status)))")" = 409 ] || fail '21st tab was not rejected'
+[ "$(printf '%s' "$limit" | json_value status)" = 409 ] || fail '21st tab was not rejected'
 
 dc exec -T app rm -f "$hold_stop"
 hold_log=$(mktemp)
@@ -444,6 +634,13 @@ while ! rg -q '^ALL_READY_20$' "$hold_log"; do
   sleep 0.1
 done
 [ "$(dc exec -T app sh -c "$count_bridges")" = 20 ] || fail '20 independent PTY bridges are unavailable'
+admin=$(api GET /api/admin)
+[ "$(printf '%s' "$admin" | json_value status)" = 200 ] || fail 'administration metrics are unavailable'
+[ "$(printf '%s' "$admin" | json_value body.totals.tabs)" = 20 ] || fail 'administration tab total is incorrect'
+[ "$(printf '%s' "$admin" | json_value body.totals.bridges)" = 20 ] || fail 'administration bridge total is incorrect'
+[ "$(printf '%s' "$admin" | json_value body.totals.webSockets)" = 20 ] || fail 'administration WebSocket total is incorrect'
+rss=$(printf '%s' "$admin" | json_value body.memory.rss)
+[ "$rss" -gt 0 ] && [ "$rss" -lt 536870912 ] || fail 'administration memory metric is outside the container limit'
 dc exec -T app touch "$hold_stop"
 wait "$hold_pid"
 hold_pid=
@@ -451,12 +648,20 @@ rm -f "$hold_log"
 hold_log=
 wait_for_bridge_count 0 'PTY bridges leaked after multi-client disconnect'
 
-dc exec -T app sh -c "printf '%s' '$secret' > \"\$HOME/.phase2-home-fixture\""
-dc up -d --wait --force-recreate
-[ "$(tab_ids | wc -l | tr -d ' ')" = 20 ] || fail 'tab metadata did not survive recreation'
-dc exec -T app sh -c "test \"\$(cat \"\$HOME/.phase2-home-fixture\")\" = '$secret'"
-active_tmux=$(dc exec -T app tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
-[ -z "$active_tmux" ] || fail 'tmux processes unexpectedly survived container recreation'
-dc logs | rg -q "$secret" && fail 'terminal marker leaked to logs'
+container_logs=$(dc logs 2>&1)
+for sensitive in "$terminal_secret" "$bootstrap_password" "$replacement_password"; do
+  printf '%s' "$container_logs" | rg -F -q -- "$sensitive" && fail 'terminal or authentication secret leaked to logs'
+done
+printf '%s\n%s\n%s' "$terminal_secret" "$bootstrap_password" "$replacement_password" | \
+  dc exec -T app node --input-type=module -e '
+import { readFile } from "node:fs/promises";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const sensitive = input.split("\n");
+for (const file of ["auth.json", "settings.json", "tabs.json"]) {
+  const content = await readFile(`${process.env.DATA_DIR}/${file}`, "utf8");
+  if (sensitive.some((value) => value !== "" && content.includes(value))) process.exit(1);
+}
+' || fail 'plaintext terminal or authentication secret was persisted in application metadata'
 
 printf 'container verification passed\n'

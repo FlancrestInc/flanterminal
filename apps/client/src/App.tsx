@@ -4,7 +4,7 @@ import type {
   SettingsResponse,
   WorkspaceSettings,
 } from '@flanterminal/shared';
-import { Activity, Settings } from 'lucide-react';
+import { Activity, LogOut, Settings } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ConfirmDialog } from './ConfirmDialog.js';
@@ -39,6 +39,7 @@ export interface AppProps {
     current: string,
     replacement: string,
   ) => Promise<void>;
+  readonly onLogout?: () => Promise<void>;
 }
 
 type Confirmation = Readonly<{
@@ -60,6 +61,7 @@ export function App({
   onSaveSettings,
   authMode,
   onChangePassword,
+  onLogout,
 }: AppProps) {
   const defaultApi = useMemo(
     () => createTabsApi(config.basePath),
@@ -275,6 +277,18 @@ export function App({
             >
               <Settings size={17} aria-hidden="true" />
             </button>
+            {authMode === 'local' && onLogout !== undefined ? (
+              <button
+                className="icon-button"
+                type="button"
+                title="Sign out"
+                aria-label="Sign out"
+                disabled={passwordBusy}
+                onClick={() => void onLogout()}
+              >
+                <LogOut size={17} aria-hidden="true" />
+              </button>
+            ) : null}
           </div>
         </header>
 
