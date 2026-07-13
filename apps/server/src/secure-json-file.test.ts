@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { posix } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   MAX_SECURE_JSON_BYTES,
@@ -211,6 +211,101 @@ describe('SecureJsonFile replace', () => {
     expect(fs.operations).toEqual([]);
   });
 
+  it('counts JSON escaping at the exact byte boundary', async () => {
+    const value = '\n'.repeat((MAX_SECURE_JSON_BYTES - 2) / 2);
+    const fs = new MemoryFileSystem();
+
+    await expect(makeFile(fs).replace(TARGET, value, 0o600)).resolves.toEqual({
+      state: 'committed',
+    });
+    expect(fs.entry(TARGET)?.content.byteLength).toBe(MAX_SECURE_JSON_BYTES);
+  });
+
+  it('rejects an enumerable getter without invoking it or accessing the filesystem', async () => {
+    let getterCalls = 0;
+    const value = Object.defineProperty({}, 'stateful', {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return getterCalls;
+      },
+    });
+    const fs = new MemoryFileSystem();
+
+    await expect(
+      makeFile(fs).replace(TARGET, value, 0o600),
+    ).rejects.toBeInstanceOf(SecureJsonFileError);
+
+    expect(getterCalls).toBe(0);
+    expect(fs.operations).toEqual([]);
+  });
+
+  it('rejects enumerable symbol keys before filesystem access', async () => {
+    const value = { valid: true, [Symbol('state')]: true };
+    const fs = new MemoryFileSystem();
+
+    await expect(
+      makeFile(fs).replace(TARGET, value, 0o600),
+    ).rejects.toBeInstanceOf(SecureJsonFileError);
+    expect(fs.operations).toEqual([]);
+  });
+
+  it('rejects a huge string before JSON.stringify or filesystem access', async () => {
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const fs = new MemoryFileSystem();
+    try {
+      await expect(
+        makeFile(fs).replace(
+          TARGET,
+          'x'.repeat(MAX_SECURE_JSON_BYTES + 1),
+          0o600,
+        ),
+      ).rejects.toBeInstanceOf(SecureJsonFileError);
+
+      expect(stringify).not.toHaveBeenCalled();
+      expect(fs.operations).toEqual([]);
+    } finally {
+      stringify.mockRestore();
+    }
+  });
+
+  it('rejects a bounded-node graph before JSON.stringify or filesystem access', async () => {
+    const value = Array.from({ length: 100_001 }, () => null);
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const fs = new MemoryFileSystem();
+    try {
+      await expect(
+        makeFile(fs).replace(TARGET, value, 0o600),
+      ).rejects.toBeInstanceOf(SecureJsonFileError);
+
+      expect(stringify).not.toHaveBeenCalled();
+      expect(fs.operations).toEqual([]);
+    } finally {
+      stringify.mockRestore();
+    }
+  });
+
+  it('rejects excessive depth iteratively without calling JSON.stringify', async () => {
+    const root: { child?: unknown } = {};
+    let cursor = root;
+    for (let depth = 0; depth < 20_000; depth += 1) {
+      const child: { child?: unknown } = {};
+      cursor.child = child;
+      cursor = child;
+    }
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const fs = new MemoryFileSystem();
+    try {
+      await expect(
+        makeFile(fs).replace(TARGET, root, 0o600),
+      ).rejects.toBeInstanceOf(SecureJsonFileError);
+      expect(stringify).not.toHaveBeenCalled();
+      expect(fs.operations).toEqual([]);
+    } finally {
+      stringify.mockRestore();
+    }
+  });
+
   it.each([
     ['undefined', undefined],
     ['nonfinite', { value: Number.POSITIVE_INFINITY }],
@@ -296,6 +391,12 @@ describe('SecureJsonFile replace', () => {
         constants.O_NOFOLLOW,
     );
     expect(fs.tempOpenMode).toBe(0o600);
+    expect(fs.operations.indexOf('chmod temp')).toBeLessThan(
+      fs.operations.indexOf('write temp'),
+    );
+    expect(fs.operations.indexOf('stat temp')).toBeLessThan(
+      fs.operations.indexOf('write temp'),
+    );
     expect(fs.renamePair?.to).toBe(TARGET);
     expect(posix.dirname(fs.renamePair!.from)).toBe('/data');
     expect(fs.operations).toEqual([
@@ -305,6 +406,8 @@ describe('SecureJsonFile replace', () => {
       'stat target',
       'close target',
       'open temp',
+      'chmod temp',
+      'stat temp',
       'write temp',
       'write temp',
       'write temp',
@@ -366,6 +469,55 @@ describe('SecureJsonFile replace', () => {
       expect(fs.readJson(TARGET)).toEqual({ prior: true });
       expect(fs.ownedTemps()).toEqual([]);
       expect(fs.wasCloseAttemptedForEveryHandle()).toBe(true);
+    },
+  );
+
+  it.each(['temp-chmod', 'temp-stat'] as const)(
+    'returns not_committed and cleans up when temp %s verification fails',
+    async (stage) => {
+      const fs = new MemoryFileSystem();
+      fs.failNext = stage;
+
+      await expect(
+        makeFile(fs).replace(TARGET, { next: true }, 0o600),
+      ).resolves.toEqual({ state: 'not_committed' });
+
+      expect(fs.operations).not.toContain('write temp');
+      expect(fs.ownedTemps()).toEqual([]);
+    },
+  );
+
+  it.each([
+    ['nonregular', { tempKind: 'directory' as const }],
+    ['wrong owner', { tempUid: UID + 1 }],
+    ['wrong exact mode', { ignoreTempChmod: true, tempMode: 0o640 }],
+  ])('refuses a %s temp before writing', async (_name, options) => {
+    const fs = new MemoryFileSystem({}, options);
+
+    await expect(
+      makeFile(fs).replace(TARGET, { next: true }, 0o600),
+    ).resolves.toEqual({ state: 'not_committed' });
+
+    expect(fs.operations).not.toContain('write temp');
+    expect(fs.ownedTemps()).toEqual([]);
+  });
+
+  it.each(['unlink', 'parent-close'] as const)(
+    'rejects generically when %s fails during precommit cleanup',
+    async (cleanupFailure) => {
+      const fs = new MemoryFileSystem();
+      fs.failNext = 'write';
+      fs.cleanupFailure = cleanupFailure;
+
+      const error = await makeFile(fs)
+        .replace(TARGET, { next: true }, 0o600)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(SecureJsonFileError);
+      expect((error as Error).message).toBe(
+        'Secure JSON file operation failed',
+      );
+      expect((error as Error).message).not.toContain('/data');
     },
   );
 
@@ -500,10 +652,13 @@ type FailureStage =
   | 'target-stat'
   | 'target-close'
   | 'read'
+  | 'temp-chmod'
+  | 'temp-stat'
   | 'write'
   | 'file-sync'
   | 'temp-close'
   | 'rename'
+  | 'unlink'
   | 'dir-sync';
 
 class MemoryFileSystem implements SecureJsonFileSystem {
@@ -514,6 +669,8 @@ class MemoryFileSystem implements SecureJsonFileSystem {
   collisionPath: string | undefined;
   replaceTargetWithSymlinkBeforeRecheck = false;
   recheckFailure: 'target-open' | 'target-stat' | 'target-close' | undefined;
+  cleanupFailure: 'unlink' | 'parent-close' | undefined;
+  private readonly ignoreTempChmod: boolean;
   bytesRead = 0;
   maximumReadBufferLength = 0;
   targetOpenFlags: number | undefined;
@@ -532,6 +689,10 @@ class MemoryFileSystem implements SecureJsonFileSystem {
       parentUid?: number;
       parentMode?: number;
       targetStatSize?: number;
+      tempKind?: Entry['kind'];
+      tempUid?: number;
+      tempMode?: number;
+      ignoreTempChmod?: boolean;
     } = {},
   ) {
     if (!options.parentMissing) {
@@ -549,9 +710,16 @@ class MemoryFileSystem implements SecureJsonFileSystem {
       this.entries.set(path, cloneEntry(entry));
     }
     this.targetStatSize = options.targetStatSize;
+    this.tempKind = options.tempKind ?? 'file';
+    this.tempUid = options.tempUid ?? UID;
+    this.tempMode = options.tempMode;
+    this.ignoreTempChmod = options.ignoreTempChmod ?? false;
   }
 
   private readonly targetStatSize: number | undefined;
+  private readonly tempKind: Entry['kind'];
+  private readonly tempUid: number;
+  private readonly tempMode: number | undefined;
 
   entry(path: string): Entry | undefined {
     const entry = this.entries.get(path);
@@ -616,7 +784,12 @@ class MemoryFileSystem implements SecureJsonFileSystem {
         throw errno('EEXIST');
       }
       if (entry) throw errno('EEXIST');
-      this.entries.set(path, fileEntry(Buffer.alloc(0), UID, mode));
+      this.entries.set(path, {
+        kind: this.tempKind,
+        content: Buffer.alloc(0),
+        uid: this.tempUid,
+        mode: this.tempMode ?? mode ?? 0,
+      });
     } else if (!entry) {
       throw errno('ENOENT');
     }
@@ -638,6 +811,10 @@ class MemoryFileSystem implements SecureJsonFileSystem {
 
   async unlink(path: string): Promise<void> {
     this.operations.push(`unlink ${path}`);
+    if (this.cleanupFailure === 'unlink') {
+      this.cleanupFailure = undefined;
+      throw rawError('unlink');
+    }
     this.entries.delete(path);
   }
 
@@ -651,6 +828,10 @@ class MemoryFileSystem implements SecureJsonFileSystem {
     const entry = this.entries.get(path);
     if (!entry) throw errno('ENOENT');
     return entry;
+  }
+
+  shouldIgnoreTempChmod(): boolean {
+    return this.ignoreTempChmod;
   }
 }
 
@@ -682,6 +863,16 @@ class MemoryHandle implements SecureJsonFileHandle {
       isFile: () => entry.kind === 'file',
       isDirectory: () => entry.kind === 'directory',
     };
+  }
+
+  async chmod(mode: number): Promise<void> {
+    this.fs.operations.push(`chmod ${this.role}`);
+    if (this.fs.consumeFailure(`${this.role}-chmod` as FailureStage)) {
+      throw rawError(`${this.role}-chmod`);
+    }
+    if (this.role !== 'temp' || !this.fs.shouldIgnoreTempChmod()) {
+      this.fs.getMutableEntry(this.path).mode = mode;
+    }
   }
 
   async read(buffer: Uint8Array, offset: number, length: number) {
@@ -727,6 +918,10 @@ class MemoryHandle implements SecureJsonFileHandle {
     this.closeAttempted = true;
     this.fs.operations.push(`close ${this.role}`);
     const stage = `${this.role}-close` as FailureStage;
+    if (this.role === 'parent' && this.fs.cleanupFailure === 'parent-close') {
+      this.fs.cleanupFailure = undefined;
+      throw rawError('parent-close');
+    }
     if (this.fs.consumeFailure(stage)) throw rawError(stage);
     this.closed = true;
     if (this.role === 'temp' && this.fs.recheckFailure) {
