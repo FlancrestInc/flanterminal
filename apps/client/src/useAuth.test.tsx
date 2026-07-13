@@ -320,6 +320,10 @@ describe('useAuth', () => {
     );
     expect(firstSignal?.aborted).toBe(true);
     expect(result.current.status).toBe('loading');
+    first.resolve(localSession);
+    await flushAuth();
+    expect(result.current.status).toBe('loading');
+    expect(result.current.bootstrap).toBeNull();
     act(() =>
       window.dispatchEvent(
         new PageTransitionEvent('pageshow', { persisted: true }),

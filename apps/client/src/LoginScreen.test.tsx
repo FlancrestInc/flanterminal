@@ -76,6 +76,28 @@ describe('LoginScreen', () => {
     expect(password).toHaveFocus();
   });
 
+  it('contains a rejected callback and restores the form controls', async () => {
+    const onLogin = vi.fn(async () => {
+      throw new Error('private callback detail');
+    });
+    render(<LoginScreen {...props({ onLogin })} />);
+    fireEvent.change(screen.getByLabelText('Username'), {
+      target: { value: 'operator' },
+    });
+    fireEvent.change(screen.getByLabelText('Password'), {
+      target: { value: 'private-password' },
+    });
+
+    fireEvent.submit(
+      screen.getByRole('button', { name: 'Sign in' }).closest('form')!,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled(),
+    );
+    expect(document.body.textContent).not.toContain('private callback detail');
+  });
+
   it('shows only a concise retry action for an upstream access failure', () => {
     const onRetry = vi.fn(async () => undefined);
     render(

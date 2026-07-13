@@ -33,6 +33,8 @@ export function LoginScreen({
     setPending(true);
     try {
       await operation();
+    } catch {
+      // The owning authentication state provides the bounded user-facing error.
     } finally {
       pendingRef.current = false;
       setPending(false);

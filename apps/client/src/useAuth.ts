@@ -72,6 +72,14 @@ export function useAuth(
     return controller;
   }, []);
 
+  const isCurrentOperation = useCallback(
+    (operation: AbortController) =>
+      mountedRef.current &&
+      operationRef.current === operation &&
+      !operation.signal.aborted,
+    [],
+  );
+
   const publish = useCallback(
     (next: AuthBootstrap) => {
       if (!mountedRef.current) return;
@@ -131,9 +139,10 @@ export function useAuth(
       setBusy(false);
     }
     try {
-      publish(await api.bootstrap(operation.signal));
+      const next = await api.bootstrap(operation.signal);
+      if (isCurrentOperation(operation)) publish(next);
     } catch (reason) {
-      if (isAbortError(reason) || !mountedRef.current) return;
+      if (isAbortError(reason) || !isCurrentOperation(operation)) return;
       bootstrapRef.current = null;
       setBootstrap(null);
       setStatus('access-error');
@@ -141,7 +150,7 @@ export function useAuth(
     } finally {
       if (operationRef.current === operation) operationRef.current = null;
     }
-  }, [api, publish, replaceOperation]);
+  }, [api, isCurrentOperation, publish, replaceOperation]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -167,6 +176,7 @@ export function useAuth(
       void api
         .refresh(bootstrap.csrfToken, operation.signal)
         .then((next) => {
+          if (!isCurrentOperation(operation)) return;
           if (!isConsistentRefresh(bootstrap, next)) {
             authenticationRequired();
             return;
@@ -174,7 +184,8 @@ export function useAuth(
           publish(next);
         })
         .catch((reason: unknown) => {
-          if (!isAbortError(reason)) authenticationRequired();
+          if (!isAbortError(reason) && isCurrentOperation(operation))
+            authenticationRequired();
         })
         .finally(() => {
           if (operationRef.current === operation) operationRef.current = null;
@@ -186,6 +197,7 @@ export function useAuth(
     authenticationRequired,
     bootstrap,
     cancelRefresh,
+    isCurrentOperation,
     publish,
     replaceOperation,
   ]);
@@ -221,20 +233,22 @@ export function useAuth(
       setError(null);
       try {
         const input: LoginRequest = { username, password };
-        publish(await api.login(input, operation.signal));
+        const next = await api.login(input, operation.signal);
+        if (isCurrentOperation(operation)) publish(next);
       } catch (reason) {
-        if (isAbortError(reason) || !mountedRef.current) return;
+        if (isAbortError(reason) || !isCurrentOperation(operation)) return;
         setError(
           reason instanceof AuthApiError && reason.code === 'rate_limited'
             ? RATE_LIMIT_ERROR
             : SIGN_IN_ERROR,
         );
       } finally {
-        if (operationRef.current === operation) operationRef.current = null;
-        if (mountedRef.current) setBusy(false);
+        const isCurrent = operationRef.current === operation;
+        if (isCurrent) operationRef.current = null;
+        if (isCurrent && mountedRef.current) setBusy(false);
       }
     },
-    [api, publish, replaceOperation],
+    [api, isCurrentOperation, publish, replaceOperation],
   );
 
   const logout = useCallback(async () => {
@@ -245,16 +259,17 @@ export function useAuth(
     setError(null);
     try {
       await api.logout(current.csrfToken, operation.signal);
-      authenticationRequired();
+      if (isCurrentOperation(operation)) authenticationRequired();
     } catch (reason) {
-      if (isAbortError(reason) || !mountedRef.current) return;
+      if (isAbortError(reason) || !isCurrentOperation(operation)) return;
       if (isAuthenticationLoss(reason)) authenticationRequired();
       else setError(REQUEST_ERROR);
     } finally {
-      if (operationRef.current === operation) operationRef.current = null;
-      if (mountedRef.current) setBusy(false);
+      const isCurrent = operationRef.current === operation;
+      if (isCurrent) operationRef.current = null;
+      if (isCurrent && mountedRef.current) setBusy(false);
     }
-  }, [api, authenticationRequired, replaceOperation]);
+  }, [api, authenticationRequired, isCurrentOperation, replaceOperation]);
 
   const changePassword = useCallback(
     async (currentPassword: string, newPassword: string) => {
@@ -269,17 +284,18 @@ export function useAuth(
           newPassword,
         };
         await api.changePassword(current.csrfToken, input, operation.signal);
-        authenticationRequired();
+        if (isCurrentOperation(operation)) authenticationRequired();
       } catch (reason) {
-        if (isAbortError(reason) || !mountedRef.current) return;
+        if (isAbortError(reason) || !isCurrentOperation(operation)) return;
         if (isAuthenticationLoss(reason)) authenticationRequired();
         else setError(REQUEST_ERROR);
       } finally {
-        if (operationRef.current === operation) operationRef.current = null;
-        if (mountedRef.current) setBusy(false);
+        const isCurrent = operationRef.current === operation;
+        if (isCurrent) operationRef.current = null;
+        if (isCurrent && mountedRef.current) setBusy(false);
       }
     },
-    [api, authenticationRequired, replaceOperation],
+    [api, authenticationRequired, isCurrentOperation, replaceOperation],
   );
 
   const privateFetch = useCallback<typeof fetch>(
