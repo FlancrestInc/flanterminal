@@ -5,6 +5,18 @@ export default defineConfig({
   base: './',
   build: {
     chunkSizeWarningLimit: 650,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: 'xterm',
+              test: /node_modules[\\/]@xterm[\\/]/,
+            },
+          ],
+        },
+      },
+    },
   },
   plugins: [react()],
   server: {

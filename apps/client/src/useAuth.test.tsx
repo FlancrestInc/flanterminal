@@ -131,6 +131,38 @@ describe('useAuth', () => {
     expect(result.current.error).toBe('Access could not be verified.');
   });
 
+  it('owns password errors separately and clears only that channel on retry', async () => {
+    const retry = deferred<void>();
+    const api = fakeApi(localSession);
+    vi.mocked(api.changePassword)
+      .mockRejectedValueOnce(new AuthApiError('operation_failed', 500))
+      .mockImplementationOnce(async () => await retry.promise);
+    const { result } = renderHook(() => useAuth(api));
+    await flushAuth();
+
+    await act(async () => {
+      await result.current.changePassword('current', 'replacement');
+    });
+    expect(result.current.passwordError).toBe('Unable to change password.');
+    expect(result.current.error).toBeNull();
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.changePassword('current', 'replacement');
+    });
+    expect(result.current.passwordError).toBeNull();
+    expect(result.current.busy).toBe(true);
+    retry.reject(new AuthApiError('operation_failed', 500));
+    await act(async () => pending);
+    expect(result.current.passwordError).toBe('Unable to change password.');
+
+    await act(async () => {
+      await result.current.changePassword('current', 'replacement');
+    });
+    expect(result.current.passwordError).toBeNull();
+    expect(result.current.status).toBe('unauthenticated');
+  });
+
   it('schedules one upstream refresh before expiry and replaces the CSRF token', async () => {
     const next: AuthBootstrap = {
       ...upstreamSession,

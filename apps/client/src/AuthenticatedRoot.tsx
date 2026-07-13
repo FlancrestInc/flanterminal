@@ -117,7 +117,7 @@ export function AuthenticatedRoot({
         tabsApi={tabsApi}
         authMode={auth.bootstrap?.mode ?? 'none'}
         authBusy={auth.busy}
-        authError={auth.error}
+        passwordError={auth.passwordError}
         onChangePassword={auth.changePassword}
       />
     </AuthenticationRequiredContext.Provider>
@@ -133,7 +133,7 @@ function SettingsWorkspace({
   tabsApi,
   authMode,
   authBusy,
-  authError,
+  passwordError,
   onChangePassword,
 }: Readonly<{
   config: ClientConfig;
@@ -144,13 +144,20 @@ function SettingsWorkspace({
   tabsApi: ReturnType<typeof createTabsApi>;
   authMode: 'local' | 'cloudflare-access' | 'trusted-header' | 'none';
   authBusy: boolean;
-  authError: string | null;
+  passwordError: string | null;
   onChangePassword: (current: string, replacement: string) => Promise<void>;
 }>) {
   const settings = useSettings(api, { onAuthenticationRequired });
   if (settings.loading && settings.response === null)
     return <StartupState state="loading" />;
-  if (settings.response === null) return <StartupState state="error" />;
+  if (settings.response === null)
+    return (
+      <StartupState
+        state="error"
+        message="Unable to load settings."
+        onRetry={() => void settings.retry()}
+      />
+    );
   return (
     renderWorkspace?.(
       config,
@@ -162,8 +169,10 @@ function SettingsWorkspace({
         config={config}
         api={tabsApi}
         settingsResponse={settings.response}
-        settingsBusy={settings.busy || authBusy}
-        settingsError={settings.error ?? authError}
+        settingsBusy={settings.busy}
+        settingsError={settings.error}
+        passwordBusy={authBusy}
+        passwordError={passwordError}
         onSaveSettings={settings.save}
         authMode={authMode}
         onChangePassword={onChangePassword}

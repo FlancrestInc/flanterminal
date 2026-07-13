@@ -19,6 +19,11 @@ type UiTokens = Readonly<{
   muted: string;
   accent: string;
   danger: string;
+  dangerBg: string;
+  dangerText: string;
+  dangerHover: string;
+  dangerBorder: string;
+  dangerFocus: string;
 }>;
 
 export type AppTheme = Readonly<{ ui: UiTokens; terminal: ITheme }>;
@@ -35,6 +40,11 @@ export const THEMES: Readonly<Record<WorkspaceSettings['theme'], AppTheme>> =
         muted: '#9fa09d',
         accent: '#b88732',
         danger: '#c84e49',
+        dangerBg: '#8f302c',
+        dangerText: '#ffffff',
+        dangerHover: '#a33b35',
+        dangerBorder: '#df6a64',
+        dangerFocus: '#ef7770',
       }),
       terminal: Object.freeze({
         background: '#101112',
@@ -70,6 +80,11 @@ export const THEMES: Readonly<Record<WorkspaceSettings['theme'], AppTheme>> =
         muted: '#626560',
         accent: '#8a5b12',
         danger: '#a33b35',
+        dangerBg: '#a33b35',
+        dangerText: '#ffffff',
+        dangerHover: '#862c28',
+        dangerBorder: '#862c28',
+        dangerFocus: '#862c28',
       }),
       terminal: Object.freeze({
         background: '#fbfbf8',
@@ -105,6 +120,11 @@ export const THEMES: Readonly<Record<WorkspaceSettings['theme'], AppTheme>> =
         muted: '#b7aab4',
         accent: '#e95420',
         danger: '#ef5350',
+        dangerBg: '#a62f2d',
+        dangerText: '#ffffff',
+        dangerHover: '#bd3934',
+        dangerBorder: '#ef6d65',
+        dangerFocus: '#ff786c',
       }),
       terminal: Object.freeze({
         background: '#300a24',

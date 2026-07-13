@@ -125,6 +125,39 @@ describe('useSettings', () => {
     expect(onAuthenticationRequired).toHaveBeenCalledOnce();
   });
 
+  it('clears a save error only when its next save starts and keeps it clear on success', async () => {
+    const retry = deferred<SettingsResponse>();
+    const replace = vi
+      .fn<SettingsApi['replace']>()
+      .mockRejectedValueOnce(new SettingsApiError('operation_failed', 500))
+      .mockImplementationOnce(async () => await retry.promise);
+    const client = api({ replace });
+    const hook = renderHook(() => useSettings(client));
+    await waitFor(() => expect(hook.result.current.response).not.toBeNull());
+
+    await act(async () => {
+      await hook.result.current.save(base.settings);
+    });
+    expect(hook.result.current.error).toBe('Unable to save settings.');
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = hook.result.current.save({
+        ...base.settings,
+        theme: 'light',
+      });
+    });
+    await waitFor(() => expect(hook.result.current.busy).toBe(true));
+    expect(hook.result.current.error).toBeNull();
+    retry.resolve({
+      ...base,
+      settings: { ...base.settings, theme: 'light' },
+    });
+    await act(async () => pending);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.response?.settings.theme).toBe('light');
+  });
+
   it('aborts loading and suppresses state publication after unmount', () => {
     let signal: AbortSignal | undefined;
     const client = api({
@@ -168,3 +201,13 @@ describe('useSettings', () => {
     expect(replace).toHaveBeenCalledOnce();
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}

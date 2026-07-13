@@ -9,8 +9,10 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 
 export type SettingsViewProps = Readonly<{
   response: SettingsResponse;
-  busy: boolean;
-  error: string | null;
+  settingsBusy: boolean;
+  settingsError: string | null;
+  passwordBusy: boolean;
+  passwordError: string | null;
   authMode: AuthMode;
   onSave: (settings: WorkspaceSettings) => Promise<void>;
   onBack: () => void;
@@ -19,8 +21,10 @@ export type SettingsViewProps = Readonly<{
 
 export function SettingsView({
   response,
-  busy,
-  error,
+  settingsBusy,
+  settingsError,
+  passwordBusy,
+  passwordError,
   authMode,
   onSave,
   onBack,
@@ -70,7 +74,7 @@ export function SettingsView({
       </header>
       <div className="settings-scroll">
         <form className="settings-form" onSubmit={submit}>
-          <fieldset className="settings-fieldset" disabled={busy}>
+          <fieldset className="settings-fieldset" disabled={settingsBusy}>
             <SettingsSection title="Appearance">
               <SegmentedField
                 label="Theme"
@@ -196,15 +200,19 @@ export function SettingsView({
             </SettingsSection>
           </fieldset>
 
-          {error ? (
+          {settingsError ? (
             <p className="settings-error" role="alert">
-              {error}
+              {settingsError}
             </p>
           ) : null}
           <div className="settings-actions">
-            <button className="primary-button" type="submit" disabled={busy}>
+            <button
+              className="primary-button"
+              type="submit"
+              disabled={settingsBusy}
+            >
               <Save size={15} aria-hidden="true" />
-              {busy ? 'Saving...' : 'Save settings'}
+              {settingsBusy ? 'Saving...' : 'Save settings'}
             </button>
           </div>
         </form>
@@ -223,7 +231,7 @@ export function SettingsView({
                   required
                   value={currentPassword}
                   onChange={(event) => setCurrentPassword(event.target.value)}
-                  disabled={busy}
+                  disabled={passwordBusy}
                 />
               </label>
               <label className="settings-field">
@@ -234,16 +242,23 @@ export function SettingsView({
                   required
                   value={newPassword}
                   onChange={(event) => setNewPassword(event.target.value)}
-                  disabled={busy}
+                  disabled={passwordBusy}
                 />
               </label>
             </SettingsSection>
+            {passwordError ? (
+              <p className="settings-error password-error" role="alert">
+                {passwordError}
+              </p>
+            ) : null}
             <div className="settings-actions">
               <button
                 type="submit"
-                disabled={busy || currentPassword === '' || newPassword === ''}
+                disabled={
+                  passwordBusy || currentPassword === '' || newPassword === ''
+                }
               >
-                Change password
+                {passwordBusy ? 'Changing password...' : 'Change password'}
               </button>
             </div>
           </form>

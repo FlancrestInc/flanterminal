@@ -1,3 +1,5 @@
+// @ts-expect-error Node types are intentionally excluded from the browser app.
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import { FONT_STACKS, THEMES, themeFor } from './themes.js';
@@ -44,4 +46,46 @@ describe('terminal themes', () => {
     );
     expect(FONT_STACKS['system-monospace']).toContain('ui-monospace');
   });
+
+  it('keeps destructive button text and boundaries at measured WCAG contrast', () => {
+    for (const theme of Object.values(THEMES)) {
+      expect(
+        contrast(theme.ui.dangerText, theme.ui.dangerBg),
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast(theme.ui.dangerText, theme.ui.dangerHover),
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast(theme.ui.dangerBorder, theme.ui.surface),
+      ).toBeGreaterThanOrEqual(3);
+      expect(
+        contrast(theme.ui.dangerFocus, theme.ui.surface),
+      ).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it('uses semantic destructive tokens for normal, hover, and focus states', () => {
+    const css = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
+    expect(css).toContain('background: var(--ui-danger-bg);');
+    expect(css).toContain('color: var(--ui-danger-text);');
+    expect(css).toContain('background: var(--ui-danger-hover);');
+    expect(css).toContain('outline-color: var(--ui-danger-focus);');
+  });
 });
+
+function contrast(first: string, second: string): number {
+  const brighter = Math.max(luminance(first), luminance(second));
+  const darker = Math.min(luminance(first), luminance(second));
+  return (brighter + 0.05) / (darker + 0.05);
+}
+
+function luminance(hex: string): number {
+  const channels = hex
+    .slice(1)
+    .match(/../gu)!
+    .map((value) => Number.parseInt(value, 16) / 255)
+    .map((value) =>
+      value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4,
+    );
+  return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+}

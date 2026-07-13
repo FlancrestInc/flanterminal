@@ -76,6 +76,7 @@ class FakeTerminal implements TerminalLike {
 function setup(
   status: TerminalSocketController['status'] = 'connected',
   overrides: Partial<WorkspaceSettings> = {},
+  dependencyOverrides: Partial<TerminalDependencies> = {},
 ) {
   const terminal = new FakeTerminal();
   const terminalFactory = vi.fn(() => terminal);
@@ -117,7 +118,9 @@ function setup(
     scheduleInitialFit,
     setTimer: setTimeout,
     clearTimer: clearTimeout,
-    audioFactory: vi.fn(() => ({ play: vi.fn(async () => undefined) })),
+    audioFactory: vi.fn(() => fakeAudio()),
+    now: () => performance.now(),
+    ...dependencyOverrides,
   };
   const effectiveSettings = { ...settings, ...overrides };
   const view = render(
@@ -365,6 +368,93 @@ describe('Terminal', () => {
     storage.mockRestore();
   });
 
+  it('reuses one audio resource and throttles bursty bells with an injected clock', () => {
+    let now = 1_000;
+    const audio = fakeAudio();
+    const audioFactory = vi.fn(() => audio);
+    const sound = setup('connected', { bellBehavior: 'sound' }, {
+      audioFactory,
+      now: () => now,
+    } as Partial<TerminalDependencies>);
+
+    act(() => {
+      sound.terminal.bell();
+      sound.terminal.bell();
+      sound.terminal.bell();
+    });
+    expect(audioFactory).toHaveBeenCalledOnce();
+    expect(audio.play).toHaveBeenCalledOnce();
+
+    now += 199;
+    act(() => sound.terminal.bell());
+    expect(audio.play).toHaveBeenCalledOnce();
+    now += 1;
+    act(() => sound.terminal.bell());
+    expect(audio.play).toHaveBeenCalledTimes(2);
+    expect(audioFactory).toHaveBeenCalledOnce();
+  });
+
+  it('contains rejected audio playback and releases audio on recreation and unmount', async () => {
+    const first = fakeAudio();
+    first.play.mockRejectedValueOnce(
+      new DOMException('blocked', 'NotAllowedError'),
+    );
+    const second = fakeAudio();
+    const audioFactory = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second);
+    const sound = setup('connected', { bellBehavior: 'sound' }, {
+      audioFactory,
+      now: () => 1_000,
+    } as Partial<TerminalDependencies>);
+
+    act(() => sound.terminal.bell());
+    await act(async () => Promise.resolve());
+
+    sound.rerender(
+      <Terminal
+        config={config}
+        settings={{ ...sound.settings, fontSize: 16 }}
+        socket={sound.socket}
+        dependencies={sound.dependencies}
+      />,
+    );
+    expect(first.pause).toHaveBeenCalledOnce();
+    expect(first.currentTime).toBe(0);
+    expect(first.removeAttribute).toHaveBeenCalledWith('src');
+    expect(first.load).toHaveBeenCalledOnce();
+    expect(audioFactory).toHaveBeenCalledTimes(2);
+
+    sound.unmount();
+    expect(second.pause).toHaveBeenCalledOnce();
+    expect(second.currentTime).toBe(0);
+    expect(second.removeAttribute).toHaveBeenCalledWith('src');
+    expect(second.load).toHaveBeenCalledOnce();
+  });
+
+  it('does not allocate audio for visual bells and preserves their timer behavior', () => {
+    const audioFactory = vi.fn(() => fakeAudio());
+    const visual = setup(
+      'connected',
+      { bellBehavior: 'visual' },
+      { audioFactory },
+    );
+
+    act(() => {
+      visual.terminal.bell();
+      visual.terminal.bell();
+    });
+    expect(audioFactory).not.toHaveBeenCalled();
+    expect(visual.container.querySelector('.terminal-host')).toHaveClass(
+      'is-belling',
+    );
+    act(() => vi.advanceTimersByTime(140));
+    expect(visual.container.querySelector('.terminal-host')).not.toHaveClass(
+      'is-belling',
+    );
+  });
+
   it('disposes observers, scheduling, subscriptions, addons and terminal', () => {
     const result = setup();
     const cancelInitialFit = result.dependencies
@@ -383,3 +473,13 @@ describe('Terminal', () => {
     expect(result.terminal.dispose).toHaveBeenCalled();
   });
 });
+
+function fakeAudio() {
+  return {
+    play: vi.fn(async () => undefined),
+    pause: vi.fn(),
+    currentTime: 27,
+    removeAttribute: vi.fn(),
+    load: vi.fn(),
+  };
+}

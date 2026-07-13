@@ -4,12 +4,19 @@ import type {
   SettingsResponse,
   WorkspaceSettings,
 } from '@flanterminal/shared';
-import { Settings } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, Settings } from 'lucide-react';
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { SessionMenu } from './SessionMenu.js';
-import { SettingsView } from './SettingsView.js';
 import { TabBar } from './TabBar.js';
 import { createTabsApi, type TabsApi } from './tabs-api.js';
 import {
@@ -19,12 +26,19 @@ import {
 import { useTabs } from './useTabs.js';
 import type { ConnectionStatus } from './useTerminalSocket.js';
 
+const SettingsView = lazy(async () => {
+  const module = await import('./SettingsView.js');
+  return { default: module.SettingsView };
+});
+
 export interface AppProps {
   readonly config: ClientConfig;
   readonly api?: TabsApi;
   readonly settingsResponse: SettingsResponse;
   readonly settingsBusy: boolean;
   readonly settingsError: string | null;
+  readonly passwordBusy: boolean;
+  readonly passwordError: string | null;
   readonly onSaveSettings: (settings: WorkspaceSettings) => Promise<void>;
   readonly authMode: AuthMode;
   readonly onChangePassword?: (
@@ -44,6 +58,8 @@ export function App({
   settingsResponse,
   settingsBusy,
   settingsError,
+  passwordBusy,
+  passwordError,
   onSaveSettings,
   authMode,
   onChangePassword,
@@ -154,15 +170,21 @@ export function App({
   return (
     <>
       {view === 'settings' ? (
-        <SettingsView
-          response={settingsResponse}
-          busy={settingsBusy}
-          error={settingsError}
-          authMode={authMode}
-          onSave={onSaveSettings}
-          onBack={() => setView('terminal')}
-          {...(onChangePassword === undefined ? {} : { onChangePassword })}
-        />
+        <Suspense
+          fallback={<SettingsLoadingState onBack={() => setView('terminal')} />}
+        >
+          <SettingsView
+            response={settingsResponse}
+            settingsBusy={settingsBusy}
+            settingsError={settingsError}
+            passwordBusy={passwordBusy}
+            passwordError={passwordError}
+            authMode={authMode}
+            onSave={onSaveSettings}
+            onBack={() => setView('terminal')}
+            {...(onChangePassword === undefined ? {} : { onChangePassword })}
+          />
+        </Suspense>
       ) : null}
       <main className="app-shell" hidden={view !== 'terminal'}>
         <header className="top-bar">
@@ -290,6 +312,29 @@ export function App({
   );
 }
 
+function SettingsLoadingState({ onBack }: { readonly onBack: () => void }) {
+  return (
+    <main className="settings-shell">
+      <header className="settings-header">
+        <button
+          aria-label="Back to terminal"
+          className="icon-button"
+          onClick={onBack}
+          title="Back to terminal"
+          type="button"
+        >
+          <ArrowLeft aria-hidden="true" size={18} strokeWidth={1.8} />
+        </button>
+        <h1>Settings</h1>
+      </header>
+      <div aria-live="polite" className="settings-loading" role="status">
+        <span aria-hidden="true" className="startup-indicator" />
+        <span>Loading settings</span>
+      </div>
+    </main>
+  );
+}
+
 function isEditingTarget(target: EventTarget | null): boolean {
   if (
     target instanceof HTMLElement &&
@@ -319,8 +364,12 @@ function confirmationLabel(kind: Confirmation['kind'] | undefined): string {
 
 export function StartupState({
   state,
+  message = 'Unable to start terminal.',
+  onRetry,
 }: {
   readonly state: 'loading' | 'error';
+  readonly message?: string;
+  readonly onRetry?: () => void;
 }) {
   if (state === 'loading') {
     return (
@@ -332,7 +381,12 @@ export function StartupState({
   }
   return (
     <main className="startup-state startup-error" role="alert">
-      Unable to start terminal.
+      <span>{message}</span>
+      {onRetry === undefined ? null : (
+        <button type="button" onClick={onRetry}>
+          Retry
+        </button>
+      )}
     </main>
   );
 }

@@ -60,12 +60,16 @@ vi.mock('./App.js', async () => {
       api,
       settingsBusy,
       settingsError,
+      passwordBusy,
+      passwordError,
       onChangePassword,
     }: {
       config: ClientConfig;
       api: TabsApi;
       settingsBusy: boolean;
       settingsError: string | null;
+      passwordBusy: boolean;
+      passwordError: string | null;
       onChangePassword?: (
         current: string,
         replacement: string,
@@ -75,7 +79,8 @@ vi.mock('./App.js', async () => {
         <TerminalProbe config={config} api={api} />
       ) : (
         <div>
-          Default workspace {settingsBusy ? 'busy' : 'idle'} {settingsError}
+          Default workspace {settingsBusy ? 'busy' : 'idle'} {settingsError}{' '}
+          Password {passwordBusy ? 'busy' : 'idle'} {passwordError}
           <button
             type="button"
             onClick={() => void onChangePassword?.('current', 'replacement')}
@@ -84,9 +89,24 @@ vi.mock('./App.js', async () => {
           </button>
         </div>
       ),
-    StartupState: ({ state }: { state: 'loading' | 'error' }) => (
+    StartupState: ({
+      state,
+      message,
+      onRetry,
+    }: {
+      state: 'loading' | 'error';
+      message?: string;
+      onRetry?: () => void;
+    }) => (
       <main role={state === 'loading' ? 'status' : 'alert'}>
-        {state === 'loading' ? 'Loading terminal' : 'Unable to start terminal.'}
+        {state === 'loading'
+          ? 'Loading terminal'
+          : (message ?? 'Unable to start terminal.')}
+        {onRetry === undefined ? null : (
+          <button type="button" onClick={onRetry}>
+            Retry
+          </button>
+        )}
       </main>
     ),
   };
@@ -94,6 +114,7 @@ vi.mock('./App.js', async () => {
 
 import type { AuthApi } from './auth-api.js';
 import { AuthenticatedRoot } from './AuthenticatedRoot.js';
+import { SettingsApiError } from './settings-api.js';
 import {
   resetTerminalAuthSuspensionsForTests,
   terminalAuthSuspensionCountsForTests,
@@ -315,7 +336,64 @@ describe('AuthenticatedRoot', () => {
     expect(await screen.findByText('Terminal subtree')).toBeInTheDocument();
   });
 
-  it('passes local password operation busy state into the settings workspace', async () => {
+  it('retries a transient initial settings failure without mounting or overlapping the terminal', async () => {
+    let resolveRetry!: (value: SettingsResponse) => void;
+    const retry = new Promise<SettingsResponse>((resolve) => {
+      resolveRetry = resolve;
+    });
+    const client = settingsApi();
+    vi.mocked(client.load)
+      .mockRejectedValueOnce(new Error('private settings failure'))
+      .mockImplementationOnce(async () => await retry);
+    render(
+      <AuthenticatedRoot
+        api={api()}
+        loadConfig={vi.fn(async () => config)}
+        settingsApi={client}
+        renderWorkspace={() => <div>Terminal subtree</div>}
+      />,
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Unable to load settings.',
+    );
+    expect(screen.queryByText('Terminal subtree')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(screen.getByRole('status')).toHaveTextContent('Loading terminal');
+    expect(
+      screen.queryByRole('button', { name: 'Retry' }),
+    ).not.toBeInTheDocument();
+    expect(client.load).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Terminal subtree')).not.toBeInTheDocument();
+
+    act(() => resolveRetry(settingsResponse));
+    expect(await screen.findByText('Terminal subtree')).toBeInTheDocument();
+  });
+
+  it('propagates an initial settings 401 to authentication instead of retrying', async () => {
+    const client = settingsApi();
+    vi.mocked(client.load).mockRejectedValueOnce(
+      new SettingsApiError('authentication_required', 401),
+    );
+    render(
+      <AuthenticatedRoot
+        api={api()}
+        loadConfig={vi.fn(async () => config)}
+        settingsApi={client}
+        renderWorkspace={() => <div>Terminal subtree</div>}
+      />,
+    );
+
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Retry' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Terminal subtree')).not.toBeInTheDocument();
+  });
+
+  it('keeps local password busy state separate from settings operations', async () => {
     let release!: () => void;
     const authApi = api();
     vi.mocked(authApi.changePassword).mockImplementation(
@@ -334,9 +412,8 @@ describe('AuthenticatedRoot', () => {
     fireEvent.click(
       await screen.findByRole('button', { name: 'Change local password' }),
     );
-    expect(
-      await screen.findByText(/Default workspace busy/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Password busy/)).toBeInTheDocument();
+    expect(screen.getByText(/Default workspace idle/)).toBeInTheDocument();
     act(() => release());
   });
 

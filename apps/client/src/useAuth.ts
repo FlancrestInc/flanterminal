@@ -22,6 +22,7 @@ const ACCESS_ERROR = 'Access could not be verified.';
 const SIGN_IN_ERROR = 'Sign-in failed.';
 const RATE_LIMIT_ERROR = 'Too many attempts. Try again later.';
 const REQUEST_ERROR = 'Unable to complete the request.';
+const PASSWORD_ERROR = 'Unable to change password.';
 
 export type AuthStatus =
   'loading' | 'unauthenticated' | 'authenticated' | 'access-error';
@@ -41,6 +42,7 @@ export interface AuthController {
   readonly status: AuthStatus;
   readonly bootstrap: AuthBootstrap | null;
   readonly error: string | null;
+  readonly passwordError: string | null;
   readonly busy: boolean;
   readonly epoch: number;
   readonly login: (username: string, password: string) => Promise<void>;
@@ -72,6 +74,7 @@ export function useAuth(
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [bootstrap, setBootstrap] = useState<AuthBootstrap | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [epoch, setEpoch] = useState(0);
   const [refreshRevision, setRefreshRevision] = useState(0);
@@ -112,6 +115,7 @@ export function useAuth(
       bootstrapRef.current = next;
       setBootstrap(next);
       setError(null);
+      if (!continuesAuthenticatedEpoch) setPasswordError(null);
       if (next.authenticated) {
         if (!continuesAuthenticatedEpoch) {
           privateRef.current?.abort();
@@ -146,6 +150,7 @@ export function useAuth(
     if (!mountedRef.current) return;
     setBootstrap(null);
     setBusy(false);
+    setPasswordError(null);
     if (previous?.mode === 'local') {
       setStatus('unauthenticated');
       setError(null);
@@ -237,6 +242,7 @@ export function useAuth(
       setBootstrap(null);
       setBusy(false);
       setError(null);
+      setPasswordError(null);
       setStatus('loading');
     };
     const onPageShow = (event: PageTransitionEvent) => {
@@ -312,7 +318,7 @@ export function useAuth(
       cancelRefresh();
       const operation = replaceOperation();
       setBusy(true);
-      setError(null);
+      setPasswordError(null);
       try {
         const input: PasswordChangeRequest = {
           currentPassword,
@@ -324,7 +330,7 @@ export function useAuth(
         if (isAbortError(reason) || !isCurrentOperation(operation)) return;
         if (isAuthenticationLoss(reason)) authenticationRequired();
         else {
-          setError(REQUEST_ERROR);
+          setPasswordError(PASSWORD_ERROR);
           setRefreshRevision((revision) => revision + 1);
         }
       } finally {
@@ -394,6 +400,7 @@ export function useAuth(
     status,
     bootstrap,
     error,
+    passwordError,
     busy,
     epoch,
     login,

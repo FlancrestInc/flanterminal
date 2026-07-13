@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
 
 import type { SettingsResponse, WorkspaceSettings } from '@flanterminal/shared';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SettingsView } from './SettingsView.js';
@@ -51,8 +57,10 @@ describe('SettingsView', () => {
     render(
       <SettingsView
         response={response}
-        busy={false}
-        error={null}
+        settingsBusy={false}
+        settingsError={null}
+        passwordBusy={false}
+        passwordError={null}
         authMode="cloudflare-access"
         onSave={onSave}
         onBack={vi.fn()}
@@ -94,8 +102,10 @@ describe('SettingsView', () => {
     render(
       <SettingsView
         response={response}
-        busy={false}
-        error={null}
+        settingsBusy={false}
+        settingsError={null}
+        passwordBusy={false}
+        passwordError={null}
         authMode="local"
         onSave={vi.fn()}
         onBack={vi.fn()}
@@ -123,8 +133,10 @@ describe('SettingsView', () => {
     const view = render(
       <SettingsView
         response={response}
-        busy={false}
-        error={null}
+        settingsBusy={false}
+        settingsError={null}
+        passwordBusy={false}
+        passwordError={null}
         authMode="none"
         onSave={vi.fn()}
         onBack={vi.fn()}
@@ -144,8 +156,10 @@ describe('SettingsView', () => {
             cursorStyle: 'underline',
           },
         }}
-        busy
-        error="Unable to save settings."
+        settingsBusy
+        settingsError="Unable to save settings."
+        passwordBusy={false}
+        passwordError={null}
         authMode="none"
         onSave={vi.fn()}
         onBack={vi.fn()}
@@ -160,5 +174,46 @@ describe('SettingsView', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Unable to save settings.',
     );
+  });
+
+  it('keeps settings and password errors adjacent to their independent forms', () => {
+    const view = render(
+      <SettingsView
+        response={response}
+        settingsBusy={false}
+        settingsError="Unable to save settings."
+        passwordBusy={false}
+        passwordError="Unable to change password."
+        authMode="local"
+        onSave={vi.fn()}
+        onBack={vi.fn()}
+        onChangePassword={vi.fn()}
+      />,
+    );
+    const forms = document.querySelectorAll('form');
+    expect(within(forms[0]!).getByRole('alert')).toHaveTextContent(
+      'Unable to save settings.',
+    );
+    expect(within(forms[1]!).getByRole('alert')).toHaveTextContent(
+      'Unable to change password.',
+    );
+
+    view.rerender(
+      <SettingsView
+        response={response}
+        settingsBusy={false}
+        settingsError={null}
+        passwordBusy={false}
+        passwordError="Unable to change password."
+        authMode="local"
+        onSave={vi.fn()}
+        onBack={vi.fn()}
+        onChangePassword={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Unable to change password.',
+    );
+    expect(forms[1]).toContainElement(screen.getByRole('alert'));
   });
 });

@@ -16,6 +16,11 @@
   --ui-muted: #9fa09d;
   --ui-accent: #b88732;
   --ui-danger: #c84e49;
+  --ui-danger-bg: #8f302c;
+  --ui-danger-text: #ffffff;
+  --ui-danger-hover: #a33b35;
+  --ui-danger-border: #df6a64;
+  --ui-danger-focus: #ef7770;
   --login-page-bg: #101112;
   --login-input-bg: #181a1b;
   --login-control-border: #666a67;
@@ -45,6 +50,11 @@
   --ui-muted: #626560;
   --ui-accent: #8a5b12;
   --ui-danger: #a33b35;
+  --ui-danger-bg: #a33b35;
+  --ui-danger-text: #ffffff;
+  --ui-danger-hover: #862c28;
+  --ui-danger-border: #862c28;
+  --ui-danger-focus: #862c28;
   color-scheme: light;
 }
 
@@ -57,6 +67,11 @@
   --ui-muted: #b7aab4;
   --ui-accent: #e95420;
   --ui-danger: #ef5350;
+  --ui-danger-bg: #a62f2d;
+  --ui-danger-text: #ffffff;
+  --ui-danger-hover: #bd3934;
+  --ui-danger-border: #ef6d65;
+  --ui-danger-focus: #ff786c;
   color-scheme: dark;
 }
 
@@ -455,8 +470,19 @@ button {
 }
 
 .dialog-actions .danger-button {
-  border-color: #9a4c47;
-  background: #793b37;
+  border-color: var(--ui-danger-border);
+  background: var(--ui-danger-bg);
+  color: var(--ui-danger-text);
+}
+
+.dialog-actions .danger-button:hover:not(:disabled) {
+  background: var(--ui-danger-hover);
+}
+
+.dialog-actions .danger-button:focus-visible {
+  outline: 2px solid var(--ui-danger-focus);
+  outline-color: var(--ui-danger-focus);
+  outline-offset: 2px;
 }
 
 .terminal-host {
@@ -507,6 +533,17 @@ button {
   font-size: 16px;
   font-weight: 600;
   letter-spacing: 0;
+}
+
+.settings-loading {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--ui-text-muted);
+  font-size: 13px;
 }
 
 .settings-scroll {
@@ -744,6 +781,21 @@ button {
 
 .startup-error {
   color: #e0716b;
+}
+
+.startup-error button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 4px;
+  background: var(--ui-raised);
+  color: var(--ui-text);
+  font: inherit;
+}
+
+.startup-error button:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
 }
 
 .login-shell {

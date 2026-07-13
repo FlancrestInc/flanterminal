@@ -47,6 +47,14 @@ export interface ResizeObserverLike {
   disconnect(): void;
 }
 
+export interface AudioLike {
+  currentTime: number;
+  play(): Promise<void>;
+  pause(): void;
+  removeAttribute(name: string): void;
+  load(): void;
+}
+
 export interface TerminalDependencies {
   readonly terminalFactory: (options: ITerminalOptions) => TerminalLike;
   readonly fitAddonFactory: () => FitAddonLike;
@@ -55,7 +63,8 @@ export interface TerminalDependencies {
   readonly scheduleInitialFit: (callback: () => void) => () => void;
   readonly setTimer: typeof setTimeout;
   readonly clearTimer: typeof clearTimeout;
-  readonly audioFactory: (url: string) => Readonly<{ play(): Promise<void> }>;
+  readonly audioFactory: (url: string) => AudioLike;
+  readonly now: () => number;
 }
 
 const defaultDependencies: TerminalDependencies = {
@@ -97,6 +106,7 @@ const defaultDependencies: TerminalDependencies = {
   setTimer: (callback, delay, ...args) => setTimeout(callback, delay, ...args),
   clearTimer: (timer) => clearTimeout(timer),
   audioFactory: (url) => new Audio(url),
+  now: () => performance.now(),
 };
 
 export interface TerminalProps {
@@ -113,6 +123,7 @@ export interface TerminalHandle {
 
 const BELL_URL = new URL('./assets/sounds/terminal-bell.wav', import.meta.url)
   .href;
+const SOUND_BELL_MIN_INTERVAL_MS = 200;
 
 export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
   function Terminal(
@@ -216,14 +227,24 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       const outputSubscription = subscribeOutput((data) => {
         terminal.write(data);
       });
+      const audio =
+        settings.bellBehavior === 'sound'
+          ? dependencies.audioFactory(BELL_URL)
+          : null;
+      let lastSoundBellAt = Number.NEGATIVE_INFINITY;
       let bellTimer: ReturnType<typeof setTimeout> | null = null;
       const bellSubscription = terminal.onBell(() => {
         if (settings.bellBehavior === 'none') return;
-        if (settings.bellBehavior === 'sound') {
-          void dependencies
-            .audioFactory(BELL_URL)
-            .play()
-            .catch(() => undefined);
+        if (audio !== null) {
+          const now = dependencies.now();
+          if (now - lastSoundBellAt < SOUND_BELL_MIN_INTERVAL_MS) return;
+          lastSoundBellAt = now;
+          audio.currentTime = 0;
+          try {
+            void audio.play().catch(() => undefined);
+          } catch {
+            // Browser media policies may reject or throw without affecting xterm.
+          }
           return;
         }
         host.classList.add('is-belling');
@@ -247,6 +268,12 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         bellSubscription.dispose();
         if (bellTimer !== null) dependencies.clearTimer(bellTimer);
         host.classList.remove('is-belling');
+        if (audio !== null) {
+          audio.pause();
+          audio.currentTime = 0;
+          audio.removeAttribute('src');
+          audio.load();
+        }
         fitAddon.dispose();
         webLinksAddon.dispose();
         terminal.dispose();

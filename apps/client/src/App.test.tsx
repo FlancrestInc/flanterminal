@@ -59,6 +59,8 @@ const settingsProps = {
   settingsResponse,
   settingsBusy: false,
   settingsError: null,
+  passwordBusy: false,
+  passwordError: null,
   onSaveSettings: vi.fn(async () => undefined),
   authMode: 'local' as const,
 };
@@ -205,18 +207,24 @@ describe('App', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
-  it('opens settings as a full workspace and returns to the terminal', async () => {
+  it('keeps the terminal mounted while the settings chunk loads and opens', async () => {
     render(<App config={config} api={api()} {...settingsProps} />);
     await screen.findByRole('tab', { name: 'Terminal 1' });
+    const terminal = await screen.findByLabelText(`Terminal ${A}`);
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.getByRole('status')).toHaveTextContent('Loading settings');
+    expect(terminal).toBeInTheDocument();
+    expect(terminal.closest('.app-shell')).toHaveAttribute('hidden');
     expect(
-      screen.getByRole('heading', { name: 'Settings' }),
+      await screen.findByRole('heading', { name: 'Settings' }),
     ).toBeInTheDocument();
+    expect(screen.getByLabelText(`Terminal ${A}`)).toBe(terminal);
     expect(
       screen.queryByRole('tab', { name: 'Terminal 1' }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Back to terminal' }));
     expect(screen.getByRole('tab', { name: 'Terminal 1' })).toBeInTheDocument();
+    expect(screen.getByLabelText(`Terminal ${A}`)).toBe(terminal);
   });
 
   it('does not intercept workspace shortcuts when they are disabled', async () => {
