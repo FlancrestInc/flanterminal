@@ -91,7 +91,7 @@ describe('TmuxSessionPreparer', () => {
     ]);
   });
 
-  it('creates a missing session with only session-scoped options', async () => {
+  it('applies session options before creating the real pane', async () => {
     const runner = runnerWith(
       { exitCode: 1, stdout: '', stderr: '' },
       { exitCode: 0, stdout: '', stderr: '' },
@@ -105,7 +105,7 @@ describe('TmuxSessionPreparer', () => {
       '-d',
       '-s',
       SESSION_NAME,
-      '/bin/bash',
+      '/bin/sh',
       ';',
       'set-option',
       '-t',
@@ -118,10 +118,26 @@ describe('TmuxSessionPreparer', () => {
       SESSION_NAME,
       'default-shell',
       '/bin/bash',
+      ';',
+      'split-window',
+      '-d',
+      '-t',
+      `${SESSION_NAME}:`,
+      '/bin/bash',
+      ';',
+      'kill-pane',
+      '-t',
+      `${SESSION_NAME}:`,
     ]);
     const creationArgs = vi.mocked(runner.run).mock.calls[1]?.[1];
     expect(creationArgs).not.toContain('-g');
     expect(creationArgs).not.toContain('exit-empty');
+    const realPaneIndex = creationArgs?.indexOf('split-window') ?? -1;
+    expect(creationArgs?.indexOf('history-limit')).toBeLessThan(realPaneIndex);
+    expect(creationArgs?.indexOf('default-shell')).toBeLessThan(realPaneIndex);
+    expect(realPaneIndex).toBeLessThan(
+      creationArgs?.indexOf('kill-pane') ?? -1,
+    );
   });
 
   it('kills only the requested session and treats absence as success', async () => {

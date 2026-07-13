@@ -53,6 +53,7 @@ export type TmuxConfig = Readonly<{
 }>;
 
 const APP_SESSION_NAME = /^webterm-tab-([0-9a-f]{32})$/;
+const BOOTSTRAP_SHELL = '/bin/sh';
 
 export function tmuxSessionName(sessionId: string): string {
   if (!isSessionId(sessionId)) throw new Error('Invalid session');
@@ -70,6 +71,7 @@ export class TmuxSessionPreparer implements SessionPreparer {
     settings?: SessionRuntimeSettings,
   ): Promise<AttachSpec> {
     const name = tmuxSessionName(sessionId);
+    const windowTarget = `${name}:`;
     if (settings === undefined) throw new Error('Invalid runtime settings');
     if (!(await this.exists(sessionId))) {
       const creation = await this.run([
@@ -77,7 +79,7 @@ export class TmuxSessionPreparer implements SessionPreparer {
         '-d',
         '-s',
         name,
-        settings.shell,
+        BOOTSTRAP_SHELL,
         ';',
         'set-option',
         '-t',
@@ -90,6 +92,16 @@ export class TmuxSessionPreparer implements SessionPreparer {
         name,
         'default-shell',
         settings.shell,
+        ';',
+        'split-window',
+        '-d',
+        '-t',
+        windowTarget,
+        settings.shell,
+        ';',
+        'kill-pane',
+        '-t',
+        windowTarget,
       ]);
       if (creation.exitCode !== 0) throw new Error('Tmux command failed');
     }
