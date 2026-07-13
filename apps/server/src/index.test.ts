@@ -272,6 +272,95 @@ describe('server lifecycle', () => {
     expect(lifecycle.isReady()).toBe(false);
   });
 
+  it('waits for each teardown phase to complete before starting the next phase', async () => {
+    const calls: string[] = [];
+    const cleanerClose = deferred<void>();
+    const activityClose = deferred<void>();
+    const registryClose = deferred<void>();
+    const websocketClose = deferred<void>();
+    const httpServer = fakeHttpServer(calls);
+    httpServer.close.mockImplementation(() => {
+      calls.push('http.close');
+      return httpServer;
+    });
+    const websocket = fakeWebsocket(calls);
+    websocket.close.mockImplementation(() => {
+      calls.push('ws.close');
+      return websocketClose.promise;
+    });
+    const cleaner = fakeCleaner(calls);
+    cleaner.shutdown.mockImplementation(() => {
+      calls.push('cleaner.shutdown');
+      return cleanerClose.promise;
+    });
+    const activity = fakeActivity(calls);
+    activity.shutdown.mockImplementation(() => {
+      calls.push('activity.shutdown');
+      return activityClose.promise;
+    });
+    const registry = {
+      closeAll: vi.fn(() => {
+        calls.push('registry.closeAll');
+        return registryClose.promise;
+      }),
+    };
+    const lifecycle = createServerLifecycle({
+      httpServer,
+      websocket,
+      activity,
+      cleaner,
+      registry,
+      disposeServices: vi.fn(() => calls.push('services.dispose')),
+      durabilityReady: () => true,
+      closeTimeoutMs: 1_000,
+    });
+
+    let settled = false;
+    const shutdown = lifecycle.shutdown().finally(() => {
+      settled = true;
+    });
+    expect(calls).toEqual([
+      'ws.stopAccepting',
+      'http.close',
+      'cleaner.shutdown',
+      'ws.stopHeartbeat',
+      'activity.shutdown',
+    ]);
+
+    cleanerClose.resolve();
+    await Promise.resolve();
+    expect(websocket.closeClients).not.toHaveBeenCalled();
+
+    activityClose.resolve();
+    await vi.waitFor(() =>
+      expect(websocket.closeClients).toHaveBeenCalledOnce(),
+    );
+    expect(calls).toContain('registry.closeAll');
+    expect(websocket.close).not.toHaveBeenCalled();
+
+    registryClose.resolve();
+    await vi.waitFor(() => expect(websocket.close).toHaveBeenCalledOnce());
+    expect(calls).not.toContain('services.dispose');
+
+    websocketClose.resolve();
+    await vi.waitFor(() => expect(calls).toContain('services.dispose'));
+    expect(settled).toBe(false);
+
+    httpServer.close.mock.calls[0]?.[0]?.();
+    await shutdown;
+    expect(calls).toEqual([
+      'ws.stopAccepting',
+      'http.close',
+      'cleaner.shutdown',
+      'ws.stopHeartbeat',
+      'activity.shutdown',
+      'ws.closeClients',
+      'registry.closeAll',
+      'ws.close',
+      'services.dispose',
+    ]);
+  });
+
   it('bounds HTTP close and force-closes lingering connections', async () => {
     vi.useFakeTimers();
     const httpServer = fakeHttpServer();
@@ -334,6 +423,7 @@ describe('server lifecycle', () => {
           calls.push('registry.closeAll');
         }),
       };
+      const disposeServices = vi.fn(() => calls.push('services.dispose'));
       if (owner === 'cleaner')
         cleaner.shutdown.mockImplementation(neverSettles);
       if (owner === 'activity')
@@ -348,13 +438,26 @@ describe('server lifecycle', () => {
         activity,
         cleaner,
         registry,
-        disposeServices: vi.fn(() => calls.push('services.dispose')),
+        disposeServices,
         durabilityReady: () => true,
         closeTimeoutMs: 25,
       });
 
       const outcome = lifecycle.shutdown().catch((error: unknown) => error);
       expect(vi.getTimerCount()).toBe(1);
+      if (owner === 'cleaner' || owner === 'activity') {
+        expect(websocket.closeClients).not.toHaveBeenCalled();
+        expect(registry.closeAll).not.toHaveBeenCalled();
+        expect(websocket.close).not.toHaveBeenCalled();
+        expect(disposeServices).not.toHaveBeenCalled();
+      }
+      if (owner === 'registry') {
+        expect(websocket.close).not.toHaveBeenCalled();
+        expect(disposeServices).not.toHaveBeenCalled();
+      }
+      if (owner === 'websocket') {
+        expect(disposeServices).not.toHaveBeenCalled();
+      }
       await vi.advanceTimersByTimeAsync(25);
 
       await expect(outcome).resolves.toMatchObject({
@@ -374,10 +477,54 @@ describe('server lifecycle', () => {
       expect(activity.shutdown).toHaveBeenCalledOnce();
       expect(registry.closeAll).toHaveBeenCalledOnce();
       expect(websocket.close).toHaveBeenCalledOnce();
+      expect(disposeServices).toHaveBeenCalledOnce();
       expect(vi.getTimerCount()).toBe(0);
       vi.useRealTimers();
     },
   );
+
+  it('settles after the deadline without awaiting downstream best-effort work', async () => {
+    vi.useFakeTimers();
+    const cleanerClose = deferred<void>();
+    const registryClose = deferred<void>();
+    const websocketClose = deferred<void>();
+    const httpServer = fakeHttpServer();
+    httpServer.close.mockImplementation(() => httpServer);
+    const cleaner = fakeCleaner();
+    cleaner.shutdown.mockImplementation(() => cleanerClose.promise);
+    const registry = { closeAll: vi.fn(() => registryClose.promise) };
+    const websocket = fakeWebsocket();
+    websocket.close.mockImplementation(() => websocketClose.promise);
+    const disposeServices = vi.fn();
+    const lifecycle = createServerLifecycle({
+      httpServer,
+      websocket,
+      activity: fakeActivity(),
+      cleaner,
+      registry,
+      disposeServices,
+      durabilityReady: () => true,
+      closeTimeoutMs: 25,
+    });
+
+    const outcome = lifecycle.shutdown().catch((error: unknown) => error);
+    expect(registry.closeAll).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(25);
+
+    await expect(outcome).resolves.toMatchObject({
+      message: 'Server shutdown failed',
+    });
+    expect(cleaner.shutdown).toHaveBeenCalledOnce();
+    expect(registry.closeAll).toHaveBeenCalledOnce();
+    expect(websocket.close).toHaveBeenCalledOnce();
+    expect(disposeServices).toHaveBeenCalledOnce();
+
+    cleanerClose.reject(new Error('late cleaner failure'));
+    registryClose.reject(new Error('late registry failure'));
+    websocketClose.reject(new Error('late websocket failure'));
+    await Promise.resolve();
+    vi.useRealTimers();
+  });
 
   it('routes repeated termination signals through one shutdown', async () => {
     const signals = new EventEmitter();
@@ -679,6 +826,50 @@ describe('production composition', () => {
       vi.useRealTimers();
     },
   );
+
+  it('uses ordered teardown phases during startup rollback and preserves the primary error', async () => {
+    const calls: string[] = [];
+    const primary = new Error('primary cleaner');
+    const activityClose = deferred<void>();
+    const registryClose = deferred<void>();
+    const websocketClose = deferred<void>();
+    const httpClose = deferred<void>();
+    const factory = fakeProductionFactory(calls, {
+      failAt: 'cleaner',
+      failure: primary,
+      cleanupGates: {
+        activity: activityClose.promise,
+        registry: registryClose.promise,
+        websocket: websocketClose.promise,
+        http: httpClose.promise,
+      },
+    });
+
+    let settled = false;
+    const outcome = createProductionRuntime({ AUTH_MODE: 'none' }, factory)
+      .catch((error: unknown) => error)
+      .finally(() => {
+        settled = true;
+      });
+    await vi.waitFor(() => expect(calls).toContain('activity.shutdown'));
+    expect(calls).not.toContain('ws.closeClients');
+
+    activityClose.resolve();
+    await vi.waitFor(() => expect(calls).toContain('registry.closeAll'));
+    expect(calls).toContain('ws.closeClients');
+    expect(calls).not.toContain('ws.close');
+
+    registryClose.resolve();
+    await vi.waitFor(() => expect(calls).toContain('ws.close'));
+    expect(calls).not.toContain('services.dispose');
+
+    websocketClose.resolve();
+    await vi.waitFor(() => expect(calls).toContain('services.dispose'));
+    expect(settled).toBe(false);
+
+    httpClose.resolve();
+    await expect(outcome).resolves.toBe(primary);
+  });
 });
 
 function fakeHttpServer(calls: string[] = []) {
@@ -733,6 +924,16 @@ function neverSettles(): Promise<never> {
   return new Promise(() => undefined);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 type ProductionStage =
   | 'settings'
   | 'authentication'
@@ -765,12 +966,24 @@ function fakeProductionFactory(
     failure?: Error;
     durabilityReady?: () => boolean;
     hangCleanup?: 'cleaner' | 'activity' | 'registry' | 'websocket';
+    cleanupGates?: Partial<
+      Record<'activity' | 'registry' | 'websocket' | 'http', Promise<void>>
+    >;
   } = {},
 ): ProductionRuntimeFactory {
   const fail = (stage: ProductionStage): void => {
     if (options.failAt === stage) throw options.failure;
   };
   const httpServer = fakeHttpServer(calls);
+  if (options.cleanupGates?.http !== undefined) {
+    httpServer.close.mockImplementation(
+      (callback?: (error?: Error) => void) => {
+        calls.push('http.close');
+        void options.cleanupGates!.http!.then(() => callback?.());
+        return httpServer;
+      },
+    );
+  }
   httpServer.listen.mockImplementation(() => {
     calls.push('listen');
     fail('listen');
@@ -785,6 +998,24 @@ function fakeProductionFactory(
       calls.push('registry.closeAll');
     }),
   };
+  if (options.cleanupGates?.activity !== undefined) {
+    activity.shutdown.mockImplementation(() => {
+      calls.push('activity.shutdown');
+      return options.cleanupGates!.activity!;
+    });
+  }
+  if (options.cleanupGates?.registry !== undefined) {
+    registry.closeAll.mockImplementation(() => {
+      calls.push('registry.closeAll');
+      return options.cleanupGates!.registry!;
+    });
+  }
+  if (options.cleanupGates?.websocket !== undefined) {
+    websocket.close.mockImplementation(() => {
+      calls.push('ws.close');
+      return options.cleanupGates!.websocket!;
+    });
+  }
   if (options.hangCleanup === 'cleaner') {
     cleaner.shutdown.mockImplementation(neverSettles);
   }

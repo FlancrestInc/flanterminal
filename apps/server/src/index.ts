@@ -268,59 +268,86 @@ async function performBoundedTeardown(
   scheduler: TeardownScheduler,
 ): Promise<void> {
   const errors: unknown[] = [];
-  const operations: Promise<void>[] = [];
   runCleanup(() => resources.websocket?.stopAccepting(), errors);
-  if (resources.httpServer !== undefined) {
-    operations.push(
-      startAsyncCleanup(() => beginHttpClose(resources.httpServer!), errors),
-    );
-  }
-  if (resources.cleaner !== undefined) {
-    operations.push(
-      startAsyncCleanup(() => resources.cleaner!.shutdown(), errors),
-    );
-  }
-  runCleanup(() => resources.websocket?.stopHeartbeat(), errors);
-  if (resources.activity !== undefined) {
-    operations.push(
-      startAsyncCleanup(() => resources.activity!.shutdown(), errors),
-    );
-  }
-  runCleanup(() => resources.websocket?.closeClients(), errors);
-  if (resources.registry !== undefined) {
-    operations.push(
-      startAsyncCleanup(() => resources.registry!.closeAll(), errors),
-    );
-  }
-  if (resources.websocket !== undefined) {
-    operations.push(
-      startAsyncCleanup(() => resources.websocket!.close(), errors),
-    );
-  }
-  runCleanup(() => resources.disposeServices?.(), errors);
+  const httpClose =
+    resources.httpServer === undefined
+      ? Promise.resolve()
+      : startAsyncCleanup(() => beginHttpClose(resources.httpServer!), errors);
 
-  const completed = Promise.all(operations).then(() => 'completed' as const);
+  let deadlineReached = false;
   let timer: unknown;
   let resolveDeadline = (): void => undefined;
   const deadline = new Promise<'deadline'>((resolve) => {
     resolveDeadline = () => resolve('deadline');
   });
-  try {
-    timer = scheduler.setTimeout(() => {
-      runCleanup(() => resources.httpServer?.closeAllConnections(), errors);
-      resolveDeadline();
-    }, timeoutMs);
-  } catch (error) {
-    errors.push(error);
+  const reachDeadline = (): void => {
+    if (deadlineReached) return;
+    deadlineReached = true;
     runCleanup(() => resources.httpServer?.closeAllConnections(), errors);
     resolveDeadline();
+  };
+  try {
+    timer = scheduler.setTimeout(reachDeadline, timeoutMs);
+  } catch (error) {
+    errors.push(error);
+    reachDeadline();
   }
 
-  const outcome = await Promise.race([completed, deadline]);
-  if (outcome === 'completed' && timer !== undefined) {
-    runCleanup(() => scheduler.clearTimeout(timer), errors);
-  } else {
+  const phases: readonly (() => Promise<void>)[] = [
+    () => {
+      const durability: Promise<void>[] = [];
+      if (resources.cleaner !== undefined) {
+        durability.push(
+          startAsyncCleanup(() => resources.cleaner!.shutdown(), errors),
+        );
+      }
+      runCleanup(() => resources.websocket?.stopHeartbeat(), errors);
+      if (resources.activity !== undefined) {
+        durability.push(
+          startAsyncCleanup(() => resources.activity!.shutdown(), errors),
+        );
+      }
+      return Promise.all(durability).then(() => undefined);
+    },
+    () => {
+      runCleanup(() => resources.websocket?.closeClients(), errors);
+      return resources.registry === undefined
+        ? Promise.resolve()
+        : startAsyncCleanup(() => resources.registry!.closeAll(), errors);
+    },
+    () =>
+      resources.websocket === undefined
+        ? Promise.resolve()
+        : startAsyncCleanup(() => resources.websocket!.close(), errors),
+    () => {
+      runCleanup(() => resources.disposeServices?.(), errors);
+      return Promise.resolve();
+    },
+  ];
+
+  let nextPhase = 0;
+  for (; nextPhase < phases.length && !deadlineReached; nextPhase += 1) {
+    const outcome = await Promise.race([
+      phases[nextPhase]!().then(() => 'completed' as const),
+      deadline,
+    ]);
+    if (outcome === 'deadline') {
+      nextPhase += 1;
+      break;
+    }
+  }
+
+  if (!deadlineReached) {
+    await Promise.race([httpClose.then(() => 'completed' as const), deadline]);
+  }
+
+  if (deadlineReached) {
+    for (; nextPhase < phases.length; nextPhase += 1) {
+      void phases[nextPhase]!();
+    }
     errors.push(new Error('Teardown deadline exceeded'));
+  } else if (timer !== undefined) {
+    runCleanup(() => scheduler.clearTimeout(timer), errors);
   }
   if (errors.length > 0) throw new Error('Server shutdown failed');
 }
