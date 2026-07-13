@@ -59,6 +59,16 @@ export interface LifecycleHttpServer {
   off(event: 'listening', listener: () => void): unknown;
 }
 
+export interface TeardownScheduler {
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+const nativeTeardownScheduler: TeardownScheduler = {
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
+};
+
 export type ServerLifecycleOptions = Readonly<{
   httpServer: LifecycleHttpServer;
   websocket: Pick<
@@ -71,6 +81,7 @@ export type ServerLifecycleOptions = Readonly<{
   disposeServices?: () => void;
   durabilityReady: () => boolean;
   closeTimeoutMs: number;
+  teardownScheduler?: TeardownScheduler;
 }>;
 
 export interface ServerLifecycle {
@@ -82,85 +93,120 @@ export interface ServerLifecycle {
 export function createServerLifecycle(
   options: ServerLifecycleOptions,
 ): ServerLifecycle {
-  let ready = false;
+  let state: 'new' | 'starting' | 'running' | 'stopping' | 'stopped' = 'new';
+  let listenAttempt: ListenAttempt | undefined;
   let shutdownPromise: Promise<void> | undefined;
 
   const shutdown = (): Promise<void> => {
     if (shutdownPromise !== undefined) return shutdownPromise;
-    ready = false;
-    shutdownPromise = performShutdown(options);
+    state = 'stopping';
+    listenAttempt?.cancel();
+    const operation = performShutdown(options);
+    shutdownPromise = operation.then(
+      () => {
+        state = 'stopped';
+      },
+      () => {
+        state = 'stopped';
+        throw new Error('Server shutdown failed');
+      },
+    );
     return shutdownPromise;
   };
 
   return {
     isReady: () => {
-      if (!ready) return false;
+      if (state !== 'running') return false;
       try {
         return options.durabilityReady() === true;
       } catch {
         return false;
       }
     },
-    async start(host, port) {
-      try {
-        await listenHttpServer(options.httpServer, host, port);
-        ready = true;
-      } catch {
-        await shutdown().catch(() => undefined);
-        throw new Error('Server startup failed');
+    start(host, port) {
+      if (state !== 'new') {
+        return Promise.reject(new Error('Server lifecycle unavailable'));
       }
+      state = 'starting';
+      const attempt = createListenAttempt(options.httpServer, host, port);
+      listenAttempt = attempt;
+      return (async () => {
+        try {
+          await attempt.promise;
+          if (state !== 'starting') throw new Error('Server startup failed');
+          state = 'running';
+        } catch {
+          await shutdown().catch(() => undefined);
+          throw new Error('Server startup failed');
+        } finally {
+          if (listenAttempt === attempt) listenAttempt = undefined;
+        }
+      })();
     },
     shutdown,
   };
 }
 
-function listenHttpServer(
+type ListenAttempt = Readonly<{
+  promise: Promise<void>;
+  cancel(): void;
+}>;
+
+function createListenAttempt(
   server: LifecycleHttpServer,
   host: string,
   port: number,
-): Promise<void> {
-  return new Promise((resolveListen, rejectListen) => {
+): ListenAttempt {
+  let cancel = (): void => undefined;
+  const promise = new Promise<void>((resolveListen, rejectListen) => {
+    let settled = false;
     const cleanup = (): void => {
-      server.off('error', onError);
-      server.off('listening', onListening);
+      try {
+        server.off('error', onError);
+      } catch {
+        // Listener disposal is best effort after authority is settled.
+      }
+      try {
+        server.off('listening', onListening);
+      } catch {
+        // Listener disposal is best effort after authority is settled.
+      }
     };
     const onError = (): void => {
+      if (settled) return;
+      settled = true;
       cleanup();
       rejectListen(new Error('Server startup failed'));
     };
     const onListening = (): void => {
+      if (settled) return;
+      settled = true;
       cleanup();
       resolveListen();
     };
-    server.once('error', onError);
-    server.once('listening', onListening);
-    try {
-      server.listen(port, host);
-    } catch {
+    cancel = (): void => {
+      if (settled) return;
+      settled = true;
       cleanup();
       rejectListen(new Error('Server startup failed'));
+    };
+    try {
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(port, host);
+    } catch {
+      cancel();
     }
   });
+  return Object.freeze({ promise, cancel: () => cancel() });
 }
 
 async function performShutdown(options: ServerLifecycleOptions): Promise<void> {
-  const errors: unknown[] = [];
-  runCleanup(() => options.websocket.stopAccepting(), errors);
-  const httpClosed = beginHttpClose(
-    options.httpServer,
+  await performBoundedTeardown(
+    options,
     options.closeTimeoutMs,
-    errors,
+    options.teardownScheduler ?? nativeTeardownScheduler,
   );
-  void httpClosed.catch(() => undefined);
-  await runAsyncCleanup(() => options.cleaner.shutdown(), errors);
-  runCleanup(() => options.websocket.stopHeartbeat(), errors);
-  await runAsyncCleanup(() => options.activity.shutdown(), errors);
-  runCleanup(() => options.websocket.closeClients(), errors);
-  await runAsyncCleanup(() => options.registry.closeAll(), errors);
-  await runAsyncCleanup(() => options.websocket.close(), errors);
-  runCleanup(() => options.disposeServices?.(), errors);
-  await runAsyncCleanup(() => httpClosed, errors);
-  if (errors.length > 0) throw new Error('Server shutdown failed');
 }
 
 function runCleanup(operation: () => void, errors: unknown[]): void {
@@ -171,51 +217,112 @@ function runCleanup(operation: () => void, errors: unknown[]): void {
   }
 }
 
-async function runAsyncCleanup(
-  operation: () => Promise<void>,
+function startAsyncCleanup(
+  operation: () => Promise<void> | undefined,
   errors: unknown[],
 ): Promise<void> {
   try {
-    await operation();
+    return Promise.resolve(operation()).catch((error: unknown) => {
+      errors.push(error);
+    });
   } catch (error) {
     errors.push(error);
+    return Promise.resolve();
   }
 }
 
-function beginHttpClose(
-  server: LifecycleHttpServer,
-  timeoutMs: number,
-  errors: unknown[],
-): Promise<void> {
+function beginHttpClose(server: LifecycleHttpServer): Promise<void> {
   return new Promise((resolveClose, rejectClose) => {
     let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try {
-        server.closeAllConnections();
-      } catch (error) {
-        errors.push(error);
-      }
-      rejectClose(new Error('HTTP server close timed out'));
-    }, timeoutMs);
     try {
       server.close((error) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
         if (error === undefined) resolveClose();
         else rejectClose(new Error('HTTP server close failed'));
       });
-    } catch (error) {
+    } catch {
       if (!settled) {
         settled = true;
-        clearTimeout(timeout);
-        errors.push(error);
         rejectClose(new Error('HTTP server close failed'));
       }
     }
   });
+}
+
+type TeardownResources = Readonly<{
+  httpServer?: LifecycleHttpServer;
+  websocket?: Pick<
+    TerminalWebSocketServer,
+    'stopAccepting' | 'stopHeartbeat' | 'closeClients' | 'close'
+  >;
+  cleaner?: Readonly<{ shutdown(): Promise<void> }>;
+  activity?: Readonly<{ shutdown(): Promise<void> }>;
+  registry?: Readonly<{ closeAll(): Promise<void> }>;
+  disposeServices?: () => void;
+}>;
+
+async function performBoundedTeardown(
+  resources: TeardownResources,
+  timeoutMs: number,
+  scheduler: TeardownScheduler,
+): Promise<void> {
+  const errors: unknown[] = [];
+  const operations: Promise<void>[] = [];
+  runCleanup(() => resources.websocket?.stopAccepting(), errors);
+  if (resources.httpServer !== undefined) {
+    operations.push(
+      startAsyncCleanup(() => beginHttpClose(resources.httpServer!), errors),
+    );
+  }
+  if (resources.cleaner !== undefined) {
+    operations.push(
+      startAsyncCleanup(() => resources.cleaner!.shutdown(), errors),
+    );
+  }
+  runCleanup(() => resources.websocket?.stopHeartbeat(), errors);
+  if (resources.activity !== undefined) {
+    operations.push(
+      startAsyncCleanup(() => resources.activity!.shutdown(), errors),
+    );
+  }
+  runCleanup(() => resources.websocket?.closeClients(), errors);
+  if (resources.registry !== undefined) {
+    operations.push(
+      startAsyncCleanup(() => resources.registry!.closeAll(), errors),
+    );
+  }
+  if (resources.websocket !== undefined) {
+    operations.push(
+      startAsyncCleanup(() => resources.websocket!.close(), errors),
+    );
+  }
+  runCleanup(() => resources.disposeServices?.(), errors);
+
+  const completed = Promise.all(operations).then(() => 'completed' as const);
+  let timer: unknown;
+  let resolveDeadline = (): void => undefined;
+  const deadline = new Promise<'deadline'>((resolve) => {
+    resolveDeadline = () => resolve('deadline');
+  });
+  try {
+    timer = scheduler.setTimeout(() => {
+      runCleanup(() => resources.httpServer?.closeAllConnections(), errors);
+      resolveDeadline();
+    }, timeoutMs);
+  } catch (error) {
+    errors.push(error);
+    runCleanup(() => resources.httpServer?.closeAllConnections(), errors);
+    resolveDeadline();
+  }
+
+  const outcome = await Promise.race([completed, deadline]);
+  if (outcome === 'completed' && timer !== undefined) {
+    runCleanup(() => scheduler.clearTimeout(timer), errors);
+  } else {
+    errors.push(new Error('Teardown deadline exceeded'));
+  }
+  if (errors.length > 0) throw new Error('Server shutdown failed');
 }
 
 export type SignalSource = Readonly<{
@@ -443,7 +550,7 @@ export async function createProductionRuntime(
         ...(websocket === undefined ? {} : { websocket }),
         ...(cleaner === undefined ? {} : { cleaner }),
         ...(services === undefined ? {} : { services }),
-      });
+      }).catch(() => undefined);
     }
     throw error;
   }
@@ -455,31 +562,28 @@ async function rollbackProductionResources(resources: {
   cleaner?: Readonly<{ shutdown(): Promise<void> }>;
   services?: ProductionServices;
 }): Promise<void> {
-  const errors: unknown[] = [];
-  runCleanup(() => resources.websocket?.stopAccepting(), errors);
-  const httpClosed =
-    resources.httpServer === undefined
-      ? Promise.resolve()
-      : beginHttpClose(resources.httpServer, 5_000, errors);
-  void httpClosed.catch(() => undefined);
-  if (resources.cleaner !== undefined)
-    await runAsyncCleanup(() => resources.cleaner!.shutdown(), errors);
-  runCleanup(() => resources.websocket?.stopHeartbeat(), errors);
-  if (resources.services !== undefined)
-    await runAsyncCleanup(
-      () => resources.services!.activity.shutdown(),
-      errors,
-    );
-  runCleanup(() => resources.websocket?.closeClients(), errors);
-  if (resources.services !== undefined)
-    await runAsyncCleanup(
-      () => resources.services!.registry.closeAll(),
-      errors,
-    );
-  if (resources.websocket !== undefined)
-    await runAsyncCleanup(() => resources.websocket!.close(), errors);
-  runCleanup(() => resources.services?.dispose(), errors);
-  await runAsyncCleanup(() => httpClosed, errors);
+  await performBoundedTeardown(
+    {
+      ...(resources.httpServer === undefined
+        ? {}
+        : { httpServer: resources.httpServer }),
+      ...(resources.websocket === undefined
+        ? {}
+        : { websocket: resources.websocket }),
+      ...(resources.cleaner === undefined
+        ? {}
+        : { cleaner: resources.cleaner }),
+      ...(resources.services === undefined
+        ? {}
+        : {
+            activity: resources.services.activity,
+            registry: resources.services.registry,
+            disposeServices: resources.services.dispose,
+          }),
+    },
+    5_000,
+    nativeTeardownScheduler,
+  );
 }
 
 type SettingsStage = Readonly<{

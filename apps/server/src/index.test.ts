@@ -15,6 +15,123 @@ import {
 import { loadConfig } from './config.js';
 
 describe('server lifecycle', () => {
+  it('allows one pending start attempt and rejects a concurrent start stably', async () => {
+    const httpServer = fakeHttpServer();
+    httpServer.listen.mockImplementation(() => httpServer);
+    const lifecycle = createServerLifecycle({
+      httpServer,
+      websocket: fakeWebsocket(),
+      activity: fakeActivity(),
+      cleaner: fakeCleaner(),
+      registry: { closeAll: vi.fn(async () => undefined) },
+      durabilityReady: () => true,
+      closeTimeoutMs: 100,
+    });
+
+    const first = lifecycle.start('127.0.0.1', 4321);
+    await expect(lifecycle.start('127.0.0.1', 4321)).rejects.toThrow(
+      'Server lifecycle unavailable',
+    );
+    const shutdown = lifecycle.shutdown();
+
+    await expect(first).rejects.toThrow('Server startup failed');
+    await shutdown;
+    expect(lifecycle.isReady()).toBe(false);
+  });
+
+  it('cancels a pending listen when shutdown starts and ignores late listening', async () => {
+    const httpServer = fakeHttpServer();
+    httpServer.listen.mockImplementation(() => httpServer);
+    const lifecycle = createServerLifecycle({
+      httpServer,
+      websocket: fakeWebsocket(),
+      activity: fakeActivity(),
+      cleaner: fakeCleaner(),
+      registry: { closeAll: vi.fn(async () => undefined) },
+      durabilityReady: () => true,
+      closeTimeoutMs: 100,
+    });
+
+    const start = lifecycle.start('127.0.0.1', 4321);
+    const shutdown = lifecycle.shutdown();
+    httpServer.events.emit('listening');
+
+    await expect(start).rejects.toThrow('Server startup failed');
+    await shutdown;
+    expect(lifecycle.isReady()).toBe(false);
+    expect(httpServer.events.listenerCount('error')).toBe(0);
+    expect(httpServer.events.listenerCount('listening')).toBe(0);
+  });
+
+  it('keeps a failed start stopped when a late listening event races the error', async () => {
+    const httpServer = fakeHttpServer();
+    httpServer.listen.mockImplementation(() => {
+      queueMicrotask(() => {
+        httpServer.events.emit('error', new Error('private listen failure'));
+        httpServer.events.emit('listening');
+      });
+      return httpServer;
+    });
+    const lifecycle = createServerLifecycle({
+      httpServer,
+      websocket: fakeWebsocket(),
+      activity: fakeActivity(),
+      cleaner: fakeCleaner(),
+      registry: { closeAll: vi.fn(async () => undefined) },
+      durabilityReady: () => true,
+      closeTimeoutMs: 100,
+    });
+
+    await expect(lifecycle.start('127.0.0.1', 4321)).rejects.toThrow(
+      'Server startup failed',
+    );
+
+    expect(lifecycle.isReady()).toBe(false);
+    expect(httpServer.events.listenerCount('error')).toBe(0);
+    expect(httpServer.events.listenerCount('listening')).toBe(0);
+  });
+
+  it('rejects a start attempt after shutdown without reopening the listener', async () => {
+    const httpServer = fakeHttpServer();
+    const lifecycle = createServerLifecycle({
+      httpServer,
+      websocket: fakeWebsocket(),
+      activity: fakeActivity(),
+      cleaner: fakeCleaner(),
+      registry: { closeAll: vi.fn(async () => undefined) },
+      durabilityReady: () => true,
+      closeTimeoutMs: 100,
+    });
+
+    await lifecycle.shutdown();
+
+    await expect(lifecycle.start('127.0.0.1', 4321)).rejects.toThrow(
+      'Server lifecycle unavailable',
+    );
+    expect(httpServer.listen).not.toHaveBeenCalled();
+  });
+
+  it('rejects a second start after reaching running state', async () => {
+    const httpServer = fakeHttpServer();
+    const lifecycle = createServerLifecycle({
+      httpServer,
+      websocket: fakeWebsocket(),
+      activity: fakeActivity(),
+      cleaner: fakeCleaner(),
+      registry: { closeAll: vi.fn(async () => undefined) },
+      durabilityReady: () => true,
+      closeTimeoutMs: 100,
+    });
+
+    await lifecycle.start('127.0.0.1', 4321);
+
+    await expect(lifecycle.start('127.0.0.1', 4321)).rejects.toThrow(
+      'Server lifecycle unavailable',
+    );
+    expect(httpServer.listen).toHaveBeenCalledOnce();
+    await lifecycle.shutdown();
+  });
+
   it('listens on the configured host and port and exposes readiness', async () => {
     const httpServer = fakeHttpServer();
     const lifecycle = createServerLifecycle({
@@ -201,6 +318,66 @@ describe('server lifecycle', () => {
     });
     vi.useRealTimers();
   });
+
+  it.each(['cleaner', 'activity', 'registry', 'websocket'] as const)(
+    'uses one total teardown deadline when %s cleanup never settles',
+    async (owner) => {
+      vi.useFakeTimers();
+      const calls: string[] = [];
+      const httpServer = fakeHttpServer(calls);
+      httpServer.close.mockImplementation(() => httpServer);
+      const websocket = fakeWebsocket(calls);
+      const activity = fakeActivity(calls);
+      const cleaner = fakeCleaner(calls);
+      const registry = {
+        closeAll: vi.fn(async () => {
+          calls.push('registry.closeAll');
+        }),
+      };
+      if (owner === 'cleaner')
+        cleaner.shutdown.mockImplementation(neverSettles);
+      if (owner === 'activity')
+        activity.shutdown.mockImplementation(neverSettles);
+      if (owner === 'registry')
+        registry.closeAll.mockImplementation(neverSettles);
+      if (owner === 'websocket')
+        websocket.close.mockImplementation(neverSettles);
+      const lifecycle = createServerLifecycle({
+        httpServer,
+        websocket,
+        activity,
+        cleaner,
+        registry,
+        disposeServices: vi.fn(() => calls.push('services.dispose')),
+        durabilityReady: () => true,
+        closeTimeoutMs: 25,
+      });
+
+      const outcome = lifecycle.shutdown().catch((error: unknown) => error);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(outcome).resolves.toMatchObject({
+        message: 'Server shutdown failed',
+      });
+      expect(httpServer.closeAllConnections).toHaveBeenCalledOnce();
+      expect(httpServer.close).toHaveBeenCalledOnce();
+      expect(calls).toEqual(
+        expect.arrayContaining([
+          'ws.stopAccepting',
+          'ws.stopHeartbeat',
+          'ws.closeClients',
+          'services.dispose',
+        ]),
+      );
+      expect(cleaner.shutdown).toHaveBeenCalledOnce();
+      expect(activity.shutdown).toHaveBeenCalledOnce();
+      expect(registry.closeAll).toHaveBeenCalledOnce();
+      expect(websocket.close).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+    },
+  );
 
   it('routes repeated termination signals through one shutdown', async () => {
     const signals = new EventEmitter();
@@ -474,6 +651,34 @@ describe('production composition', () => {
     expect(runtime.lifecycle.isReady()).toBe(false);
     await runtime.lifecycle.shutdown();
   });
+
+  it.each([
+    ['cleaner', 'registry'],
+    ['signals', 'cleaner'],
+  ] as const)(
+    'bounds %s startup rollback when %s cleanup never settles and preserves the primary error',
+    async (failAt, hangCleanup) => {
+      vi.useFakeTimers();
+      const calls: string[] = [];
+      const primary = new Error(`primary ${failAt}`);
+      const factory = fakeProductionFactory(calls, {
+        failAt,
+        failure: primary,
+        hangCleanup,
+      });
+
+      const outcome = createProductionRuntime(
+        { AUTH_MODE: 'none' },
+        factory,
+      ).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(outcome).resolves.toBe(primary);
+      expect(calls).toContain('http.close');
+      expect(calls).toContain('services.dispose');
+      vi.useRealTimers();
+    },
+  );
 });
 
 function fakeHttpServer(calls: string[] = []) {
@@ -524,6 +729,10 @@ function fakeCleaner(calls: string[] = []) {
   };
 }
 
+function neverSettles(): Promise<never> {
+  return new Promise(() => undefined);
+}
+
 type ProductionStage =
   | 'settings'
   | 'authentication'
@@ -555,6 +764,7 @@ function fakeProductionFactory(
     failAt?: ProductionStage;
     failure?: Error;
     durabilityReady?: () => boolean;
+    hangCleanup?: 'cleaner' | 'activity' | 'registry' | 'websocket';
   } = {},
 ): ProductionRuntimeFactory {
   const fail = (stage: ProductionStage): void => {
@@ -575,6 +785,18 @@ function fakeProductionFactory(
       calls.push('registry.closeAll');
     }),
   };
+  if (options.hangCleanup === 'cleaner') {
+    cleaner.shutdown.mockImplementation(neverSettles);
+  }
+  if (options.hangCleanup === 'activity') {
+    activity.shutdown.mockImplementation(neverSettles);
+  }
+  if (options.hangCleanup === 'registry') {
+    registry.closeAll.mockImplementation(neverSettles);
+  }
+  if (options.hangCleanup === 'websocket') {
+    websocket.close.mockImplementation(neverSettles);
+  }
   return {
     async loadOptionalConfigFile() {
       calls.push('config-file');
