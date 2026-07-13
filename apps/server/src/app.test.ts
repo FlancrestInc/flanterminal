@@ -15,6 +15,8 @@ import type { TabRouterOptions } from './tab-routes.js';
 import { SessionLimitError } from './tab-store.js';
 
 const PUBLIC_ORIGIN = 'http://localhost:3000';
+const COOKIE = 'a'.repeat(43);
+const CSRF = 'b'.repeat(43);
 const FIXED_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const NOW = '2026-07-12T00:00:00.000Z';
 
@@ -122,7 +124,10 @@ describe('createApp', () => {
               : {
                   headers:
                     method === 'DELETE'
-                      ? { Origin: PUBLIC_ORIGIN }
+                      ? {
+                          Origin: PUBLIC_ORIGIN,
+                          'X-CSRF-Token': CSRF,
+                        }
                       : jsonHeaders(),
                 }),
             ...(body === undefined ? {} : { body }),
@@ -394,6 +399,12 @@ async function request(
     throw new Error('listen failed');
   return fetch(`http://127.0.0.1:${address.port}${path}`, {
     ...options.init,
+    headers: {
+      ...(options.tabs === true
+        ? { Cookie: `flanterminal_session=${COOKIE}` }
+        : {}),
+      ...options.init?.headers,
+    },
     ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
   });
 }
@@ -404,6 +415,20 @@ function tabDependencies(
   failure?: AppTabFailure,
 ): Omit<TabRouterOptions, 'publicOrigin'> {
   return {
+    mode: 'local',
+    authService: {
+      authenticateCookie: vi.fn(() => ({
+        id: 'session-id',
+        mode: 'local' as const,
+        identityLabel: 'admin',
+        createdAt: 0,
+        lastSeen: 0,
+        idleExpiresAt: 1_000,
+        absoluteExpiresAt: 2_000,
+      })),
+      verifyCsrf: vi.fn((_id, supplied) => supplied === CSRF),
+      touch: vi.fn(),
+    },
     store: {
       create: vi.fn(async (displayName) => {
         if (failure === 'create_conflict') throw new SessionLimitError();
@@ -459,7 +484,11 @@ function apiPath(basePath: string): string {
 }
 
 function jsonHeaders(): Record<string, string> {
-  return { Origin: PUBLIC_ORIGIN, 'Content-Type': 'application/json' };
+  return {
+    Origin: PUBLIC_ORIGIN,
+    'X-CSRF-Token': CSRF,
+    'Content-Type': 'application/json',
+  };
 }
 
 function config(basePath: string) {

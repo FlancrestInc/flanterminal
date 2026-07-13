@@ -27,6 +27,7 @@ const MAX_CSRF_BYTES = 512;
 const sessionTokenPattern = /^[A-Za-z0-9_-]+$/;
 const visibleAsciiPattern = /^[\x21-\x7e]+$/;
 const headerAsciiPattern = /^[\x20-\x7e]+$/;
+const charsetParameterPattern = /^charset=[A-Za-z0-9._-]+$/i;
 const utf8 = new TextEncoder();
 
 export interface AuthMiddlewareService {
@@ -74,7 +75,7 @@ export function requireMutationSecurity(
       reject(options, response, 403, 'origin_forbidden');
       return;
     }
-    if (!hasJsonContentType(request)) {
+    if (request.method !== 'DELETE' && !hasJsonContentType(request)) {
       reject(options, response, 415, 'json_required');
       return;
     }
@@ -362,7 +363,7 @@ function hasJsonContentType(request: Request): boolean {
   if (parameters.length === 0) return true;
   return (
     parameters.length === 1 &&
-    parameters[0]?.trim().toLowerCase() === 'charset=utf-8'
+    charsetParameterPattern.test(parameters[0]?.trim() ?? '')
   );
 }
 

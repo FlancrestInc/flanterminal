@@ -268,7 +268,6 @@ export async function startProductionServer(
       connectedWebSocketCount: () => runtime.websocket?.connectedCount() ?? 0,
     },
     clientDist,
-    tabs: { store: tabStore, sessions: sessionManager },
   });
   const httpServer = createServer(app);
   const websocket = createTerminalWebSocketServer({

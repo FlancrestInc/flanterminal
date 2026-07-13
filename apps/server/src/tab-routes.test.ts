@@ -1,10 +1,12 @@
 import { once } from 'node:events';
-import { createServer, type Server } from 'node:http';
+import { createServer, request as httpRequest, type Server } from 'node:http';
 
 import type { TabView } from '@flanterminal/shared';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { AuthMiddlewareService } from './auth-middleware.js';
+import type { AuthenticatedSession } from './auth-types.js';
 import {
   InvalidSessionStateError,
   OperationFailedError,
@@ -24,10 +26,20 @@ import {
 } from './tab-routes.js';
 
 const PUBLIC_ORIGIN = 'https://terminal.example';
+const COOKIE = 'a'.repeat(43);
+const CSRF = 'b'.repeat(43);
 const SECOND_ID = '123e4567-e89b-42d3-a456-426614174000';
 const NOW = '2026-07-11T12:00:00.000Z';
 
 let server: Server | undefined;
+let authority: AuthenticatedSession | undefined;
+let authService: {
+  authenticateCookie: ReturnType<
+    typeof vi.fn<AuthMiddlewareService['authenticateCookie']>
+  >;
+  verifyCsrf: ReturnType<typeof vi.fn<AuthMiddlewareService['verifyCsrf']>>;
+  touch: ReturnType<typeof vi.fn<AuthMiddlewareService['touch']>>;
+};
 let store: {
   create: ReturnType<typeof vi.fn<TabRouteStore['create']>>;
   rename: ReturnType<typeof vi.fn<TabRouteStore['rename']>>;
@@ -44,6 +56,12 @@ let sessions: {
 };
 
 beforeEach(() => {
+  authority = authSession();
+  authService = {
+    authenticateCookie: vi.fn(() => authority),
+    verifyCsrf: vi.fn((_id, token) => token === CSRF),
+    touch: vi.fn(),
+  };
   store = {
     create: vi.fn(async () => record(FIXED_SESSION_ID, 'Terminal 1', 0)),
     rename: vi.fn(async (_id, name) => record(FIXED_SESSION_ID, name, 0)),
@@ -68,6 +86,86 @@ afterEach(async () => {
 });
 
 describe('createTabRouter', () => {
+  it('rejects an unauthenticated collection read before services or activity', async () => {
+    authority = undefined;
+
+    const response = await request('/api/tabs', {}, false);
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: 'authentication_required' });
+    expect(sessions.collectionView).not.toHaveBeenCalled();
+    expect(authService.touch).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid CSRF mutation before services or activity', async () => {
+    const response = await request('/api/tabs', {
+      method: 'POST',
+      headers: { ...jsonHeaders(), 'X-CSRF-Token': 'wrong' },
+      body: '{}',
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'csrf_invalid' });
+    expect(totalMutationCalls()).toBe(0);
+    expect(authService.touch).not.toHaveBeenCalled();
+  });
+
+  it('touches authenticated activity for every accepted read and mutation', async () => {
+    const operations: ReadonlyArray<
+      readonly [string, RequestInit | undefined, number]
+    > = [
+      ['/api/tabs', undefined, 200],
+      [`/api/tabs/${FIXED_SESSION_ID}/session`, undefined, 200],
+      ['/api/tabs', mutationInit('POST', {}), 201],
+      [
+        '/api/tabs/order',
+        mutationInit('PUT', {
+          structureRevision: 1,
+          ids: [SECOND_ID, FIXED_SESSION_ID],
+        }),
+        200,
+      ],
+      [
+        `/api/tabs/${FIXED_SESSION_ID}`,
+        mutationInit('PATCH', { displayName: 'Logs' }),
+        200,
+      ],
+      [
+        `/api/tabs/${FIXED_SESSION_ID}`,
+        { method: 'DELETE', headers: mutationHeaders(false) },
+        204,
+      ],
+      [
+        `/api/tabs/${FIXED_SESSION_ID}/session/terminate`,
+        mutationInit('POST', {}),
+        200,
+      ],
+      [
+        `/api/tabs/${FIXED_SESSION_ID}/session/recreate`,
+        mutationInit('POST', {}),
+        200,
+      ],
+      [
+        `/api/tabs/${FIXED_SESSION_ID}/session/restart`,
+        mutationInit('POST', {}),
+        200,
+      ],
+      [
+        `/api/tabs/${FIXED_SESSION_ID}/bridge/restart`,
+        mutationInit('POST', {}),
+        200,
+      ],
+    ];
+
+    for (const [path, init, expectedStatus] of operations) {
+      const response = await request(path, init);
+      expect(response.status).toBe(expectedStatus);
+    }
+
+    expect(authService.touch).toHaveBeenCalledTimes(operations.length);
+    expect(authService.touch).toHaveBeenCalledWith('session-id', 'http');
+  });
+
   it('returns the authoritative collection with no-store', async () => {
     const response = await request('/api/tabs');
 
@@ -135,12 +233,32 @@ describe('createTabRouter', () => {
   it('closes a tab with a bodyless 204 and does not require JSON', async () => {
     const response = await request(`/api/tabs/${FIXED_SESSION_ID}`, {
       method: 'DELETE',
-      headers: { Origin: PUBLIC_ORIGIN },
+      headers: mutationHeaders(false),
     });
 
     expect(response.status).toBe(204);
     expect(await response.text()).toBe('');
     expect(sessions.closeTab).toHaveBeenCalledWith(FIXED_SESSION_ID);
+    expect(authService.touch).toHaveBeenCalledOnce();
+  });
+
+  it('rejects authority revoked while a mutation body is pending', async () => {
+    const port = await listen();
+    const pending = streamedMutation(port);
+
+    await vi.waitFor(() =>
+      expect(authService.authenticateCookie).toHaveBeenCalledTimes(2),
+    );
+    authority = undefined;
+    pending.request.end('}');
+    const response = await pending.response;
+
+    expect(response.status).toBe(401);
+    expect(JSON.parse(response.body)).toEqual({
+      error: 'authentication_required',
+    });
+    expect(store.create).not.toHaveBeenCalled();
+    expect(authService.touch).not.toHaveBeenCalled();
   });
 
   it('returns one tab session view with no-store', async () => {
@@ -261,7 +379,11 @@ describe('createTabRouter', () => {
     async (_name, headers, body) => {
       const response = await request('/api/tabs', {
         method: 'POST',
-        headers: { Origin: PUBLIC_ORIGIN, ...headers },
+        headers: {
+          Origin: PUBLIC_ORIGIN,
+          'X-CSRF-Token': CSRF,
+          ...headers,
+        },
         body,
       });
       const responseBody = await response.text();
@@ -279,13 +401,18 @@ describe('createTabRouter', () => {
   it('requires exact application/json while accepting a charset', async () => {
     const rejected = await request('/api/tabs', {
       method: 'POST',
-      headers: { Origin: PUBLIC_ORIGIN, 'Content-Type': 'text/plain' },
+      headers: {
+        Origin: PUBLIC_ORIGIN,
+        'X-CSRF-Token': CSRF,
+        'Content-Type': 'text/plain',
+      },
       body: '{}',
     });
     const accepted = await request('/api/tabs', {
       method: 'POST',
       headers: {
         Origin: PUBLIC_ORIGIN,
+        'X-CSRF-Token': CSRF,
         'Content-Type': 'application/json; charset=utf-8',
       },
       body: '{}',
@@ -407,9 +534,19 @@ describe('createTabRouter', () => {
   });
 });
 
-async function request(path: string, init?: RequestInit): Promise<Response> {
+async function request(
+  path: string,
+  init: RequestInit = {},
+  includeCookie = true,
+): Promise<Response> {
   const port = await listen();
-  return fetch(`http://127.0.0.1:${port}${path}`, init);
+  return fetch(`http://127.0.0.1:${port}${path}`, {
+    ...init,
+    headers: {
+      ...(includeCookie ? { Cookie: `flanterminal_session=${COOKIE}` } : {}),
+      ...init.headers,
+    },
+  });
 }
 
 async function mutation(
@@ -418,14 +555,28 @@ async function mutation(
   body: unknown,
 ): Promise<Response> {
   return request(path, {
-    method,
-    headers: jsonHeaders(),
-    body: JSON.stringify(body),
+    ...mutationInit(method, body),
   });
 }
 
+function mutationInit(method: string, body: unknown): RequestInit {
+  return {
+    method,
+    headers: jsonHeaders(),
+    body: JSON.stringify(body),
+  };
+}
+
 function jsonHeaders(): Record<string, string> {
-  return { Origin: PUBLIC_ORIGIN, 'Content-Type': 'application/json' };
+  return mutationHeaders(true);
+}
+
+function mutationHeaders(includeJson: boolean): Record<string, string> {
+  return {
+    Origin: PUBLIC_ORIGIN,
+    'X-CSRF-Token': CSRF,
+    ...(includeJson ? { 'Content-Type': 'application/json' } : {}),
+  };
 }
 
 async function rawRequest(
@@ -440,6 +591,8 @@ async function rawRequest(
       method: 'POST',
       headers: {
         Origin: [PUBLIC_ORIGIN, PUBLIC_ORIGIN],
+        Cookie: `flanterminal_session=${COOKIE}`,
+        'X-CSRF-Token': CSRF,
         'Content-Type': 'application/json',
       },
     });
@@ -463,7 +616,14 @@ async function listen(): Promise<number> {
     const app = express();
     app.use(
       '/api',
-      createTabRouter({ publicOrigin: PUBLIC_ORIGIN, store, sessions }),
+      createTabRouter({
+        mode: 'local',
+        publicOrigin: PUBLIC_ORIGIN,
+        authService,
+        logger: { warn: vi.fn(), error: vi.fn() },
+        store,
+        sessions,
+      }),
     );
     app.use('/api', (_request, response) =>
       response.status(404).json({ error: 'not_found' }),
@@ -477,6 +637,54 @@ async function listen(): Promise<number> {
     throw new Error('listen failed');
   }
   return address.port;
+}
+
+function authSession(): AuthenticatedSession {
+  return Object.freeze({
+    id: 'session-id',
+    mode: 'local',
+    identityLabel: 'admin',
+    createdAt: 0,
+    lastSeen: 0,
+    idleExpiresAt: 1_000,
+    absoluteExpiresAt: 2_000,
+  });
+}
+
+function streamedMutation(port: number): Readonly<{
+  request: ReturnType<typeof httpRequest>;
+  response: Promise<{ status: number; body: string }>;
+}> {
+  let request!: ReturnType<typeof httpRequest>;
+  const response = new Promise<{ status: number; body: string }>(
+    (resolve, reject) => {
+      request = httpRequest(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/api/tabs',
+          method: 'POST',
+          headers: {
+            Cookie: `flanterminal_session=${COOKIE}`,
+            ...jsonHeaders(),
+          },
+        },
+        (incoming) => {
+          const chunks: Buffer[] = [];
+          incoming.on('data', (chunk: Buffer) => chunks.push(chunk));
+          incoming.on('end', () =>
+            resolve({
+              status: incoming.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString('utf8'),
+            }),
+          );
+        },
+      );
+      request.on('error', reject);
+      request.write('{');
+    },
+  );
+  return Object.freeze({ request, response });
 }
 
 function record(id: string, displayName: string, position: number) {

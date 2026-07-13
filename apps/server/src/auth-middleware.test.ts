@@ -204,6 +204,63 @@ describe('authentication middleware', () => {
     expect(calls).toEqual([`csrf:${CSRF}`, 'touch']);
   });
 
+  it('accepts a bodyless DELETE only after exact origin and CSRF checks', async () => {
+    const options = middlewareOptions();
+    const app = express();
+    app.delete(
+      '/mutation',
+      requireAuthentication(options),
+      requireMutationSecurity(options),
+      touchHttpActivity(options),
+      (_request, response) => response.status(204).end(),
+    );
+    server = createServer(app);
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as { port: number }).port;
+
+    const rejected = await fetch(`http://127.0.0.1:${port}/mutation`, {
+      method: 'DELETE',
+      headers: {
+        Cookie: `flanterminal_session=${COOKIE}`,
+        Origin: ORIGIN,
+        'X-CSRF-Token': 'wrong',
+      },
+    });
+    const accepted = await fetch(`http://127.0.0.1:${port}/mutation`, {
+      method: 'DELETE',
+      headers: {
+        Cookie: `flanterminal_session=${COOKIE}`,
+        Origin: ORIGIN,
+        'X-CSRF-Token': CSRF,
+      },
+    });
+
+    expect(rejected.status).toBe(403);
+    expect(await rejected.json()).toEqual({ error: 'csrf_invalid' });
+    expect(accepted.status).toBe(204);
+    expect(options.authService.touch).toHaveBeenCalledOnce();
+  });
+
+  it('admits one bounded JSON charset parameter for parser validation', async () => {
+    const options = middlewareOptions();
+
+    const admitted = await invoke(options, '/mutation', {
+      Origin: ORIGIN,
+      'Content-Type': 'application/json; charset=iso-8859-1',
+      'X-CSRF-Token': CSRF,
+    });
+    const rejected = await invoke(options, '/mutation', {
+      Origin: ORIGIN,
+      'Content-Type': 'application/json; profile=private',
+      'X-CSRF-Token': CSRF,
+    });
+
+    expect(admitted.status).toBe(200);
+    expect(rejected.status).toBe(415);
+    expect(await rejected.json()).toEqual({ error: 'json_required' });
+  });
+
   it('rejects authority revoked while a JSON mutation body is pending', async () => {
     let authority: AuthenticatedSession | undefined = session();
     const touch = vi.fn();

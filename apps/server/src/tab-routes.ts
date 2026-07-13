@@ -3,6 +3,9 @@ import {
   renameTabBodySchema,
   reorderTabsBodySchema,
   tabIdSchema,
+  type CreateTabBody,
+  type RenameTabBody,
+  type ReorderTabsBody,
   type TabCollection,
   type TabCollectionResponse,
   type TabRecord,
@@ -15,6 +18,12 @@ import express, {
   type Router,
 } from 'express';
 
+import {
+  requireAuthentication,
+  requireMutationSecurity,
+  touchHttpActivity,
+  type AuthMiddlewareOptions,
+} from './auth-middleware.js';
 import { SessionManagerError } from './session-manager.js';
 import { TabStoreError } from './tab-store.js';
 
@@ -53,34 +62,21 @@ export interface TabRouteSessions {
   closeTab(id: string): Promise<void>;
 }
 
-export type TabRouterOptions = Readonly<{
-  publicOrigin: string;
-  store: TabRouteStore;
-  sessions: TabRouteSessions;
-}>;
+export type TabRouterOptions = AuthMiddlewareOptions &
+  Readonly<{
+    store: TabRouteStore;
+    sessions: TabRouteSessions;
+  }>;
 
 export function createTabRouter(options: TabRouterOptions): Router {
   const router = express.Router({ caseSensitive: true, strict: true });
   const parseJson = express.json({ limit: MAX_JSON_BYTES, strict: true });
+  const requireAuth = requireAuthentication(options);
+  const requireMutation = requireMutationSecurity(options);
+  const touch = touchHttpActivity(options);
 
   router.use((request, response, next) => {
     response.set('Cache-Control', 'no-store');
-    if (!isMutation(request.method)) {
-      if (!hasCanonicalApiMount(request)) {
-        response.status(404).json({ error: 'not_found' });
-        return;
-      }
-      if (hasEncodedPath(request)) {
-        sendError(response, 400, 'invalid_request');
-        return;
-      }
-      next();
-      return;
-    }
-    if (!hasExactOrigin(request, options.publicOrigin)) {
-      sendError(response, 403, 'origin_forbidden');
-      return;
-    }
     if (!hasCanonicalApiMount(request)) {
       response.status(404).json({ error: 'not_found' });
       return;
@@ -89,77 +85,113 @@ export function createTabRouter(options: TabRouterOptions): Router {
       sendError(response, 400, 'invalid_request');
       return;
     }
-    if (request.method === 'DELETE') {
-      next();
-      return;
-    }
-    if (!request.is('application/json')) {
-      sendError(response, 415, 'json_required');
-      return;
-    }
-    parseJson(request, response, (error?: unknown) => {
-      if (error === undefined) {
-        next();
-        return;
-      }
-      next(isBodyParserClientError(error) ? new InvalidRequestError() : error);
-    });
+    next();
   });
 
-  router.get('/tabs', async (_request, response) => {
+  router.get('/tabs', requireAuth, touch, async (_request, response) => {
     response.json(await options.sessions.collectionView());
   });
 
-  router.post('/tabs', async (request, response) => {
-    const body = parseBody(createTabBodySchema, request.body);
-    const tab = await options.store.create(body.displayName);
-    response.status(201).json(await options.sessions.view(tab.id));
-  });
+  router.post(
+    '/tabs',
+    requireAuth,
+    requireMutation,
+    parseRequestBody(parseJson),
+    validateBody(createTabBodySchema),
+    touch,
+    async (_request, response) => {
+      const body = validatedBody<CreateTabBody>(response);
+      const tab = await options.store.create(body.displayName);
+      response.status(201).json(await options.sessions.view(tab.id));
+    },
+  );
 
-  router.put('/tabs/order', async (request, response) => {
-    const body = parseBody(reorderTabsBodySchema, request.body);
-    await options.store.reorder(body.structureRevision, body.ids);
-    response.json(await options.sessions.collectionView());
-  });
+  router.put(
+    '/tabs/order',
+    requireAuth,
+    requireMutation,
+    parseRequestBody(parseJson),
+    validateBody(reorderTabsBodySchema),
+    touch,
+    async (_request, response) => {
+      const body = validatedBody<ReorderTabsBody>(response);
+      await options.store.reorder(body.structureRevision, body.ids);
+      response.json(await options.sessions.collectionView());
+    },
+  );
 
-  router.patch('/tabs/:id', async (request, response) => {
-    const id = parseId(request.params.id);
-    const body = parseBody(renameTabBodySchema, request.body);
-    await options.store.rename(id, body.displayName);
-    response.json(await options.sessions.view(id));
-  });
+  router.patch(
+    '/tabs/:id',
+    requireAuth,
+    requireMutation,
+    parseRequestBody(parseJson),
+    validateId,
+    validateBody(renameTabBodySchema),
+    touch,
+    async (_request, response) => {
+      const id = validatedId(response);
+      const body = validatedBody<RenameTabBody>(response);
+      await options.store.rename(id, body.displayName);
+      response.json(await options.sessions.view(id));
+    },
+  );
 
-  router.delete('/tabs/:id', async (request, response) => {
-    const id = parseId(request.params.id);
-    await options.sessions.closeTab(id);
-    response.status(204).end();
-  });
+  router.delete(
+    '/tabs/:id',
+    requireAuth,
+    requireMutation,
+    validateId,
+    touch,
+    async (_request, response) => {
+      const id = validatedId(response);
+      await options.sessions.closeTab(id);
+      response.status(204).end();
+    },
+  );
 
-  router.get('/tabs/:id/session', async (request, response) => {
-    response.json(await options.sessions.view(parseId(request.params.id)));
-  });
+  router.get(
+    '/tabs/:id/session',
+    requireAuth,
+    validateId,
+    touch,
+    async (_request, response) => {
+      response.json(await options.sessions.view(validatedId(response)));
+    },
+  );
 
-  router.post('/tabs/:id/session/terminate', async (request, response) => {
-    parseEmptyBody(request.body);
-    response.json(await options.sessions.terminate(parseId(request.params.id)));
-  });
+  router.post(
+    '/tabs/:id/session/terminate',
+    ...securedJsonMutation(options, parseJson, touch),
+    async (_request, response) => {
+      response.json(await options.sessions.terminate(validatedId(response)));
+    },
+  );
 
-  router.post('/tabs/:id/session/recreate', async (request, response) => {
-    parseEmptyBody(request.body);
-    response.json(await options.sessions.recreate(parseId(request.params.id)));
-  });
+  router.post(
+    '/tabs/:id/session/recreate',
+    ...securedJsonMutation(options, parseJson, touch),
+    async (_request, response) => {
+      response.json(await options.sessions.recreate(validatedId(response)));
+    },
+  );
 
-  router.post('/tabs/:id/session/restart', async (request, response) => {
-    parseEmptyBody(request.body);
-    response.json(await options.sessions.restart(parseId(request.params.id)));
-  });
+  router.post(
+    '/tabs/:id/session/restart',
+    ...securedJsonMutation(options, parseJson, touch),
+    async (_request, response) => {
+      response.json(await options.sessions.restart(validatedId(response)));
+    },
+  );
 
-  router.post('/tabs/:id/bridge/restart', async (request, response) => {
-    parseEmptyBody(request.body);
-    response.json(
-      await options.sessions.restartBridge(parseId(request.params.id)),
-    );
-  });
+  router.post(
+    '/tabs/:id/bridge/restart',
+    ...securedJsonMutation(options, parseJson, touch),
+    async (_request, response) => {
+      response.json(
+        await options.sessions.restartBridge(validatedId(response)),
+      );
+    },
+  );
 
   router.use((_request, response) => {
     response.status(404).json({ error: 'not_found' });
@@ -183,45 +215,74 @@ export function createTabRouter(options: TabRouterOptions): Router {
 
 const emptyBodySchema = createTabBodySchema.pick({}).strict();
 
-function parseEmptyBody(value: unknown): void {
-  parseBody(emptyBodySchema, value);
+function securedJsonMutation(
+  options: TabRouterOptions,
+  parser: express.RequestHandler,
+  touch: express.RequestHandler,
+): express.RequestHandler[] {
+  return [
+    requireAuthentication(options),
+    requireMutationSecurity(options),
+    parseRequestBody(parser),
+    validateId,
+    validateBody(emptyBodySchema),
+    touch,
+  ];
 }
 
-function parseBody<T>(
-  schema: {
-    safeParse(value: unknown): { success: true; data: T } | { success: false };
-  },
-  value: unknown,
-): T {
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new InvalidRequestError();
-  return parsed.data;
-}
-
-function parseId(value: string | undefined): string {
-  const parsed = tabIdSchema.safeParse(value);
-  if (!parsed.success) throw new InvalidRequestError();
-  return parsed.data;
-}
-
-function isMutation(method: string): boolean {
-  return (
-    method === 'POST' ||
-    method === 'PATCH' ||
-    method === 'PUT' ||
-    method === 'DELETE'
-  );
-}
-
-function hasExactOrigin(request: Request, expected: string): boolean {
-  const origins: string[] = [];
-  for (let index = 0; index < request.rawHeaders.length; index += 2) {
-    if (request.rawHeaders[index]?.toLowerCase() === 'origin') {
-      const value = request.rawHeaders[index + 1];
-      if (value !== undefined) origins.push(value);
+function validateBody<T>(schema: {
+  safeParse(value: unknown): { success: true; data: T } | { success: false };
+}): express.RequestHandler {
+  return (request, response, next) => {
+    const parsed = schema.safeParse(request.body);
+    if (!parsed.success) {
+      next(new InvalidRequestError());
+      return;
     }
+    response.locals.validatedTabBody = parsed.data;
+    next();
+  };
+}
+
+function validateId(
+  request: Request,
+  response: Response,
+  next: NextFunction,
+): void {
+  const parsed = tabIdSchema.safeParse(request.params.id);
+  if (!parsed.success) {
+    next(new InvalidRequestError());
+    return;
   }
-  return origins.length === 1 && origins[0] === expected;
+  response.locals.validatedTabId = parsed.data;
+  next();
+}
+
+function validatedBody<T>(response: Response): T {
+  if (!Object.hasOwn(response.locals, 'validatedTabBody')) {
+    throw new Error('Validated tab body missing');
+  }
+  return response.locals.validatedTabBody as T;
+}
+
+function validatedId(response: Response): string {
+  const id = response.locals.validatedTabId as string | undefined;
+  if (id === undefined) throw new Error('Validated tab id missing');
+  return id;
+}
+
+function parseRequestBody(
+  parser: express.RequestHandler,
+): express.RequestHandler {
+  return (request, response, next) => {
+    parser(request, response, (error?: unknown) => {
+      if (error === undefined) {
+        next();
+        return;
+      }
+      next(isBodyParserClientError(error) ? new InvalidRequestError() : error);
+    });
+  };
 }
 
 function hasEncodedPath(request: Request): boolean {
