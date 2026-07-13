@@ -117,6 +117,7 @@ describe('AuthenticatedRoot', () => {
   });
 
   it('does not leave workspace state mounted when config loading returns 401', async () => {
+    window.history.replaceState({}, '', '/terminal/');
     const fetchImpl = vi.fn(async () => new Response(null, { status: 401 }));
     render(
       <AuthenticatedRoot

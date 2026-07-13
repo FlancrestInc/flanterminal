@@ -8,6 +8,13 @@
 }
 
 :root {
+  --login-page-bg: #101112;
+  --login-input-bg: #181a1b;
+  --login-control-border: #666a67;
+  --login-button-bg: #73531f;
+  --login-button-hover-bg: #815d25;
+  --login-button-fg: #f2eee5;
+
   color-scheme: dark;
   font-family:
     ui-sans-serif,
@@ -471,7 +478,7 @@ button {
     max(20px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom))
     max(20px, env(safe-area-inset-left));
   overflow: auto;
-  background: #101112;
+  background: var(--login-page-bg);
 }
 
 .login-form,
@@ -505,10 +512,10 @@ button {
   min-height: 38px;
   margin-bottom: 4px;
   padding: 7px 9px;
-  border: 1px solid #454746;
+  border: 1px solid var(--login-control-border);
   border-radius: 3px;
   outline: 0;
-  background: #181a1b;
+  background: var(--login-input-bg);
   color: #e5e3de;
   font-family:
     'JetBrainsMono Nerd Font', ui-monospace, 'Noto Sans Mono', monospace;
@@ -537,8 +544,8 @@ button {
   padding: 0 14px;
   border: 1px solid #9f7936;
   border-radius: 4px;
-  background: #8f692c;
-  color: #f2eee5;
+  background: var(--login-button-bg);
+  color: var(--login-button-fg);
   font-weight: 600;
   letter-spacing: 0;
   cursor: pointer;
@@ -547,7 +554,7 @@ button {
 .login-form button:hover:not(:disabled),
 .access-state button:hover:not(:disabled) {
   border-color: #c19642;
-  background: #a67931;
+  background: var(--login-button-hover-bg);
 }
 
 .login-form button:focus-visible,

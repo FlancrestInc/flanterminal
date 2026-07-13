@@ -34,18 +34,21 @@ export function AuthenticatedRoot({
   loadConfig = loadClientConfig,
   renderWorkspace,
 }: AuthenticatedRootProps) {
+  const [loaded, setLoaded] = useState<{
+    readonly epoch: number;
+    readonly config: ClientConfig | null;
+    readonly failed: boolean;
+  }>({ epoch: 0, config: null, failed: false });
   const api = useMemo(
     () =>
       suppliedApi ??
       createAuthApi(fetchImpl === undefined ? {} : { fetchImpl }),
     [fetchImpl, suppliedApi],
   );
-  const auth = useAuth(api, fetchImpl === undefined ? {} : { fetchImpl });
-  const [loaded, setLoaded] = useState<{
-    readonly epoch: number;
-    readonly config: ClientConfig | null;
-    readonly failed: boolean;
-  }>({ epoch: 0, config: null, failed: false });
+  const auth = useAuth(api, {
+    ...(fetchImpl === undefined ? {} : { fetchImpl }),
+    ...(loaded.config === null ? {} : { basePath: loaded.config.basePath }),
+  });
   const tabsApi = useMemo(
     () =>
       loaded.config === null

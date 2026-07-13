@@ -223,6 +223,100 @@ describe('useAuth', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('cancels a pending refresh synchronously when logout starts', async () => {
+    const logout = deferred<void>();
+    const api = fakeApi(trustedSession);
+    vi.mocked(api.logout).mockImplementation(async () => await logout.promise);
+    const { result } = renderHook(() => useAuth(api));
+    await flushAuth();
+    await act(async () => vi.advanceTimersByTimeAsync(TRUSTED_REFRESH_MS - 1));
+
+    let operation!: Promise<void>;
+    act(() => {
+      operation = result.current.logout();
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(api.refresh).not.toHaveBeenCalled();
+
+    logout.resolve();
+    await act(async () => void (await operation));
+    expect(result.current.status).toBe('access-error');
+    expect(result.current.bootstrap).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('aborts an in-flight refresh before a successful password change wins', async () => {
+    const refresh = deferred<AuthBootstrap>();
+    const password = deferred<void>();
+    let refreshSignal: AbortSignal | undefined;
+    const api = fakeApi(trustedSession);
+    vi.mocked(api.refresh).mockImplementation(async (_csrf, signal) => {
+      refreshSignal = signal;
+      return await refresh.promise;
+    });
+    vi.mocked(api.changePassword).mockImplementation(
+      async () => await password.promise,
+    );
+    const { result } = renderHook(() => useAuth(api));
+    await flushAuth();
+    await act(async () => vi.advanceTimersByTimeAsync(TRUSTED_REFRESH_MS));
+    expect(api.refresh).toHaveBeenCalledOnce();
+
+    let operation!: Promise<void>;
+    act(() => {
+      operation = result.current.changePassword('old-password', 'new-password');
+    });
+    expect(refreshSignal?.aborted).toBe(true);
+    refresh.resolve({ ...trustedSession, csrfToken: 'stale-refresh' });
+    await flushAuth();
+    expect(result.current.bootstrap).toEqual(trustedSession);
+
+    password.resolve();
+    await act(async () => void (await operation));
+    expect(result.current.status).toBe('access-error');
+    expect(result.current.bootstrap).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('serializes duplicate explicit operations and resumes refresh after the authority fails', async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const signals: AbortSignal[] = [];
+    const api = fakeApi(trustedSession);
+    vi.mocked(api.logout)
+      .mockImplementationOnce(async (_csrf, signal) => {
+        signals.push(signal!);
+        return await first.promise;
+      })
+      .mockImplementationOnce(async (_csrf, signal) => {
+        signals.push(signal!);
+        return await second.promise;
+      });
+    const { result } = renderHook(() => useAuth(api));
+    await flushAuth();
+
+    let firstOperation!: Promise<void>;
+    let secondOperation!: Promise<void>;
+    act(() => {
+      firstOperation = result.current.logout();
+      secondOperation = result.current.logout();
+    });
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[1]?.aborted).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+
+    first.resolve();
+    await act(async () => void (await firstOperation));
+    expect(result.current.status).toBe('authenticated');
+    second.reject(new AuthApiError('operation_failed', 500));
+    await act(async () => void (await secondOperation));
+
+    expect(result.current.status).toBe('authenticated');
+    expect(result.current.error).toBe('Unable to complete the request.');
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
   it('fails closed when upstream refresh loses identity and clears its timer', async () => {
     const api = fakeApi(upstreamSession);
     vi.mocked(api.refresh).mockRejectedValue(
@@ -269,7 +363,9 @@ describe('useAuth', () => {
       },
     );
     const currentApi = fakeApi(localSession);
-    const { result } = renderHook(() => useAuth(currentApi, { fetchImpl }));
+    const { result } = renderHook(() =>
+      useAuth(currentApi, { fetchImpl, basePath: '/terminal' }),
+    );
     await flushAuth();
 
     let pending!: Promise<Response>;
@@ -299,9 +395,9 @@ describe('useAuth', () => {
     await flushAuth();
 
     await act(async () => {
-      await Promise.all([
-        result.current.privateFetch('/first'),
-        result.current.privateFetch('/second'),
+      await Promise.allSettled([
+        result.current.privateFetch('/api/first'),
+        result.current.privateFetch('/api/second'),
       ]);
     });
 
@@ -329,7 +425,7 @@ describe('useAuth', () => {
     await flushAuth();
     let pending!: Promise<Response>;
     act(() => {
-      pending = result.current.privateFetch('/old-private-request');
+      pending = result.current.privateFetch('/api/old-private-request');
     });
 
     act(() => result.current.authenticationRequired());
@@ -342,7 +438,7 @@ describe('useAuth', () => {
     oldRequest.resolve(
       Response.json({ error: 'authentication_required' }, { status: 401 }),
     );
-    await act(async () => void (await pending));
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
 
     expect(result.current.status).toBe('authenticated');
     expect(result.current.bootstrap).toEqual(replacement);
@@ -363,8 +459,8 @@ describe('useAuth', () => {
     vi.mocked(currentApi.login).mockResolvedValue(replacement);
     const { result } = renderHook(() => useAuth(currentApi, { fetchImpl }));
     await flushAuth();
-    const success = result.current.privateFetch('/old-success');
-    const failure = result.current.privateFetch('/old-failure');
+    const success = result.current.privateFetch('/api/old-success');
+    const failure = result.current.privateFetch('/api/old-failure');
 
     act(() => result.current.authenticationRequired());
     await act(async () => {
@@ -373,8 +469,8 @@ describe('useAuth', () => {
     oldSuccess.resolve(new Response(null, { status: 204 }));
     oldFailure.reject(new Error('old private failure'));
     await act(async () => {
-      await expect(success).resolves.toMatchObject({ status: 204 });
-      await expect(failure).rejects.toBeInstanceOf(AuthApiError);
+      await expect(success).rejects.toMatchObject({ name: 'AbortError' });
+      await expect(failure).rejects.toMatchObject({ name: 'AbortError' });
     });
 
     expect(result.current.status).toBe('authenticated');
@@ -395,8 +491,8 @@ describe('useAuth', () => {
     await flushAuth();
 
     await act(async () => {
-      await result.current.privateFetch('/read', { method: 'GET' });
-      await result.current.privateFetch('/write', {
+      await result.current.privateFetch('/api/read', { method: 'GET' });
+      await result.current.privateFetch('/api/write', {
         method: 'PATCH',
         headers: { 'X-Custom': 'yes' },
         signal: controller.signal,
@@ -413,7 +509,180 @@ describe('useAuth', () => {
       credentials: 'include',
     });
     controller.abort();
-    expect(calls[1]!.signal?.aborted).toBe(true);
+    expect(calls[1]!.signal?.aborted).toBe(false);
+  });
+
+  it.each([
+    'https://outside.example/terminal/api/tabs',
+    '/outside/api/tabs',
+    '/terminal/private/tabs',
+    '/terminal/api/../private',
+    '/terminal/api/%2e%2e/private',
+    '/terminal/api/%2Foutside',
+    '/terminal%2Fapi/tabs',
+    '//outside.example/terminal/api/tabs',
+  ])(
+    'rejects private request URL outside the mounted API boundary: %s',
+    async (url) => {
+      window.history.replaceState({}, '', '/terminal/');
+      const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+      const currentApi = fakeApi(localSession);
+      const { result } = renderHook(() =>
+        useAuth(currentApi, { fetchImpl, basePath: '/terminal' }),
+      );
+      await flushAuth();
+
+      const error = await result.current
+        .privateFetch(url, { method: 'POST' })
+        .catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(AuthApiError);
+      expect(String(error)).toBe(
+        'AuthApiError: Authentication request failed.',
+      );
+      expect(String(error)).not.toMatch(/csrf-local|outside|private|terminal/i);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['/terminal', '/terminal/api/tabs'],
+    ['/', '/api/tabs'],
+  ] as const)(
+    'allows canonical private APIs beneath base path %s',
+    async (basePath, url) => {
+      const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+      const currentApi = fakeApi(localSession);
+      const { result } = renderHook(() =>
+        useAuth(currentApi, { fetchImpl, basePath }),
+      );
+      await flushAuth();
+
+      await expect(result.current.privateFetch(url)).resolves.toMatchObject({
+        status: 204,
+      });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('preserves Request semantics while init method and headers override the Request', async () => {
+    window.history.replaceState({}, '', '/terminal/');
+    const calls: Array<readonly [RequestInfo | URL, RequestInit | undefined]> =
+      [];
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push([input, init]);
+        return new Response(null, { status: 204 });
+      },
+    );
+    const currentApi = fakeApi(localSession);
+    const { result } = renderHook(() =>
+      useAuth(currentApi, { fetchImpl, basePath: '/terminal' }),
+    );
+    await flushAuth();
+    const request = new Request('http://localhost:3000/terminal/api/tabs', {
+      method: 'POST',
+      headers: { 'X-Request': 'request-value' },
+    });
+
+    await result.current.privateFetch(request, {
+      method: 'PATCH',
+      headers: { 'X-Init': 'init-value' },
+    });
+
+    expect(calls[0]![0]).toBe(request);
+    expect(calls[0]![1]?.method).toBe('PATCH');
+    const headers = new Headers(calls[0]![1]?.headers);
+    expect(headers.get('X-Request')).toBeNull();
+    expect(headers.get('X-Init')).toBe('init-value');
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-local');
+  });
+
+  it.each(['request', 'init', 'epoch'] as const)(
+    'aborts private fetch from the %s signal',
+    async (source) => {
+      window.history.replaceState({}, '', '/terminal/');
+      const requestController = new AbortController();
+      const initController = new AbortController();
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, init?: RequestInit) =>
+          await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(new DOMException('cancelled', 'AbortError')),
+              { once: true },
+            );
+          }),
+      );
+      const currentApi = fakeApi(localSession);
+      const { result } = renderHook(() =>
+        useAuth(currentApi, { fetchImpl, basePath: '/terminal' }),
+      );
+      await flushAuth();
+      const request = new Request('http://localhost:3000/terminal/api/tabs', {
+        signal: requestController.signal,
+      });
+      const pending = result.current.privateFetch(request, {
+        signal: initController.signal,
+      });
+
+      if (source === 'request') requestController.abort();
+      if (source === 'init') initController.abort();
+      if (source === 'epoch')
+        act(() => result.current.authenticationRequired());
+
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    },
+  );
+
+  it('removes composed abort listeners after private fetch settles', async () => {
+    const requestController = new AbortController();
+    const initController = new AbortController();
+    const initAdd = vi.spyOn(initController.signal, 'addEventListener');
+    const initRemove = vi.spyOn(initController.signal, 'removeEventListener');
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+    const currentApi = fakeApi(localSession);
+    const { result } = renderHook(() =>
+      useAuth(currentApi, { fetchImpl, basePath: '/terminal' }),
+    );
+    await flushAuth();
+    const request = new Request(`${window.location.origin}/terminal/api/tabs`, {
+      signal: requestController.signal,
+    });
+    const requestAdd = vi.spyOn(request.signal, 'addEventListener');
+    const requestRemove = vi.spyOn(request.signal, 'removeEventListener');
+
+    await result.current.privateFetch(request, {
+      signal: initController.signal,
+    });
+
+    expect(requestAdd).toHaveBeenCalled();
+    expect(initAdd).toHaveBeenCalled();
+    expect(requestRemove).toHaveBeenCalledTimes(requestAdd.mock.calls.length);
+    expect(initRemove).toHaveBeenCalledTimes(initAdd.mock.calls.length);
+  });
+
+  it('ignores a late private response after a caller signal aborts', async () => {
+    const response = deferred<Response>();
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async () => await response.promise);
+    const currentApi = fakeApi(localSession);
+    const { result } = renderHook(() =>
+      useAuth(currentApi, { fetchImpl, basePath: '/terminal' }),
+    );
+    await flushAuth();
+    const pending = result.current.privateFetch('/terminal/api/tabs', {
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    response.resolve(
+      Response.json({ error: 'authentication_required' }, { status: 401 }),
+    );
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(result.current.status).toBe('authenticated');
+    expect(result.current.bootstrap).toEqual(localSession);
   });
 
   it('logs out and treats a successful password change as authentication loss', async () => {

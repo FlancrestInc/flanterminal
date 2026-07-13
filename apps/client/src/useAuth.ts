@@ -6,6 +6,12 @@ import type {
 import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 
 import { AuthApiError, type AuthApi } from './auth-api.js';
+import {
+  basePathFromDocument,
+  composeAbortSignals,
+  privateRequestUrl,
+  type PrivateRequestBoundary,
+} from './private-request-authority.js';
 
 const REFRESH_LEAD_MS = 60_000;
 // Revalidate before the server's five-minute minimum application idle bound.
@@ -26,6 +32,8 @@ export const AuthenticationRequiredContext =
 
 export type UseAuthOptions = Readonly<{
   fetchImpl?: typeof fetch;
+  basePath?: string;
+  baseUrl?: string;
 }>;
 
 export interface AuthController {
@@ -50,11 +58,22 @@ export function useAuth(
   options: UseAuthOptions = {},
 ): AuthController {
   const fetchImpl = options.fetchImpl ?? fetch;
+  const privateBoundaryRef = useRef<PrivateRequestBoundary>({
+    basePath:
+      options.basePath ??
+      basePathFromDocument(options.baseUrl ?? document.baseURI),
+    baseUrl: options.baseUrl ?? document.baseURI,
+  });
+  privateBoundaryRef.current = {
+    basePath: options.basePath ?? privateBoundaryRef.current.basePath,
+    baseUrl: options.baseUrl ?? privateBoundaryRef.current.baseUrl,
+  };
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [bootstrap, setBootstrap] = useState<AuthBootstrap | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [epoch, setEpoch] = useState(0);
+  const [refreshRevision, setRefreshRevision] = useState(0);
   const mountedRef = useRef(true);
   const bootstrapRef = useRef<AuthBootstrap | null>(null);
   const operationRef = useRef<AbortController | null>(null);
@@ -201,6 +220,7 @@ export function useAuth(
     cancelRefresh,
     isCurrentOperation,
     publish,
+    refreshRevision,
     replaceOperation,
   ]);
 
@@ -256,6 +276,7 @@ export function useAuth(
   const logout = useCallback(async () => {
     const current = bootstrapRef.current;
     if (!current?.authenticated) return;
+    cancelRefresh();
     const operation = replaceOperation();
     setBusy(true);
     setError(null);
@@ -265,18 +286,28 @@ export function useAuth(
     } catch (reason) {
       if (isAbortError(reason) || !isCurrentOperation(operation)) return;
       if (isAuthenticationLoss(reason)) authenticationRequired();
-      else setError(REQUEST_ERROR);
+      else {
+        setError(REQUEST_ERROR);
+        setRefreshRevision((revision) => revision + 1);
+      }
     } finally {
       const isCurrent = operationRef.current === operation;
       if (isCurrent) operationRef.current = null;
       if (isCurrent && mountedRef.current) setBusy(false);
     }
-  }, [api, authenticationRequired, isCurrentOperation, replaceOperation]);
+  }, [
+    api,
+    authenticationRequired,
+    cancelRefresh,
+    isCurrentOperation,
+    replaceOperation,
+  ]);
 
   const changePassword = useCallback(
     async (currentPassword: string, newPassword: string) => {
       const current = bootstrapRef.current;
       if (!current?.authenticated) return;
+      cancelRefresh();
       const operation = replaceOperation();
       setBusy(true);
       setError(null);
@@ -290,14 +321,23 @@ export function useAuth(
       } catch (reason) {
         if (isAbortError(reason) || !isCurrentOperation(operation)) return;
         if (isAuthenticationLoss(reason)) authenticationRequired();
-        else setError(REQUEST_ERROR);
+        else {
+          setError(REQUEST_ERROR);
+          setRefreshRevision((revision) => revision + 1);
+        }
       } finally {
         const isCurrent = operationRef.current === operation;
         if (isCurrent) operationRef.current = null;
         if (isCurrent && mountedRef.current) setBusy(false);
       }
     },
-    [api, authenticationRequired, isCurrentOperation, replaceOperation],
+    [
+      api,
+      authenticationRequired,
+      cancelRefresh,
+      isCurrentOperation,
+      replaceOperation,
+    ],
   );
 
   const privateFetch = useCallback<typeof fetch>(
@@ -306,33 +346,44 @@ export function useAuth(
       const privateController = privateRef.current;
       if (!current?.authenticated || privateController === null)
         throw new AuthApiError('authentication_required', 401);
+      if (privateRequestUrl(input, privateBoundaryRef.current) === undefined)
+        throw new AuthApiError();
       const method = requestMethod(input, init);
       const headers = new Headers(
         init?.headers ?? (input instanceof Request ? input.headers : undefined),
       );
       if (method !== 'GET' && method !== 'HEAD')
         headers.set('X-CSRF-Token', current.csrfToken);
-      const signal = combineSignals(privateController.signal, init?.signal);
-      let response: Response;
+      const requestSignal = input instanceof Request ? input.signal : undefined;
+      const composed = composeAbortSignals(
+        [privateController.signal, requestSignal, init?.signal].filter(
+          (signal): signal is AbortSignal => signal !== undefined,
+        ),
+      );
       try {
-        response = await fetchImpl(input, {
+        if (composed.signal.aborted) throw abortReason(composed.signal);
+        const response = await fetchImpl(input, {
           ...init,
           cache: 'no-store',
           credentials: 'include',
           headers,
-          signal,
+          signal: composed.signal,
         });
+        if (composed.signal.aborted) throw abortReason(composed.signal);
+        if (
+          response.status === 401 &&
+          privateRef.current === privateController &&
+          !privateController.signal.aborted
+        )
+          authenticationRequired();
+        return response;
       } catch (reason) {
+        if (composed.signal.aborted) throw abortReason(composed.signal);
         if (isAbortError(reason)) throw reason;
         throw new AuthApiError();
+      } finally {
+        composed.dispose();
       }
-      if (
-        response.status === 401 &&
-        privateRef.current === privateController &&
-        !privateController.signal.aborted
-      )
-        authenticationRequired();
-      return response;
     },
     [authenticationRequired, fetchImpl],
   );
@@ -358,17 +409,14 @@ function requestMethod(input: RequestInfo | URL, init?: RequestInit): string {
   ).toUpperCase();
 }
 
-function combineSignals(
-  authority: AbortSignal,
-  caller: AbortSignal | null | undefined,
-): AbortSignal {
-  return caller === undefined || caller === null
-    ? authority
-    : AbortSignal.any([authority, caller]);
-}
-
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('Request cancelled', 'AbortError');
 }
 
 function isAuthenticationLoss(error: unknown): boolean {
