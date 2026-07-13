@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CsrfService } from './csrf-service.js';
 import { AuthService } from './auth-service.js';
+import { LoginRateLimiter } from './rate-limiter.js';
 
 describe('AuthService', () => {
   it('establishes, authenticates without touching, touches, verifies CSRF and logs out once', async () => {
@@ -70,6 +71,76 @@ describe('AuthService', () => {
     expect(verify).not.toHaveBeenCalled();
   });
 
+  it('denies a login burst immediately while one admitted verification is unresolved', async () => {
+    const firstVerification = deferred<boolean>();
+    const secondVerification = deferred<boolean>();
+    const verify = vi
+      .fn()
+      .mockReturnValueOnce(firstVerification.promise)
+      .mockReturnValueOnce(secondVerification.promise);
+    let randomByte = 1;
+    const random = vi.fn((size: number) => Buffer.alloc(size, randomByte++));
+    const csrf = new CsrfService({
+      randomBytes: (size) => Buffer.alloc(size, 2),
+    });
+    const createCsrf = vi.spyOn(csrf, 'create');
+    const limiter = new LoginRateLimiter({
+      clock: () => 0,
+      global: { capacity: 2, refillPerSecond: 0 },
+      address: { capacity: 1, refillPerSecond: 0 },
+      maxAddresses: 2,
+    });
+    const service = new AuthService({
+      mode: 'local',
+      clock: () => 0,
+      randomBytes: random,
+      credentialStore: { verify, replacePassword: vi.fn() },
+      csrfService: csrf,
+      rateLimiter: limiter,
+      idleDurationMs: 100,
+      absoluteDurationMs: 1000,
+      maxSessions: 1,
+    });
+
+    const firstAdmitted = service.login(login());
+    const denied = [service.login(login())];
+    const secondAdmitted = service.login({
+      ...login(),
+      address: '127.0.0.2',
+    });
+    denied.push(
+      ...Array.from({ length: 32 }, (_, index) =>
+        service.login({
+          ...login(),
+          address: index % 2 === 0 ? '127.0.0.1' : '127.0.0.2',
+        }),
+      ),
+    );
+    const settled: boolean[] = [];
+    for (const attempt of denied)
+      void attempt.then((result) =>
+        settled.push(result.bootstrap.authenticated),
+      );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(settled).toHaveLength(denied.length);
+    expect(settled).not.toContain(true);
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(random).not.toHaveBeenCalled();
+    expect(createCsrf).not.toHaveBeenCalled();
+    expect(limiter.trackedAddressCount()).toBeLessThanOrEqual(2);
+
+    firstVerification.resolve(true);
+    secondVerification.resolve(true);
+    const [first, second] = await Promise.all([firstAdmitted, secondAdmitted]);
+    expect(service.authenticateCookie(first.cookieValue)).toBeUndefined();
+    expect(service.authenticateCookie(second.cookieValue)).toBeDefined();
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(random).toHaveBeenCalledTimes(4);
+    expect(createCsrf).toHaveBeenCalledTimes(2);
+  });
+
   it('handles local failure, success reset, and wrong-mode calls generically', async () => {
     const h = setup('local');
     h.credentials.verify
@@ -88,6 +159,12 @@ describe('AuthService', () => {
     ).rejects.toThrow('Authentication operation failed');
     const none = setup('none');
     await expect(none.service.login(login())).rejects.toThrow();
+    await expect(
+      none.service.bootstrap({
+        type: 'upstream',
+        identity: { mode: 'trusted-header', identityLabel: 'user' },
+      }),
+    ).rejects.toThrow('Authentication operation failed');
     const recovered = await none.service.bootstrap({ type: 'none' });
     expect(recovered.bootstrap.authenticated).toBe(true);
   });
@@ -271,14 +348,14 @@ describe('AuthService', () => {
     },
   );
 
-  it('serializes complete password changes so only one old-password verification commits', async () => {
+  it('rejects a concurrent password change immediately without calling credentials', async () => {
     const h = setup('local');
     h.credentials.verify.mockResolvedValueOnce(true);
     const result = await h.service.login(login());
     const id = h.service.authenticateCookie(result.cookieValue)!.id;
-    h.credentials.verify
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false);
+    const gate = deferred<boolean>();
+    h.credentials.verify.mockClear();
+    h.credentials.verify.mockReturnValueOnce(gate.promise);
     h.credentials.replacePassword.mockResolvedValue({ state: 'committed' });
     const revoked = vi.fn();
     h.service.onRevoked(revoked);
@@ -292,10 +369,90 @@ describe('AuthService', () => {
       'old-password-value',
       'second-replacement',
     );
+    let secondResult: boolean | undefined;
+    void second.then((value) => {
+      secondResult = value;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const rejectedWhileFirstPending = secondResult;
+
+    gate.resolve(true);
     await expect(first).resolves.toBe(true);
     await expect(second).resolves.toBe(false);
+    expect(rejectedWhileFirstPending).toBe(false);
+    expect(h.credentials.verify).toHaveBeenCalledOnce();
     expect(h.credentials.replacePassword).toHaveBeenCalledOnce();
     expect(revoked).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears password change single-flight state after credential failure', async () => {
+    const h = setup('local');
+    const loginResult = await h.service.login(login());
+    const id = h.service.authenticateCookie(loginResult.cookieValue)!.id;
+    const gate = deferred<boolean>();
+    h.credentials.verify.mockClear();
+    h.credentials.verify.mockReturnValueOnce(gate.promise);
+
+    const failed = h.service.changePassword(
+      id,
+      'old-password-value',
+      'failed-replacement',
+    );
+    const concurrent = h.service.changePassword(
+      id,
+      'old-password-value',
+      'retained-replacement',
+    );
+    let concurrentResult: boolean | undefined;
+    void concurrent.then((value) => {
+      concurrentResult = value;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    const rejectedWhileFirstPending = concurrentResult;
+    gate.reject(new Error('credential failure'));
+
+    await expect(failed).rejects.toThrow('Authentication operation failed');
+    await expect(concurrent).resolves.toBe(false);
+    expect(rejectedWhileFirstPending).toBe(false);
+    h.credentials.verify.mockResolvedValueOnce(true);
+    h.credentials.replacePassword.mockResolvedValueOnce({ state: 'committed' });
+    await expect(
+      h.service.changePassword(
+        id,
+        'old-password-value',
+        'successful-replacement',
+      ),
+    ).resolves.toBe(true);
+  });
+
+  it('revokes every local session exactly once after a password change', async () => {
+    const h = setup('local', { maxSessions: 4 });
+    const sessions = await Promise.all([
+      h.service.login(login()),
+      h.service.login(login()),
+      h.service.login(login()),
+    ]);
+    const ids = sessions.map(
+      (result) => h.service.authenticateCookie(result.cookieValue)!.id,
+    );
+    const revoked = vi.fn();
+    h.service.onRevoked(revoked);
+
+    await expect(
+      h.service.changePassword(
+        ids[0]!,
+        'old-password-value',
+        'replacement-password',
+      ),
+    ).resolves.toBe(true);
+
+    for (const result of sessions)
+      expect(h.service.authenticateCookie(result.cookieValue)).toBeUndefined();
+    expect(revoked.mock.calls).toEqual(
+      ids.map((id) => [id, 'password_changed']),
+    );
   });
 
   it.each(['logout', 'expiry', 'capacity'] as const)(
@@ -504,8 +661,10 @@ function setup(
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((accept, decline) => {
     resolve = accept;
+    reject = decline;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }

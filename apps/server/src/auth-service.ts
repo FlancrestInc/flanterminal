@@ -33,6 +33,10 @@ type Stored = {
   csrf: CsrfRecord;
   digest: string;
 };
+type PreparedSession = Readonly<{
+  session: Stored;
+  result: AuthBootstrapResult;
+}>;
 export type AuthServiceOptions = Readonly<{
   mode: AuthMode;
   clock: () => number;
@@ -72,7 +76,7 @@ export class AuthService {
     }>
   >();
   #establishmentTail: Promise<void> = Promise.resolve();
-  #passwordTail: Promise<void> = Promise.resolve();
+  #passwordChangeActive = false;
   constructor(o: AuthServiceOptions) {
     if (
       !Number.isFinite(o.idleDurationMs) ||
@@ -130,35 +134,26 @@ export class AuthService {
     });
   }
   login(input: LocalLoginAttempt): Promise<AuthBootstrapResult> {
-    return this.#enqueueEstablishment(async () => {
-      if (this.#mode !== 'local') throw new AuthServiceError();
-      let allowed: boolean;
-      try {
-        allowed = this.#limiter.consume(input.address);
-      } catch {
-        throw new AuthServiceError();
-      }
-      if (!allowed)
-        return frozen({
+    if (this.#mode !== 'local') return Promise.reject(new AuthServiceError());
+    let allowed: boolean;
+    try {
+      allowed = this.#limiter.consume(input.address);
+    } catch {
+      return Promise.reject(new AuthServiceError());
+    }
+    if (!allowed)
+      return Promise.resolve(
+        frozen({
           bootstrap: frozen({ authenticated: false, mode: 'local' }),
-        });
-      let valid = false;
-      try {
-        valid = await this.#credentials.verify(input.username, input.password);
-      } catch {
-        throw new AuthServiceError();
-      }
-      if (!valid)
-        return frozen({
-          bootstrap: frozen({ authenticated: false, mode: 'local' }),
-        });
-      return this.#safeEstablish(
-        'local',
-        normalizeLabel(input.username),
-        undefined,
-        () => this.#limiter.resetAddress(input.address),
+        }),
       );
-    });
+    let verification: Promise<boolean>;
+    try {
+      verification = this.#credentials.verify(input.username, input.password);
+    } catch {
+      return Promise.reject(new AuthServiceError());
+    }
+    return this.#completeLogin(input.username, input.address, verification);
   }
   authenticateCookie(
     rawCookie: string | undefined,
@@ -238,47 +233,11 @@ export class AuthService {
     current: string,
     replacement: string,
   ): Promise<boolean> {
-    const result = this.#passwordTail.then(
-      async () => {
-        const s = this.#byId.get(id);
-        if (!s || s.mode !== 'local') return false;
-        const expired = this.#expiredReason(s);
-        if (expired) {
-          this.#revoke(s, expired);
-          return false;
-        }
-        let valid: boolean;
-        try {
-          valid = await this.#credentials.verify(s.identityLabel, current);
-        } catch {
-          throw new AuthServiceError();
-        }
-        if (!valid) return false;
-        const currentSession = this.#byId.get(id);
-        if (currentSession !== s) return false;
-        const recheckExpiry = this.#expiredReason(s);
-        if (recheckExpiry) {
-          this.#revoke(s, recheckExpiry);
-          return false;
-        }
-        let replaced: ReplaceResult;
-        try {
-          replaced = await this.#credentials.replacePassword(replacement);
-        } catch {
-          throw new AuthServiceError();
-        }
-        if (replaced.state === 'not_committed') return false;
-        for (const session of [...this.#byId.values()])
-          this.#revoke(session, 'password_changed');
-        return true;
-      },
-      async () => false,
-    );
-    this.#passwordTail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+    if (this.#passwordChangeActive) return Promise.resolve(false);
+    this.#passwordChangeActive = true;
+    return this.#runPasswordChange(id, current, replacement).finally(() => {
+      this.#passwordChangeActive = false;
+    });
   }
   sweepExpired(): void {
     for (const s of [...this.#byId.values()].sort((a, b) =>
@@ -309,12 +268,11 @@ export class AuthService {
   [inspect.custom]() {
     return 'AuthService {}';
   }
-  #establish(
+  #prepareSession(
     mode: AuthMode,
     label: string,
     upstreamExpiresAt?: number,
-    beforeCommit?: () => void,
-  ): AuthBootstrapResult {
+  ): PreparedSession {
     const now = this.#now();
     let cookie = '';
     let digest = '';
@@ -355,6 +313,17 @@ export class AuthService {
     });
     view(s);
     const result = frozen({ bootstrap, cookieValue: cookie });
+    return frozen({ session: s, result });
+  }
+
+  #commitSession(
+    prepared: PreparedSession,
+    beforeCommit?: () => void,
+  ): AuthBootstrapResult {
+    const { session: s, result } = prepared;
+    if (this.#byDigest.has(s.digest) || this.#byId.has(s.id))
+      throw new AuthServiceError();
+    const now = this.#now();
 
     const revocations: Array<
       Readonly<{ session: Stored; reason: RevocationReason }>
@@ -377,7 +346,7 @@ export class AuthService {
     beforeCommit?.();
     for (const revocation of revocations) this.#remove(revocation.session);
     this.#byDigest.set(s.digest, s);
-    this.#byId.set(id, s);
+    this.#byId.set(s.id, s);
     for (const revocation of revocations)
       this.#emitRevocation(revocation.session.id, revocation.reason);
     return result;
@@ -389,10 +358,94 @@ export class AuthService {
     beforeCommit?: () => void,
   ): AuthBootstrapResult {
     try {
-      return this.#establish(mode, label, upstreamExpiresAt, beforeCommit);
+      const prepared = this.#prepareSession(mode, label, upstreamExpiresAt);
+      return this.#commitSession(prepared, beforeCommit);
     } catch {
       throw new AuthServiceError();
     }
+  }
+  #safePrepareSession(
+    mode: AuthMode,
+    label: string,
+    upstreamExpiresAt?: number,
+  ): PreparedSession {
+    try {
+      return this.#prepareSession(mode, label, upstreamExpiresAt);
+    } catch {
+      throw new AuthServiceError();
+    }
+  }
+  #safeCommitSession(
+    prepared: PreparedSession,
+    beforeCommit?: () => void,
+  ): AuthBootstrapResult {
+    try {
+      return this.#commitSession(prepared, beforeCommit);
+    } catch {
+      throw new AuthServiceError();
+    }
+  }
+  async #completeLogin(
+    username: string,
+    address: string,
+    verification: Promise<boolean>,
+  ): Promise<AuthBootstrapResult> {
+    let valid: boolean;
+    try {
+      valid = await verification;
+    } catch {
+      throw new AuthServiceError();
+    }
+    if (!valid)
+      return frozen({
+        bootstrap: frozen({ authenticated: false, mode: 'local' }),
+      });
+    const prepared = this.#safePrepareSession(
+      'local',
+      normalizeLabel(username),
+    );
+    return this.#enqueueEstablishment(async () =>
+      this.#safeCommitSession(prepared, () =>
+        this.#limiter.resetAddress(address),
+      ),
+    );
+  }
+  async #runPasswordChange(
+    id: string,
+    current: string,
+    replacement: string,
+  ): Promise<boolean> {
+    const s = this.#byId.get(id);
+    if (!s || s.mode !== 'local') return false;
+    const expired = this.#expiredReason(s);
+    if (expired) {
+      this.#revoke(s, expired);
+      return false;
+    }
+    let valid: boolean;
+    try {
+      valid = await this.#credentials.verify(s.identityLabel, current);
+    } catch {
+      throw new AuthServiceError();
+    }
+    if (!valid) return false;
+    const currentSession = this.#byId.get(id);
+    if (currentSession !== s) return false;
+    const recheckExpiry = this.#expiredReason(s);
+    if (recheckExpiry) {
+      this.#revoke(s, recheckExpiry);
+      return false;
+    }
+    let replaced: ReplaceResult;
+    try {
+      replaced = await this.#credentials.replacePassword(replacement);
+    } catch {
+      throw new AuthServiceError();
+    }
+    if (replaced.state === 'not_committed') return false;
+    for (const session of [...this.#byId.values()])
+      this.#revoke(session, 'password_changed');
+    return true;
   }
   #token(size: number): string {
     const bytes = this.#random(size);
@@ -406,18 +459,7 @@ export class AuthService {
     return n;
   }
   #expiredReason(s: Stored): RevocationReason | undefined {
-    const n = this.#now();
-    const candidates: [
-      [number, RevocationReason],
-      [number, RevocationReason],
-      [number, RevocationReason],
-    ] = [
-      [s.idleExpiresAt, 'idle'],
-      [s.absoluteExpiresAt, 'absolute'],
-      [s.upstreamExpiresAt ?? Infinity, 'upstream'],
-    ];
-    candidates.sort((a, b) => a[0] - b[0]);
-    return n >= candidates[0][0] ? candidates[0][1] : undefined;
+    return expiredReasonAt(s, this.#now());
   }
   #revoke(s: Stored, reason: RevocationReason) {
     if (!this.#remove(s)) return;
