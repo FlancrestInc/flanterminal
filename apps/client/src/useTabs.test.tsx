@@ -133,8 +133,9 @@ describe('useTabs', () => {
     await act(async () => result.current.rename(A, 'Work'));
     expect(result.current.tabs[0]?.displayName).toBe('Work');
     await act(async () => result.current.reorder([B, A]));
+    expect(client.reorder).toHaveBeenCalledWith(2, [B, A]);
     expect(result.current.tabs.map(({ id }) => id)).toEqual([B, A]);
-    expect(result.current.structureRevision).toBe(2);
+    expect(result.current.structureRevision).toBe(3);
   });
 
   it('reloads the authoritative collection after an order conflict', async () => {

@@ -51,6 +51,7 @@ RUN apt-get update \
     install -d -o webterm -g webterm -m 0755 /home/webterm; \
     install -d -o webterm -g webterm -m 0700 /home/webterm/.ssh; \
     install -d -o webterm -g webterm -m 0755 /home/webterm/scripts; \
+    install -d -o webterm -g webterm -m 0700 /app/data; \
     touch /home/webterm/.bash_history; \
     chown webterm:webterm /home/webterm/.bash_history
 

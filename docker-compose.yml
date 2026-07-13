@@ -1,6 +1,6 @@
 services:
   app:
-    image: flanterminal:phase1
+    image: flanterminal:phase2
     build:
       context: .
       args:
@@ -23,9 +23,12 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TZ: ${TZ:-UTC}
       HOME_DIR: /home/webterm
+      DATA_DIR: /app/data
+      SESSION_MAX_COUNT: ${SESSION_MAX_COUNT:-10}
     ports:
       - '127.0.0.1:${HOST_PORT:-3000}:${APP_PORT:-3000}'
     volumes:
+      - app-data:/app/data
       - webterm-home:/home/webterm
     read_only: true
     tmpfs:
@@ -35,9 +38,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    pids_limit: 128
-    mem_limit: 256m
+    pids_limit: 256
+    mem_limit: 512m
     restart: unless-stopped
 
 volumes:
+  app-data:
   webterm-home:

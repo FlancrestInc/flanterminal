@@ -31,7 +31,11 @@ vi.mock('./TerminalSession.js', async () => {
     TerminalSession: forwardRef<TerminalSessionHandle, { tabId: string }>(
       function MockSession({ tabId }, ref) {
         useImperativeHandle(ref, () => commands, []);
-        return <div aria-label={`Terminal ${tabId}`} />;
+        return (
+          <div className="terminal-host" aria-label={`Terminal ${tabId}`}>
+            <textarea aria-label={`Shell input ${tabId}`} />
+          </div>
+        );
       },
     ),
   };
@@ -149,7 +153,11 @@ describe('App', () => {
       'aria-selected',
       'true',
     );
-    fireEvent.keyDown(document, { key: 'w', ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(screen.getByLabelText(`Shell input ${B}`), {
+      key: 'w',
+      ctrlKey: true,
+      shiftKey: true,
+    });
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 });

@@ -144,13 +144,19 @@ export function useTabs(
   const rename = useCallback(
     async (id: string, displayName: string) => {
       try {
-        update(await api.rename(id, displayName));
+        const renamed = await api.rename(id, displayName);
+        setCollection((current) => ({
+          structureRevision: current.structureRevision + 1,
+          tabs: current.tabs.map((candidate) =>
+            candidate.id === renamed.id ? renamed : candidate,
+          ),
+        }));
         setError(null);
       } catch {
         setError(SAFE_ERROR);
       }
     },
-    [api, update],
+    [api],
   );
 
   const reorder = useCallback(

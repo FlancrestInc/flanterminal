@@ -237,6 +237,12 @@ export function App({ config, api: suppliedApi }: AppProps) {
 }
 
 function isEditingTarget(target: EventTarget | null): boolean {
+  if (
+    target instanceof HTMLElement &&
+    target.closest('.terminal-host') !== null
+  ) {
+    return false;
+  }
   return (
     target instanceof HTMLInputElement ||
     target instanceof HTMLTextAreaElement ||

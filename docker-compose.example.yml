@@ -7,7 +7,8 @@ services:
       APP_BASE_PATH: /terminal
       APP_PUBLIC_URL: https://terminal.example.com
     volumes:
-      # Prepare first: mkdir -p data/home && chown 1000:1000 data/home
+      # Prepare first: mkdir -p data/app data/home && chown -R 1000:1000 data
+      - ./data/app:/app/data
       - ./data/home:/home/webterm
 
 volumes: {}

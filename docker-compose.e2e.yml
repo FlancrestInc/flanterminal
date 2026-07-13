@@ -22,7 +22,10 @@ services:
       LOG_LEVEL: info
       TZ: UTC
       HOME_DIR: /home/webterm
+      DATA_DIR: /app/data
+      SESSION_MAX_COUNT: 20
     volumes:
+      - e2e-app:/app/data
       - e2e-home:/home/webterm
     read_only: true
     tmpfs:
@@ -30,8 +33,8 @@ services:
       - /run:rw,noexec,nosuid,nodev,size=1m,mode=0755,uid=1000,gid=1000
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    pids_limit: 128
-    mem_limit: 256m
+    pids_limit: 256
+    mem_limit: 512m
     healthcheck:
       test:
         [
@@ -57,4 +60,5 @@ services:
     network_mode: service:app
 
 volumes:
+  e2e-app:
   e2e-home:
