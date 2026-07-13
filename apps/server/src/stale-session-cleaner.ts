@@ -49,7 +49,14 @@ export type CleanupStatus = Readonly<{
   enabled: boolean;
   running: boolean;
   lastRunAt: string | null;
+  dependencyFailure: CleanupDependencyFailure | null;
 }>;
+
+export type CleanupDependencyFailure =
+  'settings_unavailable' | 'tabs_unavailable';
+
+type CleanupThreshold =
+  Readonly<{ available: true; hours: number }> | Readonly<{ available: false }>;
 
 type TimerRegistration = {
   handle?: object;
@@ -74,7 +81,9 @@ export class StaleSessionCleaner {
   private timer: TimerRegistration | undefined;
   private inFlight: Promise<CleanupResult> | undefined;
   private inFlightThresholdHours: number | undefined;
+  private inFlightDependencyFailure: CleanupDependencyFailure | null = null;
   private lastResult: CleanupResult | undefined;
+  private lastDependencyFailure: CleanupDependencyFailure | null = null;
   private shutdownPromise: Promise<void> | undefined;
   private shuttingDown = false;
 
@@ -97,13 +106,15 @@ export class StaleSessionCleaner {
     if (this.shuttingDown)
       return Promise.reject(new Error('Cleanup unavailable'));
     if (this.inFlight !== undefined) {
-      return this.inFlightThresholdHours === 0
+      return this.inFlightThresholdHours === 0 &&
+        this.inFlightDependencyFailure === null
         ? Promise.reject(new CleanupDisabledError())
         : this.inFlight;
     }
-    const thresholdHours = this.thresholdHours();
-    if (thresholdHours === 0) return Promise.reject(new CleanupDisabledError());
-    return this.startRun(thresholdHours);
+    const threshold = this.thresholdSnapshot();
+    if (threshold.available && threshold.hours === 0)
+      return Promise.reject(new CleanupDisabledError());
+    return this.startRun(threshold);
   }
 
   waitForIdle(): Promise<CleanupResult> {
@@ -114,10 +125,16 @@ export class StaleSessionCleaner {
   }
 
   status(): CleanupStatus {
+    const threshold = this.thresholdSnapshot();
     return Object.freeze({
-      enabled: this.thresholdHours() > 0,
+      enabled: threshold.available && threshold.hours > 0,
       running: this.inFlight !== undefined,
       lastRunAt: this.lastResult?.startedAt ?? null,
+      dependencyFailure: threshold.available
+        ? this.inFlight !== undefined
+          ? this.inFlightDependencyFailure
+          : this.lastDependencyFailure
+        : 'settings_unavailable',
     });
   }
 
@@ -134,12 +151,17 @@ export class StaleSessionCleaner {
     return this.shutdownPromise;
   }
 
-  private startRun(thresholdHours: number): Promise<CleanupResult> {
+  private startRun(threshold: CleanupThreshold): Promise<CleanupResult> {
     if (this.inFlight !== undefined) return this.inFlight;
     this.cancelTimer();
-    const operation = this.execute(thresholdHours);
+    this.inFlightThresholdHours = threshold.available
+      ? threshold.hours
+      : undefined;
+    this.inFlightDependencyFailure = threshold.available
+      ? null
+      : 'settings_unavailable';
+    const operation = this.execute(threshold);
     this.inFlight = operation;
-    this.inFlightThresholdHours = thresholdHours;
     void operation.then(
       (result) => this.finishRun(operation, result),
       () => this.finishRun(operation),
@@ -147,9 +169,12 @@ export class StaleSessionCleaner {
     return operation;
   }
 
-  private async execute(thresholdHours: number): Promise<CleanupResult> {
+  private async execute(threshold: CleanupThreshold): Promise<CleanupResult> {
     const startedMs = this.validNow();
     const startedAt = new Date(startedMs).toISOString();
+    if (!threshold.available) return this.result(false, 0, 0, 0, 1, startedAt);
+
+    const thresholdHours = threshold.hours;
     if (thresholdHours === 0) return this.result(true, 0, 0, 0, 0, startedAt);
 
     const thresholdMs = thresholdHours * HOUR_MS;
@@ -160,7 +185,8 @@ export class StaleSessionCleaner {
         .snapshot()
         .tabs.slice(0, this.options.maxSessions);
     } catch {
-      return this.result(false, 0, 0, 0, 0, startedAt);
+      this.inFlightDependencyFailure = 'tabs_unavailable';
+      return this.result(false, 0, 0, 0, 1, startedAt);
     }
 
     let examined = 0;
@@ -217,9 +243,13 @@ export class StaleSessionCleaner {
     result?: CleanupResult,
   ): void {
     if (this.inFlight !== operation) return;
-    if (result !== undefined) this.lastResult = result;
+    if (result !== undefined) {
+      this.lastResult = result;
+      this.lastDependencyFailure = this.inFlightDependencyFailure;
+    }
     this.inFlight = undefined;
     this.inFlightThresholdHours = undefined;
+    this.inFlightDependencyFailure = null;
     this.schedule();
   }
 
@@ -254,19 +284,19 @@ export class StaleSessionCleaner {
     if (this.timer !== registration) return;
     this.timer = undefined;
     if (registration.cancelling || this.shuttingDown) return;
-    void this.startRun(this.thresholdHours());
+    void this.startRun(this.thresholdSnapshot());
   }
 
-  private thresholdHours(): number {
+  private thresholdSnapshot(): CleanupThreshold {
     try {
       const value = this.options.settings.snapshot().staleSessionCleanupHours;
       return Number.isInteger(value) &&
         value >= 0 &&
         value <= MAX_THRESHOLD_HOURS
-        ? value
-        : 0;
+        ? Object.freeze({ available: true, hours: value })
+        : Object.freeze({ available: false });
     } catch {
-      return 0;
+      return Object.freeze({ available: false });
     }
   }
 

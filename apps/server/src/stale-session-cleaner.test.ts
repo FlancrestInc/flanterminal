@@ -44,6 +44,7 @@ describe('StaleSessionCleaner', () => {
       enabled: false,
       running: false,
       lastRunAt: null,
+      dependencyFailure: null,
     });
     harness.settings.staleSessionCleanupHours = 1;
     harness.clock.value += 900_000;
@@ -60,6 +61,7 @@ describe('StaleSessionCleaner', () => {
       enabled: true,
       running: false,
       lastRunAt: '2026-07-13T12:15:00.000Z',
+      dependencyFailure: null,
     });
     expect(Object.isFrozen(harness.cleaner.status())).toBe(true);
   });
@@ -138,6 +140,7 @@ describe('StaleSessionCleaner', () => {
       enabled: true,
       running: false,
       lastRunAt: null,
+      dependencyFailure: null,
     });
     expect(scheduler.pendingCount).toBe(0);
     await expect(harness.cleaner.runNow()).resolves.toMatchObject({
@@ -202,6 +205,75 @@ describe('StaleSessionCleaner', () => {
     expect(harness.cleaner.status().running).toBe(false);
   });
 
+  it('reports a bounded failed result when authoritative settings are unavailable', async () => {
+    const harness = cleanerHarness();
+    harness.settingsFailure.active = true;
+
+    expect(harness.cleaner.status()).toEqual({
+      enabled: false,
+      running: false,
+      lastRunAt: null,
+      dependencyFailure: 'settings_unavailable',
+    });
+    harness.scheduler.runNext();
+    await settle();
+    const scheduled = await harness.cleaner.waitForIdle();
+
+    expect(scheduled).toEqual({
+      disabled: false,
+      examined: 0,
+      terminated: 0,
+      skipped: 0,
+      failed: 1,
+      startedAt: '2026-07-13T12:00:00.000Z',
+      finishedAt: '2026-07-13T12:00:00.000Z',
+    });
+    expect(Object.isFrozen(scheduled)).toBe(true);
+    expect(harness.read).not.toHaveBeenCalled();
+    expect(harness.terminate).not.toHaveBeenCalled();
+    expect(harness.cleaner.status().dependencyFailure).toBe(
+      'settings_unavailable',
+    );
+
+    await expect(harness.cleaner.runNow()).resolves.toEqual(scheduled);
+  });
+
+  it('reports tab snapshot failure and clears it after a successful later run', async () => {
+    const harness = cleanerHarness();
+    harness.tabsFailure.active = true;
+
+    const failed = await harness.cleaner.runNow();
+
+    expect(failed).toMatchObject({
+      disabled: false,
+      examined: 0,
+      terminated: 0,
+      skipped: 0,
+      failed: 1,
+    });
+    expect(Object.isFrozen(failed)).toBe(true);
+    expect(harness.read).not.toHaveBeenCalled();
+    expect(harness.terminate).not.toHaveBeenCalled();
+    expect(harness.cleaner.status()).toEqual({
+      enabled: true,
+      running: false,
+      lastRunAt: '2026-07-13T12:00:00.000Z',
+      dependencyFailure: 'tabs_unavailable',
+    });
+
+    harness.tabsFailure.active = false;
+    await expect(harness.cleaner.runNow()).resolves.toMatchObject({
+      terminated: 1,
+      failed: 0,
+    });
+    expect(harness.cleaner.status()).toEqual({
+      enabled: true,
+      running: false,
+      lastRunAt: '2026-07-13T12:00:00.000Z',
+      dependencyFailure: null,
+    });
+  });
+
   it('cancels one timer and waits for in-flight cleanup without rescheduling', async () => {
     const gate = deferred<CleanupTerminationResult>();
     const harness = cleanerHarness({ terminate: vi.fn(() => gate.promise) });
@@ -233,11 +305,21 @@ function cleanerHarness({
 } = {}) {
   const clock = { value: START };
   const settings = { staleSessionCleanupHours: thresholdHours };
+  const settingsFailure = { active: false };
+  const tabsFailure = { active: false };
   const read = vi.fn(async ({ id }: { id: string }) => eligibleSnapshot(id));
   const cleaner = new StaleSessionCleaner({
-    settings: { snapshot: () => ({ ...settings }) },
+    settings: {
+      snapshot: () => {
+        if (settingsFailure.active) throw new Error('private settings path');
+        return { ...settings };
+      },
+    },
     tabs: {
-      snapshot: () => ({ structureRevision: 1, tabs: ids.map(tabRecord) }),
+      snapshot: () => {
+        if (tabsFailure.active) throw new Error('private tab store path');
+        return { structureRevision: 1, tabs: ids.map(tabRecord) };
+      },
     },
     eligibility: { read },
     sessions: { terminateIfStale: terminate },
@@ -246,7 +328,16 @@ function cleanerHarness({
     scheduler,
     now: () => clock.value,
   });
-  return { cleaner, scheduler, clock, settings, read, terminate };
+  return {
+    cleaner,
+    scheduler,
+    clock,
+    settings,
+    settingsFailure,
+    tabsFailure,
+    read,
+    terminate,
+  };
 }
 
 function eligibleSnapshot(id: string) {
