@@ -149,6 +149,43 @@ describe('CredentialStore bootstrap', () => {
     },
   );
 
+  it('zeros the injected bootstrap byte buffer after successful transfer', async () => {
+    const allocated: Uint8Array[] = [];
+    const { store, secureFile, hasher } = harness((length) => {
+      const buffer = new Uint8Array(length);
+      allocated.push(buffer);
+      return buffer;
+    });
+    secureFile.readResults.push(undefined);
+    secureFile.replaceResults.push({ state: 'committed' });
+    hasher.hashResults.push(HASH);
+
+    await store.initializeLocal('admin', SECRET_PATH, 12);
+
+    expect(allocated).toHaveLength(1);
+    expect(allocated[0]?.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it('zeros the injected bootstrap byte buffer after fatal decoding fails', async () => {
+    const allocated: Uint8Array[] = [];
+    const { store, secureFile, bootstrap } = harness((length) => {
+      const buffer = new Uint8Array(length);
+      allocated.push(buffer);
+      return buffer;
+    });
+    bootstrap.content = Buffer.from([
+      0xc3, 0x28, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61,
+    ]);
+    secureFile.readResults.push(undefined);
+
+    await expect(
+      store.initializeLocal('admin', SECRET_PATH, 12),
+    ).rejects.toBeInstanceOf(CredentialStoreError);
+
+    expect(allocated).toHaveLength(1);
+    expect(allocated[0]?.every((byte) => byte === 0)).toBe(true);
+  });
+
   it.each(['not_committed', 'committed_durability_uncertain'] as const)(
     'fails initialization for %s without becoming usable',
     async (state) => {
@@ -166,7 +203,11 @@ describe('CredentialStore bootstrap', () => {
   );
 
   it('contains hasher failures and invalid returned hashes before persistence', async () => {
-    for (const result of [new Error('password /secret/path'), 'invalid-hash']) {
+    for (const result of [
+      new Error('password /secret/path'),
+      'invalid-hash',
+      HASH.replace('$2b$', '$2y$'),
+    ]) {
       const { store, secureFile, hasher } = harness();
       secureFile.readResults.push(undefined);
       hasher.hashResults.push(result);
@@ -201,6 +242,10 @@ describe('CredentialStore existing records', () => {
     ['username mismatch', { ...record(), username: 'other' }],
     ['malformed hash', { ...record(), passwordHash: 'not-bcrypt' }],
     [
+      'unsupported 2y hash',
+      { ...record(), passwordHash: HASH.replace('$2b$', '$2y$') },
+    ],
+    [
       'low hash cost',
       { ...record(), passwordHash: HASH.replace('$12$', '$09$') },
     ],
@@ -228,14 +273,23 @@ describe('CredentialStore existing records', () => {
 });
 
 describe('CredentialStore verification and replacement', () => {
-  it('keeps JSON and Node inspection bounded and secret-free', async () => {
+  it('keeps all reflection and string representations bounded and secret-free', async () => {
     const { store, secureFile } = harness();
     secureFile.readResults.push(record());
     await store.initializeLocal('admin', SECRET_PATH, 12);
-    for (const representation of [JSON.stringify(store), inspect(store)]) {
+    expect(Reflect.ownKeys(store)).toEqual([]);
+    expect({ ...store }).toEqual({});
+    for (const representation of [
+      JSON.stringify(store),
+      inspect(store),
+      String(store),
+      JSON.stringify(Reflect.ownKeys(store)),
+      JSON.stringify({ ...store }),
+    ]) {
       expect(representation).not.toContain('admin');
       expect(representation).not.toContain(HASH);
       expect(representation).not.toContain('/data');
+      expect(representation).not.toContain('password-password');
     }
   });
   it.each([
@@ -338,7 +392,7 @@ describe('CredentialStore verification and replacement', () => {
   });
 });
 
-function harness() {
+function harness(bufferAllocator?: (length: number) => Uint8Array) {
   const secureFile = new ScriptedSecureJsonFile();
   const hasher = new ScriptedHasher();
   const bootstrap = new MemoryBootstrapFileSystem();
@@ -349,6 +403,7 @@ function harness() {
     bootstrapFileSystem: bootstrap,
     runtimeUid: UID,
     clock: () => new Date(NOW),
+    ...(bufferAllocator ? { bufferAllocator } : {}),
   });
   return { store, secureFile, hasher, bootstrap };
 }

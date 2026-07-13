@@ -15,7 +15,7 @@ const MAX_BOOTSTRAP_BYTES = 4_096;
 const MAX_PASSWORD_BYTES = 72;
 const MIN_PASSWORD_BYTES = 12;
 const GENERIC_ERROR_MESSAGE = 'Credential store operation failed';
-const BCRYPT_PATTERN = /^\$2[aby]\$(1[0-5])\$[./A-Za-z0-9]{53}$/;
+const BCRYPT_PATTERN = /^\$2[ab]\$(1[0-5])\$[./A-Za-z0-9]{53}$/;
 
 export interface PasswordHasher {
   hash(password: string, cost: number): Promise<string>;
@@ -51,6 +51,7 @@ export type CredentialStoreOptions = Readonly<{
   bootstrapFileSystem?: BootstrapSecretFileSystem;
   runtimeUid?: number;
   clock?: () => Date;
+  bufferAllocator?: (length: number) => Uint8Array;
 }>;
 
 type CredentialRecord = Readonly<{
@@ -77,16 +78,17 @@ export class CredentialStoreError extends Error {
 }
 
 export class CredentialStore {
-  private readonly authPath: string;
-  private readonly secureFile: SecureJsonFile;
-  private readonly hasher: PasswordHasher;
-  private readonly bootstrapFileSystem: BootstrapSecretFileSystem;
-  private readonly runtimeUid: number;
-  private readonly clock: () => Date;
-  private operationTail: Promise<void> = Promise.resolve();
-  private current: CredentialRecord | undefined;
-  private cost = 0;
-  private initializeAttempted = false;
+  readonly #authPath: string;
+  readonly #secureFile: SecureJsonFile;
+  readonly #hasher: PasswordHasher;
+  readonly #bootstrapFileSystem: BootstrapSecretFileSystem;
+  readonly #runtimeUid: number;
+  readonly #clock: () => Date;
+  readonly #bufferAllocator: (length: number) => Uint8Array;
+  #operationTail: Promise<void> = Promise.resolve();
+  #current: CredentialRecord | undefined;
+  #cost = 0;
+  #initializeAttempted = false;
 
   constructor(options: CredentialStoreOptions) {
     try {
@@ -99,13 +101,15 @@ export class CredentialStore {
       ) {
         throw new Error('invalid options');
       }
-      this.authPath = join(options.dataDir, AUTH_FILENAME);
-      this.secureFile = options.secureFile;
-      this.hasher = options.hasher ?? defaultHasher;
-      this.bootstrapFileSystem =
+      this.#authPath = join(options.dataDir, AUTH_FILENAME);
+      this.#secureFile = options.secureFile;
+      this.#hasher = options.hasher ?? defaultHasher;
+      this.#bootstrapFileSystem =
         options.bootstrapFileSystem ?? defaultBootstrapFileSystem;
-      this.runtimeUid = runtimeUid;
-      this.clock = options.clock ?? (() => new Date());
+      this.#runtimeUid = runtimeUid;
+      this.#clock = options.clock ?? (() => new Date());
+      this.#bufferAllocator =
+        options.bufferAllocator ?? ((length) => new Uint8Array(length));
     } catch {
       throw new CredentialStoreError();
     }
@@ -116,14 +120,14 @@ export class CredentialStore {
     passwordFile: string,
     cost: number,
   ): Promise<void> {
-    return this.enqueue(async () => {
-      if (this.initializeAttempted) throw new CredentialStoreError();
-      this.initializeAttempted = true;
+    return this.#enqueue(async () => {
+      if (this.#initializeAttempted) throw new CredentialStoreError();
+      this.#initializeAttempted = true;
       try {
         const normalizedUsername = normalizeUsername(username);
         validateCost(cost);
-        const persisted = await this.secureFile.read(
-          this.authPath,
+        const persisted = await this.#secureFile.read(
+          this.#authPath,
           MAX_SECURE_JSON_BYTES,
         );
         if (persisted !== undefined) {
@@ -131,28 +135,28 @@ export class CredentialStore {
           if (record.username !== normalizedUsername) {
             throw new Error('username mismatch');
           }
-          this.current = record;
-          this.cost = cost;
+          this.#current = record;
+          this.#cost = cost;
           return;
         }
 
         if (!isAbsolute(passwordFile)) throw new Error('invalid secret path');
-        const password = await this.readBootstrapPassword(passwordFile);
-        const passwordHash = await this.hasher.hash(password, cost);
+        const password = await this.#readBootstrapPassword(passwordFile);
+        const passwordHash = await this.#hasher.hash(password, cost);
         if (bcryptCost(passwordHash) !== cost) throw new Error('invalid hash');
         const record = makeRecord(
           normalizedUsername,
           passwordHash,
-          currentTimestamp(this.clock),
+          currentTimestamp(this.#clock),
         );
-        const result = await this.secureFile.replace(
-          this.authPath,
+        const result = await this.#secureFile.replace(
+          this.#authPath,
           record,
           0o600,
         );
         if (result.state !== 'committed') throw new Error('not durable');
-        this.current = record;
-        this.cost = cost;
+        this.#current = record;
+        this.#cost = cost;
       } catch {
         throw new CredentialStoreError();
       }
@@ -160,13 +164,13 @@ export class CredentialStore {
   }
 
   verify(username: string, password: string): Promise<boolean> {
-    if (!this.current) return Promise.reject(new CredentialStoreError());
+    if (!this.#current) return Promise.reject(new CredentialStoreError());
     if (!isValidPassword(password)) return Promise.resolve(false);
-    return this.enqueue(async () => {
-      const record = this.requireCurrent();
+    return this.#enqueue(async () => {
+      const record = this.#requireCurrent();
       let matches: boolean;
       try {
-        matches = await this.hasher.compare(password, record.passwordHash);
+        matches = await this.#hasher.compare(password, record.passwordHash);
       } catch {
         throw new CredentialStoreError();
       }
@@ -175,29 +179,29 @@ export class CredentialStore {
   }
 
   replacePassword(newPassword: string): Promise<ReplaceResult> {
-    if (!this.current) return Promise.reject(new CredentialStoreError());
+    if (!this.#current) return Promise.reject(new CredentialStoreError());
     if (!isValidPassword(newPassword)) {
       return Promise.reject(new CredentialStoreError());
     }
 
-    return this.enqueue(async () => {
-      const prior = this.requireCurrent();
+    return this.#enqueue(async () => {
+      const prior = this.#requireCurrent();
       try {
-        const passwordHash = await this.hasher.hash(newPassword, this.cost);
-        if (bcryptCost(passwordHash) !== this.cost) {
+        const passwordHash = await this.#hasher.hash(newPassword, this.#cost);
+        if (bcryptCost(passwordHash) !== this.#cost) {
           throw new Error('invalid hash');
         }
         const next = makeRecord(
           prior.username,
           passwordHash,
-          currentTimestamp(this.clock),
+          currentTimestamp(this.#clock),
         );
-        const result = await this.secureFile.replace(
-          this.authPath,
+        const result = await this.#secureFile.replace(
+          this.#authPath,
           next,
           0o600,
         );
-        if (result.state !== 'not_committed') this.current = next;
+        if (result.state !== 'not_committed') this.#current = next;
         return result;
       } catch {
         throw new CredentialStoreError();
@@ -213,33 +217,34 @@ export class CredentialStore {
     return 'CredentialStore {}';
   }
 
-  private requireCurrent(): CredentialRecord {
-    if (!this.current) throw new CredentialStoreError();
-    return this.current;
+  #requireCurrent(): CredentialRecord {
+    if (!this.#current) throw new CredentialStoreError();
+    return this.#current;
   }
 
-  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.operationTail.then(operation, operation);
-    this.operationTail = result.then(
+  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#operationTail.then(operation, operation);
+    this.#operationTail = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
   }
 
-  private async readBootstrapPassword(path: string): Promise<string> {
+  async #readBootstrapPassword(path: string): Promise<string> {
     let handle: BootstrapSecretHandle | undefined;
+    let buffer: Uint8Array | undefined;
     let bytes: Uint8Array | undefined;
     let failed = false;
     try {
-      handle = await this.bootstrapFileSystem.open(
+      handle = await this.#bootstrapFileSystem.open(
         path,
         constants.O_RDONLY | constants.O_NOFOLLOW,
       );
       const stat = await handle.stat();
       if (
         !stat.isFile() ||
-        (stat.uid !== 0 && stat.uid !== this.runtimeUid) ||
+        (stat.uid !== 0 && stat.uid !== this.#runtimeUid) ||
         (stat.mode & 0o022) !== 0 ||
         !Number.isSafeInteger(stat.size) ||
         stat.size < 0 ||
@@ -247,7 +252,14 @@ export class CredentialStore {
       ) {
         throw new Error('unsafe secret');
       }
-      bytes = await readBounded(handle, MAX_BOOTSTRAP_BYTES);
+      buffer = this.#bufferAllocator(MAX_BOOTSTRAP_BYTES + 1);
+      if (
+        !(buffer instanceof Uint8Array) ||
+        buffer.byteLength !== MAX_BOOTSTRAP_BYTES + 1
+      ) {
+        throw new Error('invalid buffer');
+      }
+      bytes = await readBounded(handle, buffer, MAX_BOOTSTRAP_BYTES);
     } catch {
       failed = true;
     }
@@ -256,20 +268,24 @@ export class CredentialStore {
     } catch {
       failed = true;
     }
-    if (failed || !bytes) throw new Error('secret read failed');
-    let password = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    if (password.endsWith('\r\n')) password = password.slice(0, -2);
-    else if (password.endsWith('\n')) password = password.slice(0, -1);
-    validatePassword(password);
-    return password;
+    try {
+      if (failed || !bytes) throw new Error('secret read failed');
+      let password = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      if (password.endsWith('\r\n')) password = password.slice(0, -2);
+      else if (password.endsWith('\n')) password = password.slice(0, -1);
+      validatePassword(password);
+      return password;
+    } finally {
+      buffer?.fill(0);
+    }
   }
 }
 
 async function readBounded(
   handle: BootstrapSecretHandle,
+  buffer: Uint8Array,
   maximumBytes: number,
 ): Promise<Uint8Array> {
-  const buffer = new Uint8Array(maximumBytes + 1);
   let offset = 0;
   while (offset < buffer.byteLength) {
     const { bytesRead } = await handle.read(

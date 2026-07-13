@@ -57,5 +57,26 @@ describe.sequential('CredentialStore real filesystem', () => {
     await expect(
       restarted.verify('other', 'integration-password'),
     ).resolves.toBe(false);
+
+    await expect(
+      restarted.replacePassword('replacement-password'),
+    ).resolves.toEqual({ state: 'committed' });
+    const replaced = await readFile(authPath, 'utf8');
+    expect(replaced).not.toContain('integration-password');
+    expect(replaced).not.toContain('replacement-password');
+    expect((await stat(authPath)).mode & 0o7777).toBe(0o600);
+
+    const replacedRestart = new CredentialStore({
+      dataDir,
+      secureFile: createSecureJsonFile(),
+    });
+    await replacedRestart.initializeLocal('admin', secretPath, 10);
+    await expect(
+      replacedRestart.verify('admin', 'integration-password'),
+    ).resolves.toBe(false);
+    await expect(
+      replacedRestart.verify('admin', 'replacement-password'),
+    ).resolves.toBe(true);
+    expect((await stat(authPath)).mode & 0o7777).toBe(0o600);
   });
 });
