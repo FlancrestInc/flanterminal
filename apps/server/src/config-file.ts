@@ -1,4 +1,3 @@
-import { Buffer } from 'node:buffer';
 import { constants } from 'node:fs';
 import * as fs from 'node:fs/promises';
 
@@ -41,7 +40,12 @@ const ALLOWED_CONFIG_KEYS = new Set([
 
 export interface ConfigFileHandle {
   stat(): Promise<{ size: number; isFile(): boolean }>;
-  readFile(): Promise<Uint8Array>;
+  read(
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: null,
+  ): Promise<{ bytesRead: number }>;
   close(): Promise<void>;
 }
 
@@ -72,9 +76,9 @@ export async function loadOptionalConfigFile(
     if (!stat.isFile() || stat.size > MAX_CONFIG_FILE_BYTES) {
       throw new Error('invalid file');
     }
-    const bytes = await handle.readFile();
-    if (bytes.byteLength > MAX_CONFIG_FILE_BYTES) throw new Error('oversized');
-    const parsed: unknown = JSON.parse(Buffer.from(bytes).toString('utf8'));
+    const bytes = await readBounded(handle);
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    const parsed: unknown = JSON.parse(text);
     if (!isPlainObject(parsed)) throw new Error('invalid document');
     for (const key of Object.keys(parsed)) {
       if (SECRET_KEY_PATTERN.test(key) || !ALLOWED_CONFIG_KEYS.has(key)) {
@@ -87,6 +91,23 @@ export async function loadOptionalConfigFile(
   } finally {
     await handle?.close().catch(() => undefined);
   }
+}
+
+async function readBounded(handle: ConfigFileHandle): Promise<Uint8Array> {
+  const buffer = new Uint8Array(MAX_CONFIG_FILE_BYTES + 1);
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      offset,
+      buffer.byteLength - offset,
+      null,
+    );
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  if (offset > MAX_CONFIG_FILE_BYTES) throw new Error('oversized');
+  return buffer.subarray(0, offset);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
