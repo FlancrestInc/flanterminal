@@ -67,15 +67,23 @@ describe('SettingsView', () => {
       'step',
       '1000',
     );
-    fireEvent.change(screen.getByLabelText('Theme'), {
-      target: { value: 'ubuntu' },
-    });
+    expect(
+      screen.getByRole('radiogroup', { name: 'Theme' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Dark' })).toBeChecked();
+    fireEvent.click(screen.getByRole('radio', { name: 'Ubuntu' }));
+    expect(screen.getByRole('radio', { name: 'Ubuntu' })).toBeChecked();
+    expect(
+      screen.getByRole('radiogroup', { name: 'Cursor style' }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: 'Bar' }));
     fireEvent.click(screen.getByRole('checkbox', { name: 'Cursor blinking' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
     await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
     expect(onSave.mock.calls[0]![0]).toEqual({
       ...response.settings,
       theme: 'ubuntu',
+      cursorStyle: 'bar',
       cursorBlink: false,
     });
     expect(screen.queryByLabelText('Current password')).not.toBeInTheDocument();
@@ -129,7 +137,12 @@ describe('SettingsView', () => {
       <SettingsView
         response={{
           ...response,
-          settings: { ...response.settings, fontSize: 16 },
+          settings: {
+            ...response.settings,
+            fontSize: 16,
+            theme: 'light',
+            cursorStyle: 'underline',
+          },
         }}
         busy
         error="Unable to save settings."
@@ -139,6 +152,10 @@ describe('SettingsView', () => {
       />,
     );
     expect(screen.getByLabelText('Font size')).toHaveValue(16);
+    expect(screen.getByRole('radio', { name: 'Light' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'Light' })).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'Underline' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'Underline' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Saving...' })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Unable to save settings.',

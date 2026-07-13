@@ -470,4 +470,100 @@ describe('useTerminalSocket', () => {
     act(() => restored.result.current.reconnect());
     expect(restored.factory).toHaveBeenCalledOnce();
   });
+
+  it('cancels an automatic retry when mode changes to manual and ignores its stale callback', async () => {
+    const sockets: FakeSocket[] = [];
+    const factory = vi.fn(() => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    });
+    const hook = renderHook(
+      ({ behavior }: { behavior: 'automatic' | 'manual' }) =>
+        useTerminalSocket(config, DYNAMIC_SESSION_ID, {
+          socketFactory: factory,
+          reconnectBehavior: behavior,
+        }),
+      {
+        initialProps: {
+          behavior: 'automatic' as 'automatic' | 'manual',
+        },
+      },
+    );
+
+    act(() => sockets[0]!.temporaryClose());
+    expect(hook.result.current.status).toBe('reconnecting');
+    hook.rerender({ behavior: 'manual' });
+    await act(async () => Promise.resolve());
+    expect(hook.result.current.status).toBe('disconnected');
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(factory).toHaveBeenCalledOnce();
+    act(() => hook.result.current.reconnect());
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(sockets[1]!.sent).toEqual([]);
+  });
+
+  it('resumes one connection when a manual network suspension changes to automatic', () => {
+    const sockets: FakeSocket[] = [];
+    const factory = vi.fn(() => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    });
+    const hook = renderHook(
+      ({ behavior }: { behavior: 'automatic' | 'manual' }) =>
+        useTerminalSocket(config, DYNAMIC_SESSION_ID, {
+          socketFactory: factory,
+          reconnectBehavior: behavior,
+        }),
+      {
+        initialProps: {
+          behavior: 'manual' as 'automatic' | 'manual',
+        },
+      },
+    );
+
+    act(() => sockets[0]!.temporaryClose());
+    expect(hook.result.current.status).toBe('disconnected');
+    hook.rerender({ behavior: 'automatic' });
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.status).toBe('connecting');
+    act(() => vi.runAllTimers());
+    expect(factory).toHaveBeenCalledTimes(2);
+  });
+
+  it('never reconnects an invalid auth epoch when reconnect mode changes', () => {
+    const onAuthenticationRequired = vi.fn();
+    const sockets: FakeSocket[] = [];
+    const factory = vi.fn(() => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    });
+    const hook = renderHook(
+      ({ behavior }: { behavior: 'automatic' | 'manual' }) =>
+        useTerminalSocket(config, DYNAMIC_SESSION_ID, {
+          socketFactory: factory,
+          onAuthenticationRequired,
+          reconnectBehavior: behavior,
+        }),
+      {
+        initialProps: {
+          behavior: 'manual' as 'automatic' | 'manual',
+        },
+      },
+    );
+
+    act(() =>
+      sockets[0]!.dispatchEvent(
+        new CloseEvent('close', { code: AUTHENTICATION_REQUIRED }),
+      ),
+    );
+    hook.rerender({ behavior: 'automatic' });
+    act(() => vi.runAllTimers());
+    expect(factory).toHaveBeenCalledOnce();
+    expect(onAuthenticationRequired).toHaveBeenCalledOnce();
+    act(() => hook.result.current.reconnect());
+    expect(factory).toHaveBeenCalledOnce();
+  });
 });

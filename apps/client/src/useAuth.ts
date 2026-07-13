@@ -12,6 +12,7 @@ import {
   privateRequestUrl,
   type PrivateRequestBoundary,
 } from './private-request-authority.js';
+import { suspendActiveTerminalAuthLifecycles } from './terminal-auth-suspension.js';
 
 const REFRESH_LEAD_MS = 60_000;
 // Revalidate before the server's five-minute minimum application idle bound.
@@ -135,6 +136,7 @@ export function useAuth(
   const authenticationRequired = useCallback(() => {
     const previous = bootstrapRef.current;
     if (previous === null) return;
+    suspendActiveTerminalAuthLifecycles();
     cancelRefresh();
     operationRef.current?.abort();
     operationRef.current = null;

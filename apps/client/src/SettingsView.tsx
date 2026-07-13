@@ -70,124 +70,131 @@ export function SettingsView({
       </header>
       <div className="settings-scroll">
         <form className="settings-form" onSubmit={submit}>
-          <SettingsSection title="Appearance">
-            <SelectField
-              label="Theme"
-              value={form.theme}
-              options={limits.themes}
-              onChange={(value) =>
-                set('theme', value as WorkspaceSettings['theme'])
-              }
-            />
-            <SelectField
-              label="Font"
-              value={form.fontFamily}
-              options={limits.fontFamilies}
-              labels={{
-                'jetbrains-mono-nerd': 'JetBrainsMono Nerd Font',
-                'system-monospace': 'System monospace',
-              }}
-              onChange={(value) =>
-                set('fontFamily', value as WorkspaceSettings['fontFamily'])
-              }
-            />
-            <NumberField
-              label="Font size"
-              value={form.fontSize}
-              limit={limits.fontSize}
-              onChange={(value) => set('fontSize', value)}
-            />
-            <NumberField
-              label="Line height"
-              value={form.lineHeight}
-              limit={limits.lineHeight}
-              onChange={(value) => set('lineHeight', value)}
-            />
-            <NumberField
-              label="Letter spacing"
-              value={form.letterSpacing}
-              limit={limits.letterSpacing}
-              onChange={(value) => set('letterSpacing', value)}
-            />
-            <SelectField
-              label="Cursor style"
-              value={form.cursorStyle}
-              options={limits.cursorStyles}
-              onChange={(value) =>
-                set('cursorStyle', value as WorkspaceSettings['cursorStyle'])
-              }
-            />
-            <ToggleField
-              label="Cursor blinking"
-              checked={form.cursorBlink}
-              onChange={(value) => set('cursorBlink', value)}
-            />
-            <SelectField
-              label="Bell"
-              value={form.bellBehavior}
-              options={limits.bellBehaviors}
-              onChange={(value) =>
-                set('bellBehavior', value as WorkspaceSettings['bellBehavior'])
-              }
-            />
-          </SettingsSection>
+          <fieldset className="settings-fieldset" disabled={busy}>
+            <SettingsSection title="Appearance">
+              <SegmentedField
+                label="Theme"
+                name="theme"
+                value={form.theme}
+                options={limits.themes}
+                onChange={(value) =>
+                  set('theme', value as WorkspaceSettings['theme'])
+                }
+              />
+              <SelectField
+                label="Font"
+                value={form.fontFamily}
+                options={limits.fontFamilies}
+                labels={{
+                  'jetbrains-mono-nerd': 'JetBrainsMono Nerd Font',
+                  'system-monospace': 'System monospace',
+                }}
+                onChange={(value) =>
+                  set('fontFamily', value as WorkspaceSettings['fontFamily'])
+                }
+              />
+              <NumberField
+                label="Font size"
+                value={form.fontSize}
+                limit={limits.fontSize}
+                onChange={(value) => set('fontSize', value)}
+              />
+              <NumberField
+                label="Line height"
+                value={form.lineHeight}
+                limit={limits.lineHeight}
+                onChange={(value) => set('lineHeight', value)}
+              />
+              <NumberField
+                label="Letter spacing"
+                value={form.letterSpacing}
+                limit={limits.letterSpacing}
+                onChange={(value) => set('letterSpacing', value)}
+              />
+              <SegmentedField
+                label="Cursor style"
+                name="cursor-style"
+                value={form.cursorStyle}
+                options={limits.cursorStyles}
+                onChange={(value) =>
+                  set('cursorStyle', value as WorkspaceSettings['cursorStyle'])
+                }
+              />
+              <ToggleField
+                label="Cursor blinking"
+                checked={form.cursorBlink}
+                onChange={(value) => set('cursorBlink', value)}
+              />
+              <SelectField
+                label="Bell"
+                value={form.bellBehavior}
+                options={limits.bellBehaviors}
+                onChange={(value) =>
+                  set(
+                    'bellBehavior',
+                    value as WorkspaceSettings['bellBehavior'],
+                  )
+                }
+              />
+            </SettingsSection>
 
-          <SettingsSection title="Terminal behavior">
-            <NumberField
-              label="Scrollback lines"
-              value={form.scrollback}
-              limit={limits.scrollback}
-              onChange={(value) => set('scrollback', value)}
-            />
-            <SelectField
-              label="Reconnect"
-              value={form.reconnectBehavior}
-              options={limits.reconnectBehaviors}
-              onChange={(value) =>
-                set(
-                  'reconnectBehavior',
-                  value as WorkspaceSettings['reconnectBehavior'],
-                )
-              }
-            />
-            <SelectField
-              label="Workspace shortcuts"
-              value={form.workspaceShortcuts}
-              options={limits.workspaceShortcutModes}
-              onChange={(value) =>
-                set(
-                  'workspaceShortcuts',
-                  value as WorkspaceSettings['workspaceShortcuts'],
-                )
-              }
-            />
-            <ToggleField
-              label="Create first tab automatically"
-              checked={form.automaticTabCreation}
-              onChange={(value) => set('automaticTabCreation', value)}
-            />
-          </SettingsSection>
+            <SettingsSection title="Terminal behavior">
+              <NumberField
+                label="Scrollback lines"
+                value={form.scrollback}
+                limit={limits.scrollback}
+                onChange={(value) => set('scrollback', value)}
+              />
+              <SelectField
+                label="Reconnect"
+                value={form.reconnectBehavior}
+                options={limits.reconnectBehaviors}
+                onChange={(value) =>
+                  set(
+                    'reconnectBehavior',
+                    value as WorkspaceSettings['reconnectBehavior'],
+                  )
+                }
+              />
+              <SelectField
+                label="Workspace shortcuts"
+                value={form.workspaceShortcuts}
+                options={limits.workspaceShortcutModes}
+                onChange={(value) =>
+                  set(
+                    'workspaceShortcuts',
+                    value as WorkspaceSettings['workspaceShortcuts'],
+                  )
+                }
+              />
+              <ToggleField
+                label="Create first tab automatically"
+                checked={form.automaticTabCreation}
+                onChange={(value) => set('automaticTabCreation', value)}
+              />
+            </SettingsSection>
 
-          <SettingsSection title="Session defaults">
-            <SelectField
-              label="Default shell"
-              value={form.defaultShell}
-              options={response.allowedShells}
-              onChange={(value) => set('defaultShell', value)}
-            />
-            <NumberField
-              label="tmux history lines"
-              value={form.tmuxHistoryLimit}
-              limit={limits.tmuxHistoryLimit}
-              onChange={(value) => set('tmuxHistoryLimit', value)}
-            />
-            <NumberField
-              label="Stale cleanup hours"
-              value={form.staleSessionCleanupHours}
-              limit={limits.staleSessionCleanupHours}
-              onChange={(value) => set('staleSessionCleanupHours', value)}
-            />
-          </SettingsSection>
+            <SettingsSection title="Session defaults">
+              <SelectField
+                label="Default shell"
+                value={form.defaultShell}
+                options={response.allowedShells}
+                onChange={(value) => set('defaultShell', value)}
+              />
+              <NumberField
+                label="tmux history lines"
+                value={form.tmuxHistoryLimit}
+                limit={limits.tmuxHistoryLimit}
+                onChange={(value) => set('tmuxHistoryLimit', value)}
+              />
+              <NumberField
+                label="Stale cleanup hours"
+                value={form.staleSessionCleanupHours}
+                limit={limits.staleSessionCleanupHours}
+                onChange={(value) => set('staleSessionCleanupHours', value)}
+              />
+            </SettingsSection>
+          </fieldset>
 
           {error ? (
             <p className="settings-error" role="alert">
@@ -282,6 +289,42 @@ function SelectField({
         ))}
       </select>
     </label>
+  );
+}
+
+function SegmentedField({
+  label,
+  name,
+  value,
+  options,
+  labels = {},
+  onChange,
+}: Readonly<{
+  label: string;
+  name: string;
+  value: string;
+  options: readonly string[];
+  labels?: Readonly<Record<string, string>>;
+  onChange: (value: string) => void;
+}>) {
+  return (
+    <fieldset className="settings-segmented-field" role="radiogroup">
+      <legend>{label}</legend>
+      <div className="settings-segments">
+        {options.map((option) => (
+          <label key={option}>
+            <input
+              type="radio"
+              name={name}
+              value={option}
+              checked={value === option}
+              onChange={() => onChange(option)}
+            />
+            <span>{labels[option] ?? humanize(option)}</span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
   );
 }
 

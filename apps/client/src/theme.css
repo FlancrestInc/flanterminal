@@ -522,6 +522,13 @@ button {
   margin: 0 auto;
 }
 
+.settings-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 .password-form {
   margin-top: 28px;
 }
@@ -559,6 +566,84 @@ button {
   color: var(--ui-muted);
   font-size: 12px;
   letter-spacing: 0;
+}
+
+.settings-segmented-field {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--ui-muted);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.settings-segmented-field legend {
+  margin-bottom: 6px;
+  padding: 0;
+}
+
+.settings-segments {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-height: 36px;
+}
+
+.settings-segments label {
+  position: relative;
+  min-width: 0;
+}
+
+.settings-segments input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.settings-segments span {
+  display: flex;
+  min-width: 0;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-right: 0;
+  background: var(--ui-surface);
+  color: var(--ui-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-segments label:first-child span {
+  border-radius: 3px 0 0 3px;
+}
+
+.settings-segments label:last-child span {
+  border-right: 1px solid var(--ui-border);
+  border-radius: 0 3px 3px 0;
+}
+
+.settings-segments input:checked + span {
+  position: relative;
+  border-color: var(--ui-accent);
+  background: var(--ui-raised);
+  color: var(--ui-text);
+  box-shadow: inset 0 -2px var(--ui-accent);
+}
+
+.settings-segments input:focus-visible + span {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+.settings-segments input:disabled + span {
+  opacity: 0.58;
 }
 
 .settings-field input,
@@ -624,7 +709,9 @@ button {
 }
 
 .settings-actions button:disabled,
-.settings-field input:disabled {
+.settings-field input:disabled,
+.settings-field select:disabled,
+.settings-toggle input:disabled {
   opacity: 0.58;
 }
 
@@ -820,6 +907,11 @@ button {
   .settings-field input,
   .settings-field select,
   .settings-actions button {
+    min-height: 44px;
+  }
+
+  .settings-segments,
+  .settings-segments span {
     min-height: 44px;
   }
 

@@ -13,38 +13,91 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { useEffect } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SettingsApi } from './settings-api.js';
+import type { TabsApi } from './tabs-api.js';
+import type { BrowserSocket } from './useTerminalSocket.js';
 
-vi.mock('./App.js', () => ({
-  App: ({
-    settingsBusy,
-    settingsError,
-    onChangePassword,
-  }: {
-    settingsBusy: boolean;
-    settingsError: string | null;
-    onChangePassword?: (current: string, replacement: string) => Promise<void>;
-  }) => (
-    <div>
-      Default workspace {settingsBusy ? 'busy' : 'idle'} {settingsError}
-      <button
-        type="button"
-        onClick={() => void onChangePassword?.('current', 'replacement')}
-      >
-        Change local password
-      </button>
-    </div>
-  ),
-  StartupState: ({ state }: { state: 'loading' | 'error' }) => (
-    <main role={state === 'loading' ? 'status' : 'alert'}>
-      {state === 'loading' ? 'Loading terminal' : 'Unable to start terminal.'}
-    </main>
-  ),
+const terminalProbe = vi.hoisted(() => ({
+  enabled: false,
+  factory: vi.fn(),
 }));
+
+vi.mock('./App.js', async () => {
+  const { useTerminalSocket } = await import('./useTerminalSocket.js');
+  function TerminalProbe({
+    config,
+    api,
+  }: {
+    config: ClientConfig;
+    api: TabsApi;
+  }) {
+    const controller = useTerminalSocket(
+      config,
+      '123e4567-e89b-42d3-a456-426614174000',
+      {
+        socketFactory: terminalProbe.factory,
+        reconnectBehavior: 'manual',
+      },
+    );
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => void api.list().catch(() => undefined)}
+        >
+          Expire terminal auth
+        </button>
+        <button type="button" onClick={controller.reconnect}>
+          Reconnect terminal
+        </button>
+      </div>
+    );
+  }
+  return {
+    App: ({
+      config,
+      api,
+      settingsBusy,
+      settingsError,
+      onChangePassword,
+    }: {
+      config: ClientConfig;
+      api: TabsApi;
+      settingsBusy: boolean;
+      settingsError: string | null;
+      onChangePassword?: (
+        current: string,
+        replacement: string,
+      ) => Promise<void>;
+    }) =>
+      terminalProbe.enabled ? (
+        <TerminalProbe config={config} api={api} />
+      ) : (
+        <div>
+          Default workspace {settingsBusy ? 'busy' : 'idle'} {settingsError}
+          <button
+            type="button"
+            onClick={() => void onChangePassword?.('current', 'replacement')}
+          >
+            Change local password
+          </button>
+        </div>
+      ),
+    StartupState: ({ state }: { state: 'loading' | 'error' }) => (
+      <main role={state === 'loading' ? 'status' : 'alert'}>
+        {state === 'loading' ? 'Loading terminal' : 'Unable to start terminal.'}
+      </main>
+    ),
+  };
+});
 
 import type { AuthApi } from './auth-api.js';
 import { AuthenticatedRoot } from './AuthenticatedRoot.js';
+import {
+  resetTerminalAuthSuspensionsForTests,
+  terminalAuthSuspensionCountsForTests,
+} from './terminal-auth-suspension.js';
 import './test/setup.js';
 
 const session: AuthBootstrap = {
@@ -100,6 +153,29 @@ function settingsApi(): SettingsApi {
   };
 }
 
+function manualSettingsApi(): SettingsApi {
+  const manual = {
+    ...settingsResponse,
+    settings: {
+      ...settingsResponse.settings,
+      reconnectBehavior: 'manual' as const,
+    },
+  };
+  return {
+    load: vi.fn(async () => manual),
+    replace: vi.fn(async (settings) => ({ ...manual, settings })),
+  };
+}
+
+class ProbeSocket extends EventTarget implements BrowserSocket {
+  readyState = 0;
+  send = vi.fn();
+  close = vi.fn(() => {
+    this.readyState = 3;
+    this.dispatchEvent(new CloseEvent('close', { code: 1000 }));
+  });
+}
+
 function api(result: AuthBootstrap = session): AuthApi {
   return {
     bootstrap: vi.fn(async () => result),
@@ -111,6 +187,11 @@ function api(result: AuthBootstrap = session): AuthApi {
 }
 
 describe('AuthenticatedRoot', () => {
+  beforeEach(() => {
+    terminalProbe.enabled = false;
+    terminalProbe.factory.mockReset();
+    resetTerminalAuthSuspensionsForTests();
+  });
   it('loads private config only after authentication and mounts the workspace', async () => {
     const loadConfig = vi.fn(async () => config);
     render(
@@ -257,5 +338,48 @@ describe('AuthenticatedRoot', () => {
       await screen.findByText(/Default workspace busy/),
     ).toBeInTheDocument();
     act(() => release());
+  });
+
+  it('keeps a manual terminal suspended after private HTTP auth loss and login restoration', async () => {
+    terminalProbe.enabled = true;
+    terminalProbe.factory.mockImplementation(() => new ProbeSocket());
+    const fetchImpl = vi.fn(async () =>
+      Response.json({ error: 'authentication_required' }, { status: 401 }),
+    );
+    render(
+      <AuthenticatedRoot
+        api={api()}
+        fetchImpl={fetchImpl}
+        loadConfig={vi.fn(async () => config)}
+        settingsApi={manualSettingsApi()}
+      />,
+    );
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Expire terminal auth' }),
+    );
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Username'), {
+      target: { value: 'operator' },
+    });
+    fireEvent.change(screen.getByLabelText('Password'), {
+      target: { value: 'password' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await screen.findByRole('button', { name: 'Reconnect terminal' });
+    await waitFor(() =>
+      expect(terminalAuthSuspensionCountsForTests()).toEqual({
+        activeIds: 1,
+        registrations: 1,
+        suspensions: 1,
+      }),
+    );
+
+    expect(terminalProbe.factory).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect terminal' }));
+    expect(terminalProbe.factory).toHaveBeenCalledTimes(2);
+    expect(terminalAuthSuspensionCountsForTests().suspensions).toBe(0);
   });
 });

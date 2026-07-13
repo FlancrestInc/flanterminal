@@ -11,6 +11,7 @@ services:
       APP_BIND_HOST: 0.0.0.0
       APP_BASE_PATH: ${E2E_APP_BASE_PATH:-/}
       APP_PUBLIC_URL: http://localhost:3000
+      AUTH_MODE: none
       DEFAULT_SHELL: /bin/bash
       DEFAULT_FONT_SIZE: 14
       XTERM_SCROLLBACK: 10000
