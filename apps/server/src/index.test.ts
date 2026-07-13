@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   createProductionRuntime,
+  createProductionRuntimeMetrics,
   createServerLifecycle,
   initializeProductionAuthentication,
   registerShutdownSignals,
@@ -283,6 +284,26 @@ describe('server lifecycle', () => {
 });
 
 describe('production composition', () => {
+  it('reports active runtime bridges instead of retained stopped tab metadata', () => {
+    const retainedStoppedTabs = Array.from({ length: 7 }, (_, position) => ({
+      id: `stopped-${position}`,
+      desiredState: 'stopped' as const,
+    }));
+    const registry = { registeredCount: vi.fn(() => 2) };
+    const sockets = { connectedCount: vi.fn(() => 3) };
+
+    const metrics = createProductionRuntimeMetrics({
+      registry,
+      sockets,
+    });
+
+    expect(retainedStoppedTabs).toHaveLength(7);
+    expect(metrics.activeSessionCount()).toBe(2);
+    expect(metrics.connectedWebSocketCount()).toBe(3);
+    expect(registry.registeredCount).toHaveBeenCalledOnce();
+    expect(sockets.connectedCount).toHaveBeenCalledOnce();
+  });
+
   it('constructs Cloudflare authentication without creating or reading local credentials', async () => {
     const createCredentialStore = vi.fn();
     const createCloudflareAccessProvider = vi.fn(() => ({}) as never);

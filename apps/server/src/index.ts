@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { ActivityTracker } from './activity-tracker.js';
 import { AdminService } from './admin-service.js';
-import { createApp } from './app.js';
+import { createApp, type RuntimeMetrics } from './app.js';
 import {
   createWebSocketUpgradeAuthenticator,
   type WebSocketUpgradeAuthenticator,
@@ -697,6 +697,16 @@ export async function initializeProductionAuthentication(
   });
 }
 
+export function createProductionRuntimeMetrics(sources: {
+  registry: Readonly<{ registeredCount(): number }>;
+  sockets: Readonly<{ connectedCount(): number }>;
+}): RuntimeMetrics {
+  return Object.freeze({
+    activeSessionCount: () => sources.registry.registeredCount(),
+    connectedWebSocketCount: () => sources.sockets.connectedCount(),
+  });
+}
+
 class DeferredCleanupPort {
   private target: StaleSessionCleaner | undefined;
 
@@ -862,11 +872,10 @@ const defaultProductionRuntimeFactory: ProductionRuntimeFactory = {
     const app = createApp({
       config: context.config,
       readiness: { isReady: () => services.runtimeReady?.() ?? false },
-      metrics: {
-        activeSessionCount: () => tabs.store.snapshot().tabs.length,
-        connectedWebSocketCount: () =>
-          services.websocketAuthIndex.connectedCount(),
-      },
+      metrics: createProductionRuntimeMetrics({
+        registry: services.registry,
+        sockets: services.websocketAuthIndex,
+      }),
       clientDist: resolve(
         dirname(fileURLToPath(import.meta.url)),
         '../../client/dist',
