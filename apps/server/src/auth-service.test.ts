@@ -338,6 +338,95 @@ describe('AuthService', () => {
     });
   });
 
+  it('reserves the original login slot before synchronous verifier reentry', async () => {
+    let reenter = false;
+    let reentered = false;
+    let byte = 1;
+    const settled: string[] = [];
+    let reentrantBootstrap!: Promise<unknown>;
+    let reentrantLogin!: Promise<Awaited<ReturnType<AuthService['login']>>>;
+    const credentials = {
+      verify: vi.fn(() => {
+        if (reenter && !reentered) {
+          reentered = true;
+          reentrantBootstrap = service
+            .bootstrap({ type: 'none' })
+            .then((result) => (settled.push('bootstrap'), result));
+          reentrantLogin = service
+            .login({ ...login(), address: '127.0.0.4' })
+            .then((result) => (settled.push('reentrant'), result));
+        }
+        return true;
+      }),
+      replacePassword: vi.fn(),
+    };
+    const service = new AuthService({
+      mode: 'local',
+      clock: () => 0,
+      randomBytes: (size) => Buffer.alloc(size, byte++),
+      credentialStore: credentials,
+      csrfService: new CsrfService({
+        randomBytes: (size) => Buffer.alloc(size, byte++),
+      }),
+      rateLimiter: { consume: vi.fn(() => true), resetAddress: vi.fn() },
+      idleDurationMs: 100,
+      absoluteDurationMs: 1000,
+      maxSessions: 2,
+    });
+    const firstSeed = await service.login(login());
+    const secondSeed = await service.login({
+      ...login(),
+      address: '127.0.0.2',
+    });
+    const revoked = vi.fn();
+    service.onRevoked(revoked);
+    let unhandledRejections = 0;
+    const onUnhandled = () => {
+      unhandledRejections += 1;
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      reenter = true;
+      const original = service
+        .login({ ...login(), address: '127.0.0.3' })
+        .then((result) => (settled.push('original'), result));
+      const [originalResult, reentrantResult] = await Promise.all([
+        original,
+        reentrantLogin,
+        reentrantBootstrap,
+      ]).then(([outer, inner]) => [outer, inner] as const);
+      await flushRejectionEvents();
+
+      expect(settled).toEqual(['original', 'bootstrap', 'reentrant']);
+      expect(service.authenticateCookie(firstSeed.cookieValue)).toBeUndefined();
+      expect(
+        service.authenticateCookie(secondSeed.cookieValue),
+      ).toBeUndefined();
+      expect(
+        service.authenticateCookie(originalResult.cookieValue),
+      ).toBeDefined();
+      expect(
+        service.authenticateCookie(reentrantResult.cookieValue),
+      ).toBeDefined();
+      expect(revoked.mock.calls).toEqual([
+        [expect.any(String), 'capacity'],
+        [expect.any(String), 'capacity'],
+      ]);
+      expect(unhandledRejections).toBe(0);
+
+      await expect(
+        service.login({ ...login(), address: '127.0.0.5' }),
+      ).resolves.toMatchObject({
+        bootstrap: { authenticated: true, mode: 'local' },
+      });
+      expect(credentials.verify).toHaveBeenCalledTimes(5);
+      expect(revoked).toHaveBeenCalledTimes(3);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('bounds bootstrap slots behind an unresolved admitted login', async () => {
     const h = setup('local', { maxSessions: 1 });
     const verification = deferred<boolean>();

@@ -14,7 +14,7 @@ import {
 } from './auth-types.js';
 
 type Credentials = {
-  verify(username: string, password: string): Promise<boolean>;
+  verify(username: string, password: string): boolean | Promise<boolean>;
   replacePassword(password: string): Promise<ReplaceResult>;
 };
 type Limiter = {
@@ -184,25 +184,37 @@ export class AuthService {
       return Promise.resolve(localLoginFailure());
     }
     this.#pendingLogins += 1;
-    let verification: Promise<VerificationOutcome>;
+    const verification = verificationOutcomeBridge();
+    let result: Promise<AuthBootstrapResult>;
+    try {
+      result = this.#reserveLoginSlot(
+        verification.promise,
+        label,
+        address,
+        releaseEstablishment,
+      );
+    } catch {
+      verification.fail();
+      this.#pendingLogins -= 1;
+      releaseEstablishment();
+      return Promise.reject(new AuthServiceError());
+    }
     try {
       const credentialVerification = this.#credentials.verify(
         input.username,
         input.password,
       );
-      verification = Promise.resolve(credentialVerification).then(
-        fulfilledVerification,
-        failedVerification,
-      );
+      if (typeof credentialVerification === 'boolean')
+        verification.fulfill(credentialVerification);
+      else
+        void credentialVerification.then(
+          verification.fulfill,
+          verification.fail,
+        );
     } catch {
-      verification = Promise.resolve(FAILED_VERIFICATION);
+      verification.fail();
     }
-    return this.#reserveLoginSlot(
-      verification,
-      label,
-      address,
-      releaseEstablishment,
-    );
+    return result;
   }
   authenticateCookie(
     rawCookie: string | undefined,
@@ -590,6 +602,21 @@ function fulfilledVerification(valid: boolean): VerificationOutcome {
 }
 function failedVerification(): VerificationOutcome {
   return FAILED_VERIFICATION;
+}
+function verificationOutcomeBridge(): Readonly<{
+  promise: Promise<VerificationOutcome>;
+  fulfill: (valid: boolean) => void;
+  fail: () => void;
+}> {
+  let resolve!: (outcome: VerificationOutcome) => void;
+  const promise = new Promise<VerificationOutcome>((accept) => {
+    resolve = accept;
+  });
+  return frozen({
+    promise,
+    fulfill: (valid: boolean) => resolve(fulfilledVerification(valid)),
+    fail: () => resolve(failedVerification()),
+  });
 }
 function frozen<T>(v: T): T {
   return Object.freeze(v);
