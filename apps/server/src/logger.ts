@@ -33,17 +33,40 @@ const recognizedEvents = new Set([
   'terminal_setup_failed',
   'terminal_write_failed',
 ]);
-const safeSessionIdPattern = /^[A-Za-z0-9_-]{1,128}$/;
-const safeTokenPattern = /^[a-z][a-z0-9_]{0,63}$/;
+const allowedCategories = new Set([
+  'invalid_request',
+  'origin_forbidden',
+  'tab_not_found',
+  'session_limit',
+  'order_conflict',
+  'invalid_session_state',
+  'json_required',
+  'operation_failed',
+  'authentication_required',
+  'authentication_failed',
+  'csrf_invalid',
+  'rate_limited',
+  'password_invalid',
+  'settings_invalid',
+  'durability_uncertain',
+  'cleanup_disabled',
+  'binary_payload',
+  'payload_too_large',
+  'invalid_json',
+  'invalid_message',
+  'session_mismatch',
+  'cleanup_failed',
+]);
+const safeSessionIdPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const safeBindHostPattern = /^[A-Za-z0-9.:[\]_-]{1,255}$/;
 const safeBasePathPattern = /^\/(?:[A-Za-z0-9._~-]+\/?)*$/;
 const identityHashPattern = /^sha256:[a-f0-9]{64}$/;
 
 function sanitizeMetadata(metadata: LifecycleMetadata): LifecycleMetadata {
   const sanitized = Object.create(null) as Record<string, unknown>;
-  copyString(metadata, sanitized, 'sessionId', safeSessionIdPattern, 128);
-  copyString(metadata, sanitized, 'category', safeTokenPattern, 64);
-  copyString(metadata, sanitized, 'reason', safeTokenPattern, 64);
+  copyString(metadata, sanitized, 'sessionId', safeSessionIdPattern, 36);
+  copyAllowedString(metadata, sanitized, 'category', allowedCategories);
   copyInteger(metadata, sanitized, 'exitCode', -2_147_483_648, 2_147_483_647);
   copyInteger(metadata, sanitized, 'signal', 0, 2_147_483_647);
   copyInteger(
@@ -60,6 +83,16 @@ function sanitizeMetadata(metadata: LifecycleMetadata): LifecycleMetadata {
   copyString(metadata, sanitized, 'basePath', safeBasePathPattern, 256);
   copyString(metadata, sanitized, 'identityHash', identityHashPattern, 71);
   return sanitized;
+}
+
+function copyAllowedString(
+  source: LifecycleMetadata,
+  target: Record<string, unknown>,
+  key: string,
+  allowed: ReadonlySet<string>,
+): void {
+  const value = readMetadata(source, key);
+  if (typeof value === 'string' && allowed.has(value)) target[key] = value;
 }
 
 function copyString(

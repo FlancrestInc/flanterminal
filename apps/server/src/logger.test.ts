@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createLifecycleLogger } from './logger.js';
 
+const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
+
 describe('createLifecycleLogger', () => {
   it('emits only validated operational metadata for recognized lifecycle events', () => {
     const capture = logCapture();
@@ -15,9 +17,8 @@ describe('createLifecycleLogger', () => {
       port: 3000,
       basePath: '/terminal',
       identityHash,
-      sessionId: '550e8400-e29b-41d4-a716-446655440000',
-      category: 'startup',
-      reason: 'configured',
+      sessionId: SESSION_ID,
+      category: 'operation_failed',
       exitCode: 0,
       signal: 15,
       bufferedAmount: 1024,
@@ -35,9 +36,8 @@ describe('createLifecycleLogger', () => {
         port: 3000,
         basePath: '/terminal',
         identityHash,
-        sessionId: '550e8400-e29b-41d4-a716-446655440000',
-        category: 'startup',
-        reason: 'configured',
+        sessionId: SESSION_ID,
+        category: 'operation_failed',
         exitCode: 0,
         signal: 15,
         bufferedAmount: 1024,
@@ -111,6 +111,36 @@ describe('createLifecycleLogger', () => {
     expect(getter).not.toHaveBeenCalled();
   });
 
+  it('rejects secret-shaped values even when they use allowlisted metadata keys', () => {
+    const capture = logCapture();
+    const logger = createLifecycleLogger('info', capture.destination);
+    const sessionCookie = 'A'.repeat(43);
+    const csrfToken = 'B'.repeat(43);
+    const password = 'passwordsecret123';
+    const terminalContent = 'terminaloutputsecret123';
+
+    logger.warn('terminal_opened', {
+      sessionId: sessionCookie,
+      category: password,
+      reason: terminalContent,
+    });
+    logger.error('terminal_connection_failed', {
+      sessionId: csrfToken,
+      category: terminalContent,
+      reason: password,
+    });
+
+    const serialized = capture.output();
+    for (const secret of [
+      sessionCookie,
+      csrfToken,
+      password,
+      terminalContent,
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
   it('drops invalid allowlisted values instead of coercing or traversing them', () => {
     const capture = logCapture();
     const logger = createLifecycleLogger('info', capture.destination);
@@ -154,18 +184,55 @@ describe('createLifecycleLogger', () => {
     expect(throwingCategory).toHaveBeenCalledOnce();
   });
 
+  it('preserves only explicitly defined operational categories', () => {
+    const capture = logCapture();
+    const logger = createLifecycleLogger('info', capture.destination);
+    const categories = [
+      'invalid_request',
+      'origin_forbidden',
+      'tab_not_found',
+      'session_limit',
+      'order_conflict',
+      'invalid_session_state',
+      'json_required',
+      'operation_failed',
+      'authentication_required',
+      'authentication_failed',
+      'csrf_invalid',
+      'rate_limited',
+      'password_invalid',
+      'settings_invalid',
+      'durability_uncertain',
+      'cleanup_disabled',
+      'binary_payload',
+      'payload_too_large',
+      'invalid_json',
+      'invalid_message',
+      'session_mismatch',
+      'cleanup_failed',
+    ] as const;
+
+    for (const category of categories) {
+      logger.warn('protocol_message_rejected', { category });
+    }
+
+    expect(capture.records().map((record) => record.category)).toEqual(
+      categories,
+    );
+  });
+
   it('preserves structured levels and respects the configured log threshold', () => {
     const capture = logCapture();
     const logger = createLifecycleLogger('warn', capture.destination);
 
-    logger.info('terminal_opened', { sessionId: 'phase-3-main' });
+    logger.info('terminal_opened', { sessionId: SESSION_ID });
     logger.warn('terminal_exited', {
-      sessionId: 'phase-3-main',
+      sessionId: SESSION_ID,
       exitCode: 1,
       signal: 15,
     });
     logger.error('terminal_connection_failed', {
-      sessionId: 'phase-3-main',
+      sessionId: SESSION_ID,
     });
 
     expect(capture.records()).toEqual([
