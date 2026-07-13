@@ -18,6 +18,10 @@ export const CSRF_HEADER_NAME = 'x-csrf-token';
 
 const MAX_COOKIE_HEADER_BYTES = 8 * 1024;
 const MAX_COOKIE_PAIRS = 32;
+const MAX_RAW_HEADER_ITEMS = 128;
+const MAX_RAW_HEADER_FIELDS = MAX_RAW_HEADER_ITEMS / 2;
+const MAX_RAW_HEADER_BYTES = 16 * 1024;
+const MAX_COOKIE_FIELD_LINES = 8;
 const MAX_SESSION_COOKIE_BYTES = 256;
 const MAX_CSRF_BYTES = 512;
 const sessionTokenPattern = /^[A-Za-z0-9_-]+$/;
@@ -55,9 +59,8 @@ export type AuthenticatedLocals = Readonly<{
 export function requireAuthentication(
   options: AuthMiddlewareOptions,
 ): RequestHandler {
-  return (request, response, next) => {
-    void authenticate(options, request, response, next);
-  };
+  return (request, response, next) =>
+    authenticate(options, request, response, next);
 }
 
 export function requireMutationSecurity(
@@ -123,13 +126,14 @@ export function touchHttpActivity(
     }
     try {
       options.authService.touch(session.id, 'http');
-      next();
     } catch {
       log(options.logger, 'error', 'authentication_activity_failed', {
         category: 'operation_failed',
       });
       response.status(500).json({ error: 'operation_failed' });
+      return;
     }
+    next();
   };
 }
 
@@ -174,19 +178,21 @@ async function authenticate(
   response: Response,
   next: NextFunction,
 ): Promise<void> {
+  let resolved: AuthenticatedLocals | undefined;
   try {
-    const resolved = await resolveAuthentication(options, request);
-    if (resolved === undefined) {
-      reject(options, response, 401, 'authentication_required');
-      return;
-    }
-    response.locals.authSession = resolved.authSession;
-    if (resolved.upstreamIdentity !== undefined)
-      response.locals.upstreamIdentity = resolved.upstreamIdentity;
-    next();
+    resolved = await resolveAuthentication(options, request);
   } catch {
     reject(options, response, 401, 'authentication_required');
+    return;
   }
+  if (resolved === undefined) {
+    reject(options, response, 401, 'authentication_required');
+    return;
+  }
+  response.locals.authSession = resolved.authSession;
+  if (resolved.upstreamIdentity !== undefined)
+    response.locals.upstreamIdentity = resolved.upstreamIdentity;
+  next();
 }
 
 export async function resolveAuthentication(
@@ -254,13 +260,28 @@ function identityMatches(
 }
 
 function readSessionCookie(request: Request): string | undefined {
+  const { rawHeaders } = request;
+  if (
+    !Array.isArray(rawHeaders) ||
+    rawHeaders.length % 2 !== 0 ||
+    rawHeaders.length > MAX_RAW_HEADER_ITEMS ||
+    rawHeaders.length / 2 > MAX_RAW_HEADER_FIELDS
+  )
+    return undefined;
   const headers: string[] = [];
+  let rawHeaderBytes = 0;
   let byteCount = 0;
-  for (let index = 0; index < request.rawHeaders.length; index += 2) {
-    const name = request.rawHeaders[index];
-    const value = request.rawHeaders[index + 1];
+  let cookieFieldLines = 0;
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index];
+    const value = rawHeaders[index + 1];
     if (typeof name !== 'string' || typeof value !== 'string') return undefined;
+    rawHeaderBytes +=
+      utf8.encode(name).byteLength + utf8.encode(value).byteLength;
+    if (rawHeaderBytes > MAX_RAW_HEADER_BYTES) return undefined;
     if (name.toLowerCase() !== 'cookie') continue;
+    cookieFieldLines += 1;
+    if (cookieFieldLines > MAX_COOKIE_FIELD_LINES) return undefined;
     byteCount += utf8.encode(value).byteLength;
     if (byteCount > MAX_COOKIE_HEADER_BYTES) return undefined;
     headers.push(value);

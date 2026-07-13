@@ -9,6 +9,7 @@ import {
   clearSessionCookie,
   requireAuthentication,
   requireMutationSecurity,
+  resolveAuthentication,
   setSessionCookie,
   touchHttpActivity,
   type AuthMiddlewareOptions,
@@ -149,6 +150,116 @@ describe('authentication middleware', () => {
     expect(calls).toEqual([`csrf:${CSRF}`, 'touch']);
   });
 
+  it('propagates a downstream authentication error exactly once', async () => {
+    const marker = new Error('downstream private error');
+    const options = middlewareOptions();
+    const response = responseStub();
+    const errorHandler = vi.fn();
+
+    await dispatchWithErrorHandler(
+      requireAuthentication(options),
+      requestStub(['Cookie', `flanterminal_session=${COOKIE}`]),
+      response,
+      marker,
+      errorHandler,
+    );
+
+    expect(errorHandler).toHaveBeenCalledOnce();
+    expect(errorHandler).toHaveBeenCalledWith(marker);
+    expect(response.status).not.toHaveBeenCalled();
+    expect(response.json).not.toHaveBeenCalled();
+    expect(options.logger?.warn).not.toHaveBeenCalled();
+    expect(options.logger?.error).not.toHaveBeenCalled();
+  });
+
+  it('propagates a downstream activity error exactly once', async () => {
+    const marker = new Error('downstream private error');
+    const options = middlewareOptions();
+    const response = responseStub({ authSession: session() });
+    const errorHandler = vi.fn();
+
+    await dispatchWithErrorHandler(
+      touchHttpActivity(options),
+      requestStub([]),
+      response,
+      marker,
+      errorHandler,
+    );
+
+    expect(errorHandler).toHaveBeenCalledOnce();
+    expect(errorHandler).toHaveBeenCalledWith(marker);
+    expect(response.status).not.toHaveBeenCalled();
+    expect(response.json).not.toHaveBeenCalled();
+    expect(options.logger?.warn).not.toHaveBeenCalled();
+    expect(options.logger?.error).not.toHaveBeenCalled();
+  });
+
+  it.each(['authentication', 'activity'] as const)(
+    'delivers a downstream %s route throw once to the Express error handler',
+    async (stage) => {
+      const marker = new Error('downstream private error');
+      const options = middlewareOptions();
+      const errorHandler = vi.fn();
+
+      const response = await invokeThrowingRoute(
+        options,
+        stage,
+        marker,
+        errorHandler,
+      );
+
+      expect(response.status).toBe(418);
+      expect(await response.json()).toEqual({ error: 'propagated' });
+      expect(errorHandler).toHaveBeenCalledOnce();
+      expect(errorHandler).toHaveBeenCalledWith(marker);
+      expect(options.logger?.warn).not.toHaveBeenCalled();
+      expect(options.logger?.error).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [
+      'raw-header entry count',
+      [
+        'Cookie',
+        `flanterminal_session=${COOKIE}`,
+        ...Array.from({ length: 64 }, (_, index) => [
+          `X-Flood-${index}`,
+          '',
+        ]).flat(),
+      ],
+    ],
+    [
+      'total raw-header bytes',
+      [
+        'Cookie',
+        `flanterminal_session=${COOKIE}`,
+        'X-Flood',
+        'x'.repeat(17 * 1024),
+      ],
+    ],
+    [
+      'cookie field-line count',
+      Array.from({ length: 9 }, (_, index) => [
+        'Cookie',
+        index === 0 ? `flanterminal_session=${COOKIE}` : '',
+      ]).flat(),
+    ],
+  ])(
+    'rejects excessive %s before cookie authentication',
+    async (_name, rawHeaders) => {
+      const options = middlewareOptions();
+
+      const resolved = await resolveAuthentication(
+        options,
+        requestStub(rawHeaders),
+      );
+
+      expect(resolved).toBeUndefined();
+      expect(options.authService.authenticateCookie).not.toHaveBeenCalled();
+    },
+  );
+
   it('sets and clears a path-scoped strict HttpOnly cookie', async () => {
     const app = express();
     app.get('/set', (_request, response) => {
@@ -266,6 +377,42 @@ async function invokeRaw(
   );
 }
 
+async function invokeThrowingRoute(
+  options: AuthMiddlewareOptions,
+  stage: 'authentication' | 'activity',
+  marker: Error,
+  errorHandler: (error: unknown) => void,
+): Promise<Response> {
+  const app = express();
+  app.get(
+    '/throws',
+    requireAuthentication(options),
+    ...(stage === 'activity' ? [touchHttpActivity(options)] : []),
+    () => {
+      throw marker;
+    },
+  );
+  app.use(
+    (
+      error: unknown,
+      _request: express.Request,
+      response: express.Response,
+      _next: express.NextFunction,
+    ) => {
+      void _next;
+      errorHandler(error);
+      response.status(418).json({ error: 'propagated' });
+    },
+  );
+  server = createServer(app);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const port = (server.address() as { port: number }).port;
+  return await fetch(`http://127.0.0.1:${port}/throws`, {
+    headers: { Cookie: `flanterminal_session=${COOKIE}` },
+  });
+}
+
 function createMiddlewareServer(options: AuthMiddlewareOptions): Server {
   const app = express();
   app.get(
@@ -297,4 +444,47 @@ function createMiddlewareServer(options: AuthMiddlewareOptions): Server {
     },
   );
   return createServer(app);
+}
+
+function requestStub(rawHeaders: string[]): express.Request {
+  return {
+    rawHeaders,
+    headers: {},
+    socket: { remoteAddress: '127.0.0.1' },
+  } as express.Request;
+}
+
+function responseStub(locals: Record<string, unknown> = {}) {
+  const response = {
+    locals,
+    set: vi.fn(),
+    status: vi.fn(),
+    json: vi.fn(),
+  };
+  response.set.mockReturnValue(response);
+  response.status.mockReturnValue(response);
+  response.json.mockReturnValue(response);
+  return response as unknown as express.Response & {
+    set: ReturnType<typeof vi.fn>;
+    status: ReturnType<typeof vi.fn>;
+    json: ReturnType<typeof vi.fn>;
+  };
+}
+
+async function dispatchWithErrorHandler(
+  middleware: express.RequestHandler,
+  request: express.Request,
+  response: express.Response,
+  marker: Error,
+  errorHandler: (error: unknown) => void,
+): Promise<void> {
+  try {
+    await middleware(request, response, () => {
+      throw marker;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+  } catch (error) {
+    errorHandler(error);
+  }
 }

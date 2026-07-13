@@ -45,7 +45,10 @@ describe('createAuthRouter', () => {
   });
 
   it('establishes none mode and returns only shared bootstrap fields', async () => {
-    options = routerOptions({ mode: 'none' });
+    options = routerOptions({
+      mode: 'none',
+      session: session({ mode: 'none', identityLabel: 'anonymous' }),
+    });
     vi.mocked(options.authService.bootstrap).mockResolvedValue(
       authenticatedResult('none', 'anonymous'),
     );
@@ -65,6 +68,35 @@ describe('createAuthRouter', () => {
     );
     expect(text).not.toContain('cookieValue');
   });
+
+  it.each(['missing cookie value', 'unresolved cookie session'] as const)(
+    'fails closed for an authenticated bootstrap with %s',
+    async (failure) => {
+      options = routerOptions({ mode: 'none' });
+      const result = authenticatedResult('none', 'anonymous');
+      vi.mocked(options.authService.bootstrap).mockResolvedValue(
+        failure === 'missing cookie value'
+          ? { bootstrap: result.bootstrap }
+          : result,
+      );
+      if (failure === 'unresolved cookie session')
+        vi.mocked(options.authService.authenticateCookie).mockReturnValue(
+          undefined,
+        );
+
+      const response = await call('/terminal/api/auth/session');
+
+      expect(response.status).toBe(500);
+      const text = await response.text();
+      expect(JSON.parse(text)).toEqual({ error: 'operation_failed' });
+      expect(text).not.toContain(CSRF);
+      expect(response.headers.get('set-cookie')).toBeNull();
+      expect(options.authService.touch).not.toHaveBeenCalled();
+      expect(options.authService.authenticateCookie).toHaveBeenCalledTimes(
+        failure === 'missing cookie value' ? 0 : 1,
+      );
+    },
+  );
 
   it('resumes an existing cookie after authentication and touches HTTP activity', async () => {
     vi.mocked(options.authService.resume).mockReturnValue({

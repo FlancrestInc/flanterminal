@@ -237,16 +237,27 @@ function publishBootstrap(
   response: Response,
   result: AuthBootstrapResult,
 ): void {
-  if (result.cookieValue !== undefined) {
-    setSessionCookie(
-      response,
-      result.cookieValue,
-      options.basePath,
-      options.secureCookie,
-    );
-    const session = options.authService.authenticateCookie(result.cookieValue);
-    if (session !== undefined) options.authService.touch(session.id, 'http');
+  if (!result.bootstrap.authenticated) {
+    if (result.cookieValue !== undefined) throw new Error('Invalid bootstrap');
+    response.json(result.bootstrap);
+    return;
   }
+  const cookieValue = result.cookieValue;
+  if (cookieValue === undefined) throw new Error('Invalid bootstrap');
+  const session = options.authService.authenticateCookie(cookieValue);
+  if (
+    session === undefined ||
+    session.mode !== result.bootstrap.mode ||
+    session.identityLabel !== result.bootstrap.identityLabel
+  )
+    throw new Error('Invalid bootstrap');
+  options.authService.touch(session.id, 'http');
+  setSessionCookie(
+    response,
+    cookieValue,
+    options.basePath,
+    options.secureCookie,
+  );
   response.json(result.bootstrap);
 }
 
