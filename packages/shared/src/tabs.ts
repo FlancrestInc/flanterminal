@@ -16,6 +16,7 @@ export const tabIdSchema = z.string().regex(TAB_ID_PATTERN);
 export const displayNameSchema = safeNormalizedStringSchema({
   trim: true,
   allowJoinControls: true,
+  maxUtf8Bytes: 128,
 }).refine((value) => [...value].length >= 1 && [...value].length <= 80);
 
 export const desiredStateSchema = z.enum(['active', 'stopped']);

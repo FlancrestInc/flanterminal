@@ -68,17 +68,18 @@ describe('tab display names', () => {
     expect(displayNameSchema.parse('  Cafe\u0301  ')).toBe('Caf\u00e9');
   });
 
-  it('counts Unicode code points rather than UTF-16 code units', () => {
-    expect(displayNameSchema.parse('\ud83d\ude80'.repeat(80))).toBe(
-      '\ud83d\ude80'.repeat(80),
+  it('bounds names by both Unicode code points and UTF-8 bytes', () => {
+    expect(displayNameSchema.parse('a'.repeat(80))).toBe('a'.repeat(80));
+    expect(displayNameSchema.parse('\ud83d\ude80'.repeat(32))).toBe(
+      '\ud83d\ude80'.repeat(32),
     );
-    expect(displayNameSchema.safeParse('\ud83d\ude80'.repeat(81)).success).toBe(
+    expect(displayNameSchema.safeParse('\ud83d\ude80'.repeat(33)).success).toBe(
       false,
     );
   });
 
   it.each(['', '   ', 'a'.repeat(81)])(
-    'rejects names outside 1-80 code points',
+    'rejects names outside 1-80 code points or 128 UTF-8 bytes',
     (name) => {
       expect(displayNameSchema.safeParse(name).success).toBe(false);
     },
