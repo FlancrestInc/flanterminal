@@ -254,7 +254,16 @@ async function publishBootstrap(
     session.identityLabel !== result.bootstrap.identityLabel
   )
     throw new Error('Invalid bootstrap');
-  await options.workspaceBootstrap.ensureForAuthenticatedSession();
+  try {
+    await options.workspaceBootstrap.ensureForAuthenticatedSession();
+  } catch (error) {
+    try {
+      options.authService.logout(session.id);
+    } catch {
+      // Preserve the bounded workspace failure after best-effort revocation.
+    }
+    throw error;
+  }
   options.authService.touch(session.id, 'http');
   setSessionCookie(
     response,

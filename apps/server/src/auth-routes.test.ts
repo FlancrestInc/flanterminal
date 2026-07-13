@@ -249,6 +249,49 @@ describe('createAuthRouter', () => {
     expect(await response.json()).toEqual({ error: 'operation_failed' });
     expect(response.headers.get('set-cookie')).toBeNull();
     expect(options.authService.touch).not.toHaveBeenCalled();
+    expect(options.authService.logout).toHaveBeenCalledOnce();
+    expect(options.authService.logout).toHaveBeenCalledWith('session-id');
+  });
+
+  it('does not revoke a resumed session when workspace bootstrap fails', async () => {
+    vi.mocked(
+      options.workspaceBootstrap.ensureForAuthenticatedSession,
+    ).mockRejectedValue(new Error('private tab storage failure'));
+
+    const response = await call('/terminal/api/auth/session', {
+      headers: { Cookie: `flanterminal_session=${COOKIE}` },
+    });
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'operation_failed' });
+    expect(options.authService.logout).not.toHaveBeenCalled();
+    expect(options.authService.touch).not.toHaveBeenCalled();
+  });
+
+  it('contains logout failure while failing a new workspace bootstrap closed', async () => {
+    options = routerOptions({
+      mode: 'none',
+      session: session({ mode: 'none', identityLabel: 'anonymous' }),
+    });
+    vi.mocked(options.authService.bootstrap).mockResolvedValue(
+      authenticatedResult('none', 'anonymous'),
+    );
+    vi.mocked(
+      options.workspaceBootstrap.ensureForAuthenticatedSession,
+    ).mockRejectedValue(new Error('private tab storage failure'));
+    vi.mocked(options.authService.logout).mockImplementation(() => {
+      throw new Error('private logout failure');
+    });
+
+    const response = await call('/terminal/api/auth/session');
+
+    expect(response.status).toBe(500);
+    const text = await response.text();
+    expect(JSON.parse(text)).toEqual({ error: 'operation_failed' });
+    expect(text).not.toContain('private');
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(options.authService.logout).toHaveBeenCalledWith('session-id');
+    expect(options.authService.touch).not.toHaveBeenCalled();
   });
 
   it.each([

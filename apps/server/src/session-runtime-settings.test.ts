@@ -75,4 +75,24 @@ describe('StoredSessionRuntimeSettingsProvider', () => {
       expect(() => provider.current()).toThrow(/^Invalid runtime settings$/);
     },
   );
+
+  it('owns an immutable copy of deployment constraints', () => {
+    const callerConstraints = structuredClone(constraints);
+    const provider = new StoredSessionRuntimeSettingsProvider({
+      store: {
+        snapshot: () => ({
+          ...settings,
+          defaultShell: '/bin/fish',
+          tmuxHistoryLimit: 500_000,
+        }),
+      },
+      constraints: callerConstraints,
+      verifiedShells: ['/bin/fish'],
+    });
+    (callerConstraints.allowedShells as string[]).push('/bin/fish');
+    (callerConstraints.limits.tmuxHistoryLimit as { max: number }).max =
+      500_000;
+
+    expect(() => provider.current()).toThrow(/^Invalid runtime settings$/);
+  });
 });

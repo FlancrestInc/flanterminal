@@ -47,13 +47,17 @@ const runtimeSettings = Object.freeze({
 });
 
 describe('SessionManager Phase 2 lifecycle', () => {
-  it('captures one runtime snapshot before commands and does not mix changes across awaits', async () => {
+  it('copies and freezes one runtime snapshot before lifecycle awaits', async () => {
     const harness = createHarness();
     harness.store.applyState(TAB_A, 'stopped');
     harness.tmux.active.delete(TAB_A);
     const existsGate = deferred<boolean>();
     vi.mocked(harness.tmux.exists).mockReturnValueOnce(existsGate.promise);
-    const first = Object.freeze({ shell: '/bin/zsh', historyLimit: 30_000 });
+    const first = { shell: '/bin/zsh', historyLimit: 30_000 };
+    const captured = Object.freeze({
+      shell: first.shell,
+      historyLimit: first.historyLimit,
+    });
     const second = Object.freeze({ shell: '/bin/bash', historyLimit: 40_000 });
     vi.mocked(harness.runtimeSettings.current).mockReturnValueOnce(first);
 
@@ -62,10 +66,15 @@ describe('SessionManager Phase 2 lifecycle', () => {
       expect(harness.runtimeSettings.current).toHaveBeenCalledOnce(),
     );
     vi.mocked(harness.runtimeSettings.current).mockReturnValue(second);
+    first.shell = '/bin/fish';
+    first.historyLimit = 50_000;
     existsGate.resolve(false);
     await recreating;
 
-    expect(harness.tmux.prepare).toHaveBeenCalledWith(TAB_A, first);
+    expect(harness.tmux.prepare).toHaveBeenCalledWith(TAB_A, captured);
+    const used = vi.mocked(harness.tmux.prepare).mock.calls[0]?.[1];
+    expect(used).not.toBe(first);
+    expect(Object.isFrozen(used)).toBe(true);
     expect(harness.runtimeSettings.current).toHaveBeenCalledOnce();
   });
 
@@ -85,6 +94,34 @@ describe('SessionManager Phase 2 lifecycle', () => {
     expect(harness.tmux.prepare).not.toHaveBeenCalled();
     expect(harness.tmux.kill).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['non-string shell', { shell: 42, historyLimit: 20_000 }],
+    ['non-numeric history', { shell: '/bin/bash', historyLimit: '20000' }],
+    ['relative shell', { shell: 'bin/bash', historyLimit: 20_000 }],
+    ['unsafe shell', { shell: '/bin/\nbash', historyLimit: 20_000 }],
+    ['fractional history', { shell: '/bin/bash', historyLimit: 1.5 }],
+    ['negative history', { shell: '/bin/bash', historyLimit: -1 }],
+    ['oversized history', { shell: '/bin/bash', historyLimit: 1_000_001 }],
+  ] as const)(
+    'rejects malformed provider %s before lifecycle side effects',
+    async (_case, candidate) => {
+      const harness = createHarness();
+      harness.store.applyState(TAB_A, 'stopped');
+      harness.tmux.active.delete(TAB_A);
+      vi.mocked(harness.runtimeSettings.current).mockReturnValueOnce(
+        candidate as unknown as SessionRuntimeSettings,
+      );
+
+      await expect(harness.manager.recreate(TAB_A)).rejects.toBeInstanceOf(
+        OperationFailedError,
+      );
+
+      expect(harness.tmux.exists).not.toHaveBeenCalled();
+      expect(harness.tmux.prepare).not.toHaveBeenCalled();
+      expect(harness.store.setDesiredState).not.toHaveBeenCalled();
+    },
+  );
 
   it('reads exactly one current snapshot for create and restart operations', async () => {
     const creating = createHarness();

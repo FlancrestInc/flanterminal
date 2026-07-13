@@ -53,7 +53,8 @@ export type TmuxConfig = Readonly<{
 }>;
 
 const APP_SESSION_NAME = /^webterm-tab-([0-9a-f]{32})$/;
-const BOOTSTRAP_SHELL = '/bin/sh';
+const BOOTSTRAP_EXECUTABLE = '/usr/bin/sleep';
+const BOOTSTRAP_DURATION_SECONDS = '2147483647';
 
 export function tmuxSessionName(sessionId: string): string {
   if (!isSessionId(sessionId)) throw new Error('Invalid session');
@@ -74,36 +75,51 @@ export class TmuxSessionPreparer implements SessionPreparer {
     const windowTarget = `${name}:`;
     if (settings === undefined) throw new Error('Invalid runtime settings');
     if (!(await this.exists(sessionId))) {
-      const creation = await this.run([
-        'new-session',
-        '-d',
-        '-s',
-        name,
-        BOOTSTRAP_SHELL,
-        ';',
-        'set-option',
-        '-t',
-        name,
-        'history-limit',
-        String(settings.historyLimit),
-        ';',
-        'set-option',
-        '-t',
-        name,
-        'default-shell',
-        settings.shell,
-        ';',
-        'split-window',
-        '-d',
-        '-t',
-        windowTarget,
-        settings.shell,
-        ';',
-        'kill-pane',
-        '-t',
-        windowTarget,
-      ]);
-      if (creation.exitCode !== 0) throw new Error('Tmux command failed');
+      try {
+        const creation = await this.run([
+          'new-session',
+          '-d',
+          '-s',
+          name,
+          BOOTSTRAP_EXECUTABLE,
+          BOOTSTRAP_DURATION_SECONDS,
+          ';',
+          'set-option',
+          '-t',
+          name,
+          'history-limit',
+          String(settings.historyLimit),
+          ';',
+          'set-option',
+          '-t',
+          name,
+          'default-shell',
+          settings.shell,
+          ';',
+          'set-option',
+          '-t',
+          name,
+          'default-command',
+          '',
+          ';',
+          'split-window',
+          '-d',
+          '-t',
+          windowTarget,
+          ';',
+          'kill-pane',
+          '-t',
+          windowTarget,
+        ]);
+        if (creation.exitCode !== 0) throw new Error();
+      } catch {
+        try {
+          await this.kill(sessionId);
+        } catch {
+          // Preserve the bounded creation failure after best-effort cleanup.
+        }
+        throw new Error('Tmux command failed');
+      }
     }
 
     return this.attachSpec(sessionId, settings);
@@ -160,7 +176,7 @@ export class TmuxSessionPreparer implements SessionPreparer {
     const name = tmuxSessionName(sessionId);
     return {
       executable: this.config.executable,
-      args: ['attach-session', '-t', name],
+      args: ['attach-session', '-E', '-t', name],
       cwd: this.config.homeDir,
       env: {
         HOME: this.config.homeDir,

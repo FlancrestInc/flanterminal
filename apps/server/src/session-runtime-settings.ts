@@ -25,18 +25,20 @@ export type StoredSessionRuntimeSettingsProviderOptions = Readonly<{
 
 export class StoredSessionRuntimeSettingsProvider implements SessionRuntimeSettingsProvider {
   private readonly verifiedShells: ReadonlySet<string>;
+  private readonly constraints: WorkspaceSettingsConstraints;
 
   constructor(
     private readonly options: StoredSessionRuntimeSettingsProviderOptions,
   ) {
     this.verifiedShells = new Set(options.verifiedShells);
+    this.constraints = deepFreeze(structuredClone(options.constraints));
   }
 
   current(): SessionRuntimeSettings {
     try {
       const settings = parseWorkspaceSettings(
         this.options.store.snapshot(),
-        this.options.constraints,
+        this.constraints,
       );
       if (!this.verifiedShells.has(settings.defaultShell)) throw new Error();
       return Object.freeze({
@@ -47,4 +49,13 @@ export class StoredSessionRuntimeSettingsProvider implements SessionRuntimeSetti
       throw new Error('Invalid runtime settings');
     }
   }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) {
+    return value;
+  }
+  Object.freeze(value);
+  for (const child of Object.values(value)) deepFreeze(child);
+  return value;
 }

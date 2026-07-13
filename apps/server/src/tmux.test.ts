@@ -105,7 +105,8 @@ describe('TmuxSessionPreparer', () => {
       '-d',
       '-s',
       SESSION_NAME,
-      '/bin/sh',
+      '/usr/bin/sleep',
+      '2147483647',
       ';',
       'set-option',
       '-t',
@@ -119,11 +120,16 @@ describe('TmuxSessionPreparer', () => {
       'default-shell',
       '/bin/bash',
       ';',
+      'set-option',
+      '-t',
+      SESSION_NAME,
+      'default-command',
+      '',
+      ';',
       'split-window',
       '-d',
       '-t',
       `${SESSION_NAME}:`,
-      '/bin/bash',
       ';',
       'kill-pane',
       '-t',
@@ -132,6 +138,10 @@ describe('TmuxSessionPreparer', () => {
     const creationArgs = vi.mocked(runner.run).mock.calls[1]?.[1];
     expect(creationArgs).not.toContain('-g');
     expect(creationArgs).not.toContain('exit-empty');
+    expect(
+      creationArgs?.filter((argument) => argument === '/bin/bash'),
+    ).toHaveLength(1);
+    expect(creationArgs?.slice(4, 6)).toEqual(['/usr/bin/sleep', '2147483647']);
     const realPaneIndex = creationArgs?.indexOf('split-window') ?? -1;
     expect(creationArgs?.indexOf('history-limit')).toBeLessThan(realPaneIndex);
     expect(creationArgs?.indexOf('default-shell')).toBeLessThan(realPaneIndex);
@@ -139,6 +149,28 @@ describe('TmuxSessionPreparer', () => {
       creationArgs?.indexOf('kill-pane') ?? -1,
     );
   });
+
+  it.each([0, 1, 2])(
+    'cleans a partially created session without exposing cleanup exit %s',
+    async (cleanupExitCode) => {
+      const runner = runnerWith(
+        { exitCode: 1, stdout: '', stderr: '' },
+        { exitCode: 2, stdout: 'private', stderr: 'private' },
+        { exitCode: cleanupExitCode, stdout: 'private', stderr: 'private' },
+      );
+      const preparer = new TmuxSessionPreparer(config, runner);
+
+      await expect(preparer.prepare(SESSION_ID, settings)).rejects.toThrow(
+        /^Tmux command failed$/,
+      );
+
+      expect(runner.run).toHaveBeenNthCalledWith(3, '/usr/bin/tmux', [
+        'kill-session',
+        '-t',
+        SESSION_NAME,
+      ]);
+    },
+  );
 
   it('kills only the requested session and treats absence as success', async () => {
     const runner = runnerWith({ exitCode: 1, stdout: '', stderr: '' });
@@ -223,7 +255,7 @@ describe('TmuxSessionPreparer', () => {
 
     await expect(preparer.prepare(SESSION_ID, settings)).resolves.toEqual({
       executable: '/usr/bin/tmux',
-      args: ['attach-session', '-t', SESSION_NAME],
+      args: ['attach-session', '-E', '-t', SESSION_NAME],
       cwd: '/home/webterm',
       env: {
         HOME: '/home/webterm',

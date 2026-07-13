@@ -94,6 +94,9 @@ export type SessionManagerOptions = Readonly<{
 }>;
 
 const ATTACH_TOKEN_BRAND = Symbol('AttachToken');
+const MAX_RUNTIME_SHELL_BYTES = 4_096;
+const MAX_RUNTIME_HISTORY_LIMIT = 1_000_000;
+const unsafeRuntimeShellCharacterPattern = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}\p{Cf}]/u;
 
 export type AttachToken = Readonly<{
   sessionId: string;
@@ -628,12 +631,32 @@ export class SessionManager {
   private captureRuntimeSettings(): SessionRuntimeSettings {
     try {
       const settings = this.options.runtimeSettings?.current();
-      if (settings === undefined) throw new Error();
-      return settings;
+      if (!isValidRuntimeSettings(settings)) throw new Error();
+      return Object.freeze({
+        shell: settings.shell,
+        historyLimit: settings.historyLimit,
+      });
     } catch {
       throw new OperationFailedError();
     }
   }
+}
+
+function isValidRuntimeSettings(
+  settings: SessionRuntimeSettings | undefined,
+): settings is SessionRuntimeSettings {
+  if (settings === undefined) return false;
+  const { shell, historyLimit } = settings;
+  return (
+    typeof shell === 'string' &&
+    shell.startsWith('/') &&
+    shell.normalize('NFC') === shell &&
+    new TextEncoder().encode(shell).byteLength <= MAX_RUNTIME_SHELL_BYTES &&
+    !unsafeRuntimeShellCharacterPattern.test(shell) &&
+    Number.isInteger(historyLimit) &&
+    historyLimit >= 0 &&
+    historyLimit <= MAX_RUNTIME_HISTORY_LIMIT
+  );
 }
 
 function asRuntimeController(
