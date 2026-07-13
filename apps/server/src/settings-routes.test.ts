@@ -8,7 +8,10 @@ import {
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { AuthMiddlewareService } from './auth-middleware.js';
+import type {
+  AuthEventLogger,
+  AuthMiddlewareService,
+} from './auth-middleware.js';
 import type { AuthenticatedSession } from './auth-types.js';
 import type { ReplaceResult } from './secure-json-file.js';
 import {
@@ -72,6 +75,10 @@ let authService: {
   verifyCsrf: ReturnType<typeof vi.fn<AuthMiddlewareService['verifyCsrf']>>;
   touch: ReturnType<typeof vi.fn<AuthMiddlewareService['touch']>>;
 };
+let logger: {
+  warn: ReturnType<typeof vi.fn<AuthEventLogger['warn']>>;
+  error: ReturnType<typeof vi.fn<AuthEventLogger['error']>>;
+};
 
 beforeEach(() => {
   authority = session();
@@ -93,6 +100,7 @@ beforeEach(() => {
     ),
     touch: vi.fn(),
   };
+  logger = { warn: vi.fn(), error: vi.fn() };
 });
 
 afterEach(async () => {
@@ -186,6 +194,27 @@ describe('createSettingsRouter', () => {
       expect(store.replace).not.toHaveBeenCalled();
     },
   );
+
+  it('bounds a rejected replacement without leaking through HTTP or logs', async () => {
+    const privateMessage = 'private secret at /home/admin/settings.json';
+    store.replace.mockRejectedValueOnce(new Error(privateMessage));
+
+    const response = await mutation({ settings: defaults });
+    const body = await response.text();
+
+    expect(response.status).toBe(500);
+    expect(JSON.parse(body)).toEqual({ error: 'operation_failed' });
+    expect(body).not.toContain('private');
+    expect(body).not.toContain('secret');
+    expect(body).not.toContain('/home');
+    expect(logger.error).toHaveBeenCalledOnce();
+    expect(logger.error).toHaveBeenCalledWith('settings_route_failed', {
+      category: 'operation_failed',
+    });
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain(
+      privateMessage,
+    );
+  });
 
   it('rejects a body over 16 KiB before touch or replacement', async () => {
     const response = await mutation({
@@ -338,7 +367,7 @@ async function listen(): Promise<number> {
         authService,
         store,
         constraints,
-        logger: { warn: vi.fn(), error: vi.fn() },
+        logger,
       }),
     );
     app.use('/api', (_request, response) =>
