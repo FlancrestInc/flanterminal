@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import proxyaddr from 'proxy-addr';
 
 import { loadConfig, toClientConfig } from './config.js';
 
@@ -243,9 +244,6 @@ describe('loadConfig', () => {
     expect(() =>
       loadConfig({ LOCAL_AUTH_PASSWORD_FILE: 'password' }),
     ).toThrow();
-    expect(() =>
-      loadConfig({ TRUST_PROXY: '10.0.0.0/8,10.0.0.0/8' }),
-    ).toThrow();
     expect(() => loadConfig({ TRUST_PROXY: 'not-an-ip' })).toThrow();
     expect(() =>
       loadConfig({ ALLOWED_SHELLS: '/bin/bash,/bin/bash' }),
@@ -255,10 +253,57 @@ describe('loadConfig', () => {
     ).toThrow();
   });
 
+  it('canonicalizes and deduplicates semantic proxy networks', () => {
+    const config = loadConfig({
+      TRUST_PROXY: [
+        '2001:0DB8:0:0::1/32',
+        '2001:db8:ffff::2/32',
+        '10.20.30.40/8',
+        '10.99.88.77/8',
+        '192.0.2.1',
+        '192.0.2.1/32',
+        '::ffff:198.51.100.129/120',
+        '198.51.100.42/24',
+      ].join(','),
+    });
+
+    expect(config.trustProxy).toEqual([
+      '2001:db8::/32',
+      '10.0.0.0/8',
+      '192.0.2.1/32',
+      '198.51.100.0/24',
+    ]);
+    const matcher = proxyaddr.compile(config.trustProxy as string[]);
+    expect(matcher('2001:db8:abcd::1', 0)).toBe(true);
+    expect(matcher('10.200.1.1', 0)).toBe(true);
+    expect(matcher('::ffff:198.51.100.8', 0)).toBe(true);
+    expect(matcher('203.0.113.1', 0)).toBe(false);
+  });
+
+  it('rejects more than 64 configured proxy entries', () => {
+    const entries = Array.from(
+      { length: 65 },
+      (_, index) => `10.0.${index}.1/32`,
+    );
+
+    expect(() => loadConfig({ TRUST_PROXY: entries.join(',') })).toThrow(
+      'Invalid server configuration',
+    );
+  });
+
+  it.each(['0.0.0.0/0', '::/0'])(
+    'rejects proxy range unsupported by proxy-addr: %s',
+    (entry) => {
+      expect(() => loadConfig({ TRUST_PROXY: entry })).toThrow(
+        'Invalid server configuration',
+      );
+    },
+  );
+
   it('accepts native config arrays and rejects env-only or unknown file keys', () => {
     expect(
       loadConfig({}, { trustProxy: ['127.0.0.1', '::1/128'] }),
-    ).toMatchObject({ trustProxy: ['127.0.0.1', '::1/128'] });
+    ).toMatchObject({ trustProxy: ['127.0.0.1/32', '::1/128'] });
     expect(() => loadConfig({}, { appConfigFile: '/tmp/config.json' })).toThrow(
       'Invalid server configuration',
     );

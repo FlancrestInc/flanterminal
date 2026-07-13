@@ -1,5 +1,3 @@
-import { isIP } from 'node:net';
-
 import {
   MAX_FONT_SIZE,
   MAX_RECONNECT_SECONDS,
@@ -13,10 +11,13 @@ import {
   parseClientConfig,
   type ClientConfig,
 } from '@flanterminal/shared';
+import ipaddr from 'ipaddr.js';
+import proxyaddr from 'proxy-addr';
 import { z } from 'zod';
 
 const MAX_WS_BUFFER_BYTES = 1_048_576;
 const MAX_PATH_BYTES = 4_096;
+const MAX_TRUST_PROXY_ENTRIES = 64;
 const utf8Encoder = new TextEncoder();
 const forbiddenCharacterPattern = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}\p{Cf}]/u;
 const httpTokenPattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
@@ -479,29 +480,47 @@ function parseProxyList(
   const candidates = (
     typeof values === 'string' ? values.split(',') : values
   ).map((value) => value.trim().toLowerCase());
-  const normalized = candidates.map(normalizeProxyEntry);
-  if (
-    normalized.length === 0 ||
-    normalized.some((value) => value === undefined) ||
-    new Set(normalized).size !== normalized.length
-  ) {
+  if (candidates.length === 0 || candidates.length > MAX_TRUST_PROXY_ENTRIES) {
     context.addIssue({ code: 'custom', message: 'invalid proxy value' });
     return z.NEVER;
   }
-  return normalized as string[];
+  try {
+    const normalized = [...new Set(candidates.map(normalizeProxyEntry))];
+    proxyaddr.compile(normalized);
+    return normalized;
+  } catch {
+    context.addIssue({ code: 'custom', message: 'invalid proxy value' });
+    return z.NEVER;
+  }
 }
 
-function normalizeProxyEntry(value: string): string | undefined {
-  const slash = value.indexOf('/');
-  if (slash === -1) return isIP(value) === 0 ? undefined : value;
-  if (slash !== value.lastIndexOf('/')) return undefined;
-  const address = value.slice(0, slash);
-  const prefixText = value.slice(slash + 1);
-  if (!/^\d+$/.test(prefixText)) return undefined;
-  const family = isIP(address);
-  const prefix = Number(prefixText);
-  if (family === 0 || prefix > (family === 4 ? 32 : 128)) return undefined;
-  return `${address}/${prefix}`;
+function normalizeProxyEntry(value: string): string {
+  const slash = value.lastIndexOf('/');
+  let address: ipaddr.IPv4 | ipaddr.IPv6;
+  let prefix: number;
+  if (slash === -1) {
+    address = ipaddr.parse(value);
+    prefix = address.kind() === 'ipv4' ? 32 : 128;
+  } else {
+    if (slash !== value.indexOf('/')) throw new Error('invalid CIDR');
+    [address, prefix] = ipaddr.parseCIDR(value);
+  }
+
+  if (
+    address.kind() === 'ipv6' &&
+    (address as ipaddr.IPv6).isIPv4MappedAddress() &&
+    prefix >= 96
+  ) {
+    address = (address as ipaddr.IPv6).toIPv4Address();
+    prefix -= 96;
+  }
+
+  const cidr = `${address.toString()}/${prefix}`;
+  const network =
+    address.kind() === 'ipv4'
+      ? ipaddr.IPv4.networkAddressFromCIDR(cidr)
+      : ipaddr.IPv6.networkAddressFromCIDR(cidr);
+  return `${network.toString()}/${prefix}`;
 }
 
 function deepFreeze<T>(value: T): T {

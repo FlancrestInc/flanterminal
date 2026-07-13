@@ -66,6 +66,8 @@ export async function loadOptionalConfigFile(
   if (path === undefined || path === '') return Object.freeze({});
 
   let handle: ConfigFileHandle | undefined;
+  let result: OptionalConfigFileValues | undefined;
+  let failed = false;
   try {
     if (!path.startsWith('/')) throw new Error('invalid path');
     handle = await fileSystem.open(
@@ -85,12 +87,19 @@ export async function loadOptionalConfigFile(
         throw new Error('invalid key');
       }
     }
-    return deepFreeze(structuredClone(parsed));
+    result = deepFreeze(structuredClone(parsed));
   } catch {
-    throw new Error('Invalid server configuration');
-  } finally {
-    await handle?.close().catch(() => undefined);
+    failed = true;
   }
+  try {
+    await handle?.close();
+  } catch {
+    failed = true;
+  }
+  if (failed || result === undefined) {
+    throw new Error('Invalid server configuration');
+  }
+  return result;
 }
 
 async function readBounded(handle: ConfigFileHandle): Promise<Uint8Array> {

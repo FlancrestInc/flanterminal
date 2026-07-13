@@ -43,6 +43,7 @@ describe('loadOptionalConfigFile', () => {
       '/etc/flanterminal.json',
       constants.O_RDONLY | constants.O_NOFOLLOW,
     );
+    expect(fileSystem.handle.close).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -111,6 +112,71 @@ describe('loadOptionalConfigFile', () => {
     expect(fileSystem.handle.close).toHaveBeenCalledOnce();
   });
 
+  it('closes the handle after stat rejection', async () => {
+    const fileSystem = fakeFileSystem('{}', { regular: false });
+
+    await expect(
+      loadOptionalConfigFile('/etc/flanterminal.json', fileSystem),
+    ).rejects.toThrow('Invalid server configuration');
+
+    expect(fileSystem.handle.close).toHaveBeenCalledOnce();
+  });
+
+  it('closes the handle after read rejection', async () => {
+    const fileSystem = fakeFileSystem('{}', {
+      readError: new Error('raw read path /etc/flanterminal.json'),
+    });
+
+    const error = await loadOptionalConfigFile(
+      '/etc/flanterminal.json',
+      fileSystem,
+    ).catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toBe('Invalid server configuration');
+    expect((error as Error).message).not.toContain('/etc/flanterminal.json');
+    expect(fileSystem.handle.close).toHaveBeenCalledOnce();
+  });
+
+  it('closes the handle after document validation rejection', async () => {
+    const fileSystem = fakeFileSystem('{"unknown":true}');
+
+    await expect(
+      loadOptionalConfigFile('/etc/flanterminal.json', fileSystem),
+    ).rejects.toThrow('Invalid server configuration');
+
+    expect(fileSystem.handle.close).toHaveBeenCalledOnce();
+  });
+
+  it('fails safely when close rejects after an otherwise successful load', async () => {
+    const fileSystem = fakeFileSystem('{"authMode":"none"}', {
+      closeError: new Error('raw close path /etc/flanterminal.json'),
+    });
+
+    const error = await loadOptionalConfigFile(
+      '/etc/flanterminal.json',
+      fileSystem,
+    ).catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toBe('Invalid server configuration');
+    expect((error as Error).message).not.toContain('/etc/flanterminal.json');
+    expect(fileSystem.handle.close).toHaveBeenCalledOnce();
+  });
+
+  it('retains the bounded primary failure while also attempting a failing close', async () => {
+    const fileSystem = fakeFileSystem('{bad', {
+      closeError: new Error('raw close failure'),
+    });
+
+    const error = await loadOptionalConfigFile(
+      '/etc/flanterminal.json',
+      fileSystem,
+    ).catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toBe('Invalid server configuration');
+    expect((error as Error).message).not.toContain('raw close failure');
+    expect(fileSystem.handle.close).toHaveBeenCalledOnce();
+  });
+
   it('bounds reads when a file grows after stat', async () => {
     const fileSystem = fakeFileSystem('x'.repeat(100_000), { statSize: 2 });
 
@@ -141,7 +207,13 @@ describe('loadOptionalConfigFile', () => {
 
 function fakeFileSystem(
   content: string | Uint8Array,
-  options: { regular?: boolean; symlink?: boolean; statSize?: number } = {},
+  options: {
+    regular?: boolean;
+    symlink?: boolean;
+    statSize?: number;
+    readError?: Error;
+    closeError?: Error;
+  } = {},
 ) {
   const bytes = typeof content === 'string' ? Buffer.from(content) : content;
   let cursor = 0;
@@ -152,13 +224,16 @@ function fakeFileSystem(
       isFile: () => options.regular ?? true,
     })),
     read: vi.fn(async (buffer: Uint8Array, offset: number, length: number) => {
+      if (options.readError) throw options.readError;
       const bytesRead = Math.min(length, bytes.byteLength - cursor);
       buffer.set(bytes.subarray(cursor, cursor + bytesRead), offset);
       cursor += bytesRead;
       returned += bytesRead;
       return { bytesRead };
     }),
-    close: vi.fn(async () => undefined),
+    close: vi.fn(async () => {
+      if (options.closeError) throw options.closeError;
+    }),
   };
   const open = vi.fn(async () => {
     if (options.symlink) {
