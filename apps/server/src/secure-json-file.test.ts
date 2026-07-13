@@ -4,6 +4,7 @@ import { posix } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  MAX_SECURE_JSON_BYTES,
   SecureJsonFileError,
   createSecureJsonFile,
   type SecureJsonFileHandle,
@@ -14,6 +15,30 @@ const TARGET = '/data/settings.json';
 const UID = 1000;
 
 describe('SecureJsonFile read', () => {
+  it.each([0, 1.5, MAX_SECURE_JSON_BYTES + 1])(
+    'rejects invalid maximumBytes %s before filesystem access',
+    async (maximumBytes) => {
+      const fs = new MemoryFileSystem();
+
+      await expect(
+        makeFile(fs).read(TARGET, maximumBytes),
+      ).rejects.toBeInstanceOf(SecureJsonFileError);
+
+      expect(fs.operations).toEqual([]);
+    },
+  );
+
+  it('accepts a valid JSON document exactly at the fixed maximum', async () => {
+    const value = 'a'.repeat(MAX_SECURE_JSON_BYTES - 2);
+    const fs = new MemoryFileSystem({ [TARGET]: jsonEntry(value) });
+
+    await expect(
+      makeFile(fs).read(TARGET, MAX_SECURE_JSON_BYTES),
+    ).resolves.toBe(value);
+
+    expect(fs.maximumReadBufferLength).toBe(MAX_SECURE_JSON_BYTES + 1);
+  });
+
   it('returns undefined only for a missing target and closes the parent', async () => {
     const fs = new MemoryFileSystem();
     const file = makeFile(fs);
@@ -126,6 +151,22 @@ describe('SecureJsonFile read', () => {
     expect(fs.allOpenedHandlesClosed()).toBe(true);
   });
 
+  it('never allocates beyond the fixed cap when the target grows after stat', async () => {
+    const fs = new MemoryFileSystem(
+      {
+        [TARGET]: fileEntry(Buffer.alloc(MAX_SECURE_JSON_BYTES + 2, 'x')),
+      },
+      { targetStatSize: 2 },
+    );
+
+    await expect(
+      makeFile(fs).read(TARGET, MAX_SECURE_JSON_BYTES),
+    ).rejects.toBeInstanceOf(SecureJsonFileError);
+
+    expect(fs.maximumReadBufferLength).toBe(MAX_SECURE_JSON_BYTES + 1);
+    expect(fs.bytesRead).toBe(MAX_SECURE_JSON_BYTES + 1);
+  });
+
   it.each(['read', 'target-close', 'parent-close'] as const)(
     'rejects generic errors and closes every possible descriptor after %s failure',
     async (stage) => {
@@ -144,6 +185,32 @@ describe('SecureJsonFile read', () => {
 });
 
 describe('SecureJsonFile replace', () => {
+  it('writes a serialized multibyte JSON value exactly at the fixed maximum', async () => {
+    const value = 'é'.repeat((MAX_SECURE_JSON_BYTES - 2) / 2);
+    const fs = new MemoryFileSystem();
+
+    await expect(makeFile(fs).replace(TARGET, value, 0o600)).resolves.toEqual({
+      state: 'committed',
+    });
+
+    expect(fs.entry(TARGET)?.content.byteLength).toBe(MAX_SECURE_JSON_BYTES);
+    expect(fs.readJson(TARGET)).toBe(value);
+  });
+
+  it('rejects a serialized multibyte JSON value one byte over the fixed maximum before filesystem access', async () => {
+    const value = `${'é'.repeat((MAX_SECURE_JSON_BYTES - 2) / 2)}a`;
+    const fs = new MemoryFileSystem();
+
+    await expect(
+      makeFile(fs).replace(TARGET, value, 0o600),
+    ).rejects.toBeInstanceOf(SecureJsonFileError);
+
+    expect(new TextEncoder().encode(JSON.stringify(value))).toHaveLength(
+      MAX_SECURE_JSON_BYTES + 1,
+    );
+    expect(fs.operations).toEqual([]);
+  });
+
   it.each([
     ['undefined', undefined],
     ['nonfinite', { value: Number.POSITIVE_INFINITY }],
@@ -448,6 +515,7 @@ class MemoryFileSystem implements SecureJsonFileSystem {
   replaceTargetWithSymlinkBeforeRecheck = false;
   recheckFailure: 'target-open' | 'target-stat' | 'target-close' | undefined;
   bytesRead = 0;
+  maximumReadBufferLength = 0;
   targetOpenFlags: number | undefined;
   tempOpenFlags: number | undefined;
   tempOpenMode: number | undefined;
@@ -618,6 +686,10 @@ class MemoryHandle implements SecureJsonFileHandle {
 
   async read(buffer: Uint8Array, offset: number, length: number) {
     this.fs.operations.push(`read ${this.role}`);
+    this.fs.maximumReadBufferLength = Math.max(
+      this.fs.maximumReadBufferLength,
+      buffer.byteLength,
+    );
     if (this.fs.consumeFailure('read')) throw rawError('read');
     const entry = this.fs.getMutableEntry(this.path);
     const bytesRead = Math.min(length, entry.content.byteLength - this.cursor);

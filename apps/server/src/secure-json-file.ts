@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 
 const TEMP_OPEN_ATTEMPTS = 8;
 const GENERIC_ERROR_MESSAGE = 'Secure JSON file operation failed';
+export const MAX_SECURE_JSON_BYTES = 1_048_576;
 
 export type ReplaceResult =
   | Readonly<{ state: 'not_committed' }>
@@ -100,7 +101,11 @@ class SecureJsonFileService implements SecureJsonFile {
   async read(path: string, maximumBytes: number): Promise<unknown | undefined> {
     try {
       validatePath(path);
-      if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0) {
+      if (
+        !Number.isInteger(maximumBytes) ||
+        maximumBytes < 1 ||
+        maximumBytes > MAX_SECURE_JSON_BYTES
+      ) {
         throw new Error('invalid maximum');
       }
       await this.validateAndCloseParent(path);
@@ -371,7 +376,11 @@ function serializeJson(value: unknown): Uint8Array {
   validateJsonValue(value, new WeakSet<object>());
   const serialized = JSON.stringify(value);
   if (serialized === undefined) throw new Error('invalid JSON');
-  return new TextEncoder().encode(serialized);
+  const bytes = new TextEncoder().encode(serialized);
+  if (bytes.byteLength > MAX_SECURE_JSON_BYTES) {
+    throw new Error('oversized JSON');
+  }
+  return bytes;
 }
 
 function validateJsonValue(value: unknown, ancestors: WeakSet<object>): void {
