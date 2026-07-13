@@ -37,6 +37,11 @@ export type WebSocketCleanupSnapshot = Readonly<{
   count: number;
 }>;
 
+export type WebSocketRuntimeSnapshot = Readonly<{
+  terminalTabId: string;
+  count: number;
+}>;
+
 type Registration = {
   authority: ApplicationSessionAuthority;
   terminalTabId: string;
@@ -47,6 +52,7 @@ type Registration = {
 const HARD_MAX_APPLICATION_SESSIONS = 256;
 const HARD_MAX_SOCKETS = 1_024;
 const MAX_CLEANUP_GENERATIONS = 64;
+const MAX_RUNTIME_SNAPSHOTS = 20;
 
 export class WebSocketAuthIndex {
   readonly #auth: WebSocketAuthSource;
@@ -187,6 +193,16 @@ export class WebSocketAuthIndex {
 
   countForTab(terminalTabId: string): number {
     return this.#tabCounts.get(terminalTabId) ?? 0;
+  }
+
+  entries(): readonly WebSocketRuntimeSnapshot[] {
+    return Object.freeze(
+      [...this.#tabCounts.entries()]
+        .slice(0, MAX_RUNTIME_SNAPSHOTS)
+        .map(([terminalTabId, count]) =>
+          Object.freeze({ terminalTabId, count }),
+        ),
+    );
   }
 
   cleanupSnapshot(terminalTabId: string): WebSocketCleanupSnapshot {

@@ -330,6 +330,24 @@ describe('BridgeRegistry', () => {
       },
     ]);
   });
+
+  it('bounds runtime snapshots and orders them without exposing owners', async () => {
+    const registry = new BridgeRegistry();
+    for (let index = 24; index >= 0; index -= 1) {
+      const id = `${index.toString(16).padStart(8, '0')}-e29b-41d4-a716-446655440000`;
+      await registry.replace(id, owner(undefined, index + 1));
+    }
+
+    const snapshot = registry.entries();
+
+    expect(snapshot).toHaveLength(20);
+    expect(snapshot[0]?.sessionId).toBe('00000000-e29b-41d4-a716-446655440000');
+    expect(snapshot[19]?.sessionId).toBe(
+      '00000013-e29b-41d4-a716-446655440000',
+    );
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toMatch(/close|owner/i);
+  });
 });
 
 function owner(

@@ -137,6 +137,51 @@ describe('WebSocketAuthIndex', () => {
     expect(second.listenerCount()).toBe(0);
   });
 
+  it('exposes immutable bounded per-tab counts without sockets or authorities', () => {
+    const auth = authSource();
+    const index = new WebSocketAuthIndex({
+      auth,
+      maxApplicationSessions: 2,
+      maxSockets: 4,
+    });
+    expect(index.registerIfActive(AUTH_A, TAB_B, new FakeSocket())).toBe(true);
+    expect(index.registerIfActive(AUTH_A, TAB_A, new FakeSocket())).toBe(true);
+    expect(index.registerIfActive(AUTH_B, TAB_A, new FakeSocket())).toBe(true);
+
+    const snapshot = index.entries();
+
+    expect(snapshot).toEqual([
+      { terminalTabId: TAB_B, count: 1 },
+      { terminalTabId: TAB_A, count: 2 },
+    ]);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot[0])).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toMatch(
+      /socket|authority|applicationSessionId|expiresAt/i,
+    );
+  });
+
+  it('caps per-tab runtime snapshots independently of socket capacity', () => {
+    const auth = authSource();
+    const index = new WebSocketAuthIndex({
+      auth,
+      maxApplicationSessions: 2,
+      maxSockets: 25,
+    });
+    for (let tab = 0; tab < 25; tab += 1) {
+      expect(
+        index.registerIfActive(
+          AUTH_A,
+          `${tab.toString(16).padStart(8, '0')}-e29b-41d4-a716-446655440000`,
+          new FakeSocket(),
+        ),
+      ).toBe(true);
+    }
+
+    expect(index.entries()).toHaveLength(20);
+    expect(index.connectedCount()).toBe(25);
+  });
+
   it('rejects inactive, mismatched-generation, closed, and over-capacity registrations', () => {
     const auth = authSource();
     const index = new WebSocketAuthIndex({

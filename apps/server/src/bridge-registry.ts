@@ -13,6 +13,8 @@ export type BridgeRuntimeSnapshot = Readonly<{
   attached: true;
 }>;
 
+const MAX_RUNTIME_SNAPSHOTS = 20;
+
 export class BridgeRegistry {
   private readonly owners = new Map<string, BridgeOwner>();
   private readonly operationQueues = new Map<string, Promise<void>>();
@@ -26,13 +28,16 @@ export class BridgeRegistry {
 
   entries(): readonly BridgeRuntimeSnapshot[] {
     return Object.freeze(
-      [...this.owners.entries()].map(([sessionId, owner]) =>
-        Object.freeze({
-          sessionId,
-          pid: ownerPid(owner),
-          attached: true as const,
-        }),
-      ),
+      [...this.owners.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .slice(0, MAX_RUNTIME_SNAPSHOTS)
+        .map(([sessionId, owner]) =>
+          Object.freeze({
+            sessionId,
+            pid: ownerPid(owner),
+            attached: true as const,
+          }),
+        ),
     );
   }
 
