@@ -1,9 +1,23 @@
 import { extname, join } from 'node:path';
 
-import express, { type Express, type Request } from 'express';
+import express, {
+  type Express,
+  type Request,
+  type RequestHandler,
+} from 'express';
 import helmet from 'helmet';
 
+import {
+  requireAuthentication,
+  touchHttpActivity,
+  type AuthMiddlewareOptions,
+} from './auth-middleware.js';
+import { createAuthRouter, type AuthRouterOptions } from './auth-routes.js';
 import { toClientConfig, type AppConfig } from './config.js';
+import {
+  createSettingsRouter,
+  type SettingsRouterOptions,
+} from './settings-routes.js';
 import { createTabRouter, type TabRouterOptions } from './tab-routes.js';
 
 export interface RuntimeReadiness {
@@ -15,12 +29,18 @@ export interface RuntimeMetrics {
   connectedWebSocketCount(): number;
 }
 
+export type Phase3HttpOptions = Readonly<{
+  auth: Omit<AuthRouterOptions, 'basePath' | 'publicOrigin' | 'secureCookie'>;
+  settings: Omit<SettingsRouterOptions, keyof AuthMiddlewareOptions>;
+  tabs: Omit<TabRouterOptions, keyof AuthMiddlewareOptions>;
+}>;
+
 export type CreateAppOptions = Readonly<{
   config: AppConfig;
   readiness: RuntimeReadiness;
   metrics: RuntimeMetrics;
   clientDist: string;
-  tabs?: Omit<TabRouterOptions, 'publicOrigin'>;
+  http?: Phase3HttpOptions;
 }>;
 
 export function createApp(options: CreateAppOptions): Express {
@@ -30,7 +50,17 @@ export function createApp(options: CreateAppOptions): Express {
 
   app.disable('x-powered-by');
   app.enable('case sensitive routing');
-  app.use(helmet());
+  app.use(securityHeaders(options.config));
+
+  app.use((request, response, next) => {
+    const pathname = canonicalPath(request);
+    if (pathname === undefined || isUnsafePath(pathname)) {
+      response.sendStatus(404);
+      return;
+    }
+    response.locals.canonicalPath = pathname;
+    next();
+  });
 
   app.get('/health', (_request, response) => {
     const memory = process.memoryUsage();
@@ -51,30 +81,60 @@ export function createApp(options: CreateAppOptions): Express {
     });
   });
 
-  app.get(
-    withBase(options.config.basePath, '/api/config'),
-    (_request, response) => {
-      response.set('Cache-Control', 'no-store').json(clientConfig);
-    },
-  );
+  if (options.http !== undefined) {
+    const authOptions: AuthRouterOptions = {
+      ...options.http.auth,
+      publicOrigin: options.config.publicOrigin,
+      basePath: options.config.basePath,
+      secureCookie: new URL(options.config.publicUrl).protocol === 'https:',
+    };
+    const sharedAuth: AuthMiddlewareOptions = {
+      mode: authOptions.mode,
+      publicOrigin: authOptions.publicOrigin,
+      authService: authOptions.authService,
+      ...(authOptions.cloudflareAccessProvider === undefined
+        ? {}
+        : { cloudflareAccessProvider: authOptions.cloudflareAccessProvider }),
+      ...(authOptions.trustedHeaderProvider === undefined
+        ? {}
+        : { trustedHeaderProvider: authOptions.trustedHeaderProvider }),
+      ...(authOptions.logger === undefined
+        ? {}
+        : { logger: authOptions.logger }),
+    };
+    const requireAuth = requireAuthentication(sharedAuth);
+    const touch = touchHttpActivity(sharedAuth);
 
-  app.use((request, response, next) => {
-    const pathname = canonicalPath(request);
-    if (pathname === undefined || isUnsafePath(pathname)) {
-      response.sendStatus(404);
-      return;
-    }
-    response.locals.canonicalPath = pathname;
-    next();
-  });
-
-  if (options.tabs !== undefined) {
     app.use(
       apiPrefix,
-      createTabRouter({
-        publicOrigin: options.config.publicOrigin,
-        ...options.tabs,
-      }),
+      dispatchNamespace('/auth', createAuthRouter(authOptions)),
+    );
+    app.get(
+      withBase(options.config.basePath, '/api/config'),
+      noStore,
+      requireAuth,
+      touch,
+      (_request, response) => response.json(clientConfig),
+    );
+    app.use(
+      apiPrefix,
+      dispatchNamespace(
+        '/settings',
+        createSettingsRouter({
+          ...sharedAuth,
+          ...options.http.settings,
+        }),
+      ),
+    );
+    app.use(
+      apiPrefix,
+      dispatchNamespace(
+        '/tabs',
+        createTabRouter({
+          ...sharedAuth,
+          ...options.http.tabs,
+        }),
+      ),
     );
   }
 
@@ -125,6 +185,64 @@ function withBase(basePath: string, path: string): string {
   return basePath === '/' ? path : `${basePath}${path}`;
 }
 
+function securityHeaders(config: AppConfig): RequestHandler {
+  const publicUrl = new URL(config.publicUrl);
+  const websocketProtocol = publicUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  const websocketEndpoint = `${websocketProtocol}//${publicUrl.host}${withBase(
+    config.basePath,
+    '/ws',
+  )}`;
+  return helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        connectSrc: ["'self'", websocketEndpoint],
+        fontSrc: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
+        imgSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        scriptSrc: ["'self'"],
+        scriptSrcAttr: ["'none'"],
+        styleSrc: ["'self'"],
+        upgradeInsecureRequests: null,
+      },
+    },
+    frameguard: { action: 'deny' },
+    referrerPolicy: { policy: 'no-referrer' },
+    strictTransportSecurity:
+      publicUrl.protocol === 'https:'
+        ? { maxAge: 31_536_000, includeSubDomains: false }
+        : false,
+  });
+}
+
+function noStore(
+  _request: express.Request,
+  response: express.Response,
+  next: express.NextFunction,
+): void {
+  response.set('Cache-Control', 'no-store');
+  next();
+}
+
+function dispatchNamespace(
+  namespace: string,
+  handler: RequestHandler,
+): RequestHandler {
+  return (request, response, next) => {
+    if (
+      request.path !== namespace &&
+      !request.path.startsWith(`${namespace}/`)
+    ) {
+      next();
+      return;
+    }
+    handler(request, response, next);
+  };
+}
+
 function isWithinBase(pathname: string, basePath: string): boolean {
   return (
     basePath === '/' ||
@@ -155,7 +273,8 @@ function canonicalPath(request: Request): string | undefined {
   const rawPathname = request.originalUrl.split('?', 1)[0] ?? '';
   if (/%(?:2f|5c)/i.test(rawPathname)) return undefined;
   try {
-    return decodeURIComponent(rawPathname);
+    const decoded = decodeURIComponent(rawPathname);
+    return decoded === rawPathname ? decoded : undefined;
   } catch {
     return undefined;
   }

@@ -6,11 +6,22 @@ import { tmpdir } from 'node:os';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { TabView } from '@flanterminal/shared';
+import type {
+  TabView,
+  WorkspaceSettings,
+  WorkspaceSettingsConstraints,
+} from '@flanterminal/shared';
 
 import { createApp } from './app.js';
+import type { AuthMiddlewareOptions } from './auth-middleware.js';
+import type { AuthRouterOptions } from './auth-routes.js';
+import type {
+  AuthBootstrapResult,
+  AuthenticatedSession,
+} from './auth-types.js';
 import { loadConfig } from './config.js';
 import { TabNotFoundError as SessionTabNotFoundError } from './session-manager.js';
+import type { SettingsRouterOptions } from './settings-routes.js';
 import type { TabRouterOptions } from './tab-routes.js';
 import { SessionLimitError } from './tab-store.js';
 
@@ -66,8 +77,11 @@ describe('createApp', () => {
     expect(await response.json()).toEqual(body);
   });
 
-  it('serves only strict browser-safe configuration with no-store', async () => {
-    const response = await request('/terminal/api/config');
+  it('serves only strict browser-safe configuration to an authenticated session with no-store', async () => {
+    const response = await request('/terminal/api/config', {
+      http: httpDependencies(),
+      init: { headers: { Cookie: `flanterminal_session=${COOKIE}` } },
+    });
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toContain('no-store');
     expect(await response.json()).toEqual({
@@ -77,6 +91,162 @@ describe('createApp', () => {
       resizeDebounceMs: 100,
       reconnectMaxSeconds: 15,
     });
+  });
+
+  it.each(['/terminal', '/'])(
+    'keeps only health, readiness, auth bootstrap, login, and the data-free shell public for %s',
+    async (basePath) => {
+      const api = apiPath(basePath);
+      const http = httpDependencies();
+      const publicCases: ReadonlyArray<readonly [string, RequestInit?]> = [
+        ['/health'],
+        ['/ready'],
+        [`${api}/auth/session`],
+        [
+          `${api}/auth/login`,
+          {
+            method: 'POST',
+            headers: {
+              Origin: PUBLIC_ORIGIN,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ username: 'admin', password: 'correct' }),
+          },
+        ],
+        [basePath === '/' ? '/' : `${basePath}/`],
+        [withTestBase(basePath, '/app.js')],
+      ];
+
+      for (const [path, init] of publicCases) {
+        const response = await request(path, {
+          basePath,
+          http,
+          ...(init === undefined ? {} : { init }),
+        });
+        expect(response.status, path).toBe(200);
+      }
+
+      const shell = await request(basePath === '/' ? '/' : `${basePath}/`, {
+        basePath,
+        http,
+      });
+      const shellText = await shell.text();
+      expect(shellText).toContain('terminal app');
+      expect(shellText).not.toContain(CSRF);
+      expect(shellText).not.toContain(COOKIE);
+
+      for (const [method, path] of [
+        ['GET', `${api}/config`],
+        ['GET', `${api}/settings`],
+        ['GET', `${api}/tabs`],
+        ['POST', `${api}/auth/refresh`],
+        ['POST', `${api}/auth/logout`],
+        ['PUT', `${api}/auth/password`],
+      ] as const) {
+        const response = await request(path, {
+          basePath,
+          http,
+          ...(method === 'GET'
+            ? {}
+            : {
+                init: {
+                  method,
+                  headers: jsonHeaders(),
+                  body: '{}',
+                },
+              }),
+        });
+        expect(response.status, `${method} ${path}`).toBe(401);
+        expect(response.headers.get('cache-control')).toContain('no-store');
+      }
+    },
+  );
+
+  it.each(['/terminal', '/'])(
+    'mounts exact strict auth routes and scopes cookies to %s',
+    async (basePath) => {
+      const api = apiPath(basePath);
+      const http = httpDependencies();
+      const response = await request(`${api}/auth/login`, {
+        basePath,
+        publicUrl: 'https://terminal.example',
+        http,
+        init: {
+          method: 'POST',
+          headers: {
+            Origin: 'https://terminal.example',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ username: 'admin', password: 'correct' }),
+        },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('set-cookie')).toContain(`Path=${basePath}`);
+      expect(response.headers.get('set-cookie')).toContain('Secure');
+      for (const alias of [
+        `${api}/Auth/session`,
+        `${api}/auth/session/`,
+        `${api}/auth//session`,
+      ]) {
+        expect((await request(alias, { basePath, http })).status, alias).toBe(
+          404,
+        );
+      }
+    },
+  );
+
+  it('rejects aliases, encodings, and traversal before any route service runs', async () => {
+    const metrics = {
+      activeSessionCount: vi.fn(() => 2),
+      connectedWebSocketCount: vi.fn(() => 3),
+    };
+    const readiness = { isReady: vi.fn(() => true) };
+    const http = httpDependencies();
+
+    for (const path of [
+      '/HEALTH',
+      '/%68ealth',
+      '/terminal/%61pi/auth/session',
+      '/terminal/api/%61uth/session',
+      '/terminal/api/auth/%73ession',
+      '/terminal/api/auth/%2e%2e/session',
+      '/terminal/api/auth%2fsession',
+      '/TERMINAL/api/auth/session',
+    ]) {
+      const response = await request(path, { http, metrics, readiness });
+      expect(response.status, path).toBe(404);
+    }
+
+    expect(metrics.activeSessionCount).not.toHaveBeenCalled();
+    expect(metrics.connectedWebSocketCount).not.toHaveBeenCalled();
+    expect(readiness.isReady).not.toHaveBeenCalled();
+    expect(http.auth.authService.bootstrap).not.toHaveBeenCalled();
+    expect(http.auth.authService.authenticateCookie).not.toHaveBeenCalled();
+  });
+
+  it('keeps private data fail-closed when Phase 3 HTTP services are absent', async () => {
+    for (const path of [
+      '/terminal/api/config',
+      '/terminal/api/settings',
+      '/terminal/api/tabs',
+      '/terminal/api/auth/session',
+      '/terminal/api/auth/login',
+    ]) {
+      const response = await request(path, {
+        ...(path.endsWith('/login')
+          ? {
+              init: {
+                method: 'POST',
+                headers: jsonHeaders(),
+                body: '{}',
+              },
+            }
+          : {}),
+      });
+      expect(response.status, path).toBe(404);
+      expect(await response.text()).not.toContain('terminal app');
+    }
   });
 
   it.each(['/terminal', '/'])(
@@ -213,7 +383,7 @@ describe('createApp', () => {
       }
 
       for (const [path, statuses] of [
-        [`${api}/tabs/%35${FIXED_SESSION_ID.slice(1)}/session`, [400]],
+        [`${api}/tabs/%35${FIXED_SESSION_ID.slice(1)}/session`, [404]],
         [`${api}/tabs/${FIXED_SESSION_ID}/session/`, [404]],
         [`${api}/tabs/${FIXED_SESSION_ID.toUpperCase()}/session`, [400]],
         [`${api}/tabs/${FIXED_SESSION_ID}%2F..%2Fother/session`, [404]],
@@ -230,11 +400,43 @@ describe('createApp', () => {
     expect(response.status).toBe(404);
   });
 
+  it.each([
+    ['http://localhost:3000', '/terminal'],
+    ['https://terminal.example', '/terminal'],
+    ['https://terminal.example', '/'],
+  ])(
+    'sets an asset-local CSP and explicit security headers for %s at %s',
+    async (publicUrl, basePath) => {
+      const response = await request('/health', { publicUrl, basePath });
+      const csp = response.headers.get('content-security-policy') ?? '';
+
+      const websocketProtocol = publicUrl.startsWith('https:') ? 'wss' : 'ws';
+      const publicOrigin = new URL(publicUrl);
+      const wsPath = withTestBase(basePath, '/ws');
+      expect(csp).toContain("default-src 'self'");
+      expect(csp).toContain("script-src 'self'");
+      expect(csp).toContain("style-src 'self'");
+      expect(csp).toContain("font-src 'self'");
+      expect(csp).toContain(
+        `connect-src 'self' ${websocketProtocol}://${publicOrigin.host}${wsPath}`,
+      );
+      expect(csp).toContain("frame-ancestors 'none'");
+      expect(csp).not.toMatch(/\b(?:https?:|wss?:)\s*\*/);
+      expect(csp).not.toContain('data:');
+      expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(response.headers.get('x-frame-options')).toBe('DENY');
+      expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+      expect(response.headers.has('strict-transport-security')).toBe(
+        publicUrl.startsWith('https:'),
+      );
+    },
+  );
+
   it('sets helmet security headers', async () => {
     const response = await request('/health');
     expect(response.headers.get('x-content-type-options')).toBe('nosniff');
     expect(response.headers.get('content-security-policy')).toBeTruthy();
-    expect(response.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    expect(response.headers.get('x-frame-options')).toBe('DENY');
   });
 
   it('serves static assets and extensionless SPA navigation only under the base', async () => {
@@ -369,27 +571,42 @@ async function request(
   options: {
     ready?: boolean;
     basePath?: string;
+    publicUrl?: string;
     redirect?: RequestRedirect;
     tabs?: boolean;
     init?: RequestInit;
     tabFailure?: AppTabFailure;
+    http?: AppHttpDependencies;
+    metrics?: {
+      activeSessionCount(): number;
+      connectedWebSocketCount(): number;
+    };
+    readiness?: { isReady(): boolean | Promise<boolean> };
   } = {},
 ): Promise<Response> {
   if (server !== undefined) {
     await new Promise<void>((resolve) => server?.close(() => resolve()));
     server = undefined;
   }
+  const http =
+    options.http ??
+    (options.tabs === true ? httpDependencies(options.tabFailure) : undefined);
   const app = createApp({
-    config: config(options.basePath ?? '/terminal'),
-    readiness: { isReady: vi.fn(() => options.ready ?? true) },
-    metrics: {
-      activeSessionCount: vi.fn(() => 2),
-      connectedWebSocketCount: vi.fn(() => 3),
-    },
+    config: config(
+      options.basePath ?? '/terminal',
+      options.publicUrl ?? PUBLIC_ORIGIN,
+    ),
+    readiness:
+      options.readiness ??
+      ({ isReady: vi.fn(() => options.ready ?? true) } as const),
+    metrics:
+      options.metrics ??
+      ({
+        activeSessionCount: vi.fn(() => 2),
+        connectedWebSocketCount: vi.fn(() => 3),
+      } as const),
     clientDist,
-    ...(options.tabs === true
-      ? { tabs: tabDependencies(options.tabFailure) }
-      : {}),
+    ...(http === undefined ? {} : { http }),
   });
   server = createServer(app);
   server.listen(0, '127.0.0.1');
@@ -413,22 +630,8 @@ type AppTabFailure = 'create_conflict' | 'restart_failure' | 'view_not_found';
 
 function tabDependencies(
   failure?: AppTabFailure,
-): Omit<TabRouterOptions, 'publicOrigin'> {
+): Omit<TabRouterOptions, keyof AuthMiddlewareOptions> {
   return {
-    mode: 'local',
-    authService: {
-      authenticateCookie: vi.fn(() => ({
-        id: 'session-id',
-        mode: 'local' as const,
-        identityLabel: 'admin',
-        createdAt: 0,
-        lastSeen: 0,
-        idleExpiresAt: 1_000,
-        absoluteExpiresAt: 2_000,
-      })),
-      verifyCsrf: vi.fn((_id, supplied) => supplied === CSRF),
-      touch: vi.fn(),
-    },
     store: {
       create: vi.fn(async (displayName) => {
         if (failure === 'create_conflict') throw new SessionLimitError();
@@ -491,9 +694,116 @@ function jsonHeaders(): Record<string, string> {
   };
 }
 
-function config(basePath: string) {
+type AppHttpDependencies = Readonly<{
+  auth: Omit<AuthRouterOptions, 'basePath' | 'publicOrigin' | 'secureCookie'>;
+  settings: Omit<SettingsRouterOptions, keyof AuthMiddlewareOptions>;
+  tabs: Omit<TabRouterOptions, keyof AuthMiddlewareOptions>;
+}>;
+
+function httpDependencies(failure?: AppTabFailure): AppHttpDependencies {
+  const session = authenticatedSession();
+  const authService: AuthRouterOptions['authService'] = {
+    authenticateCookie: vi.fn((raw) => (raw === COOKIE ? session : undefined)),
+    verifyCsrf: vi.fn((_id, supplied) => supplied === CSRF),
+    touch: vi.fn(),
+    bootstrap: vi.fn(async (): Promise<AuthBootstrapResult> => ({
+      bootstrap: { authenticated: false, mode: 'local' as const },
+    })),
+    login: vi.fn(async (): Promise<AuthBootstrapResult> => ({
+      bootstrap: {
+        authenticated: true,
+        mode: 'local' as const,
+        identityLabel: 'admin',
+        csrfToken: CSRF,
+      },
+      cookieValue: COOKIE,
+    })),
+    resume: vi.fn(() => ({
+      bootstrap: {
+        authenticated: true,
+        mode: 'local' as const,
+        identityLabel: 'admin',
+        csrfToken: CSRF,
+      },
+    })),
+    refresh: vi.fn(() => session),
+    logout: vi.fn(),
+    changePassword: vi.fn(async () => true),
+  };
+  return {
+    auth: {
+      mode: 'local',
+      authService,
+      logger: { warn: vi.fn(), error: vi.fn() },
+    },
+    settings: {
+      store: {
+        snapshot: vi.fn(() => DEFAULT_SETTINGS),
+        replace: vi.fn(async () => ({ state: 'committed' as const })),
+      },
+      constraints: SETTINGS_CONSTRAINTS,
+    },
+    tabs: tabDependencies(failure),
+  };
+}
+
+function authenticatedSession(): AuthenticatedSession {
+  return Object.freeze({
+    id: 'session-id',
+    mode: 'local',
+    identityLabel: 'admin',
+    createdAt: 0,
+    lastSeen: 0,
+    idleExpiresAt: 1_000,
+    absoluteExpiresAt: 2_000,
+  });
+}
+
+const DEFAULT_SETTINGS: WorkspaceSettings = {
+  version: 1,
+  fontFamily: 'jetbrains-mono-nerd',
+  fontSize: 14,
+  lineHeight: 1.2,
+  letterSpacing: 0,
+  scrollback: 10_000,
+  theme: 'dark',
+  cursorStyle: 'block',
+  cursorBlink: true,
+  bellBehavior: 'visual',
+  reconnectBehavior: 'automatic',
+  automaticTabCreation: true,
+  workspaceShortcuts: 'default',
+  defaultShell: '/bin/bash',
+  tmuxHistoryLimit: 50_000,
+  staleSessionCleanupHours: 24,
+};
+
+const SETTINGS_CONSTRAINTS: WorkspaceSettingsConstraints = {
+  limits: {
+    fontFamilies: ['jetbrains-mono-nerd'],
+    fontSize: { min: 10, max: 24, step: 1 },
+    lineHeight: { min: 1, max: 1.5, step: 0.05 },
+    letterSpacing: { min: 0, max: 2, step: 1 },
+    scrollback: { min: 1_000, max: 50_000, step: 1_000 },
+    themes: ['dark'],
+    cursorStyles: ['block'],
+    bellBehaviors: ['none', 'visual'],
+    reconnectBehaviors: ['automatic', 'manual'],
+    workspaceShortcutModes: ['default', 'disabled'],
+    tmuxHistoryLimit: { min: 0, max: 100_000, step: 1_000 },
+    staleSessionCleanupHours: { min: 0, max: 168, step: 1 },
+  },
+  allowedShells: ['/bin/bash'],
+};
+
+function withTestBase(basePath: string, path: string): string {
+  return basePath === '/' ? path : `${basePath}${path}`;
+}
+
+function config(basePath: string, publicUrl = PUBLIC_ORIGIN) {
   return loadConfig({
     APP_BASE_PATH: basePath,
+    APP_PUBLIC_URL: publicUrl,
     DEFAULT_SHELL: '/bin/bash',
     HOME_DIR: '/home/secret',
   });
