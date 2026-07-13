@@ -348,6 +348,35 @@ describe('BridgeRegistry', () => {
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(JSON.stringify(snapshot)).not.toMatch(/close|owner/i);
   });
+
+  it('correlates a bounded requested-ID snapshot past stale sorted prefixes', async () => {
+    const registry = new BridgeRegistry();
+    for (let index = 0; index < 20; index += 1) {
+      await registry.replace(
+        `${index.toString(16).padStart(8, '0')}-e29b-41d4-a716-446655440000`,
+        owner(undefined, index + 1),
+      );
+    }
+    await registry.replace(
+      '550e8400-e29b-41d4-a716-446655440000',
+      owner(undefined, 9876),
+    );
+
+    const snapshot = registry.snapshotFor([
+      '550e8400-e29b-41d4-a716-446655440000',
+    ]);
+
+    expect(snapshot).toEqual([
+      {
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+        pid: 9876,
+        attached: true,
+      },
+    ]);
+    expect(registry.registeredCount()).toBe(21);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toMatch(/close|owner/i);
+  });
 });
 
 function owner(

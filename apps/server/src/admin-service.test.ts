@@ -108,6 +108,138 @@ describe('AdminService', () => {
     expect(maximumActive).toBe(3);
   });
 
+  it('coalesces simultaneous snapshots into one globally bounded probe batch', async () => {
+    const releases: Array<() => void> = [];
+    const options = dependencies({
+      maxSessions: 1,
+      tabs: [tab(TAB_A, 0, 'First')],
+    });
+    options.runtime.exists.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => releases.push(() => resolve(true))),
+    );
+    const service = new AdminService({ ...options, probeConcurrency: 1 });
+
+    const requests = Array.from({ length: 50 }, () => service.snapshot());
+    await vi.waitFor(() => expect(releases.length).toBeGreaterThan(0));
+    const startedBeforeRelease = options.runtime.exists.mock.calls.length;
+    for (const release of releases.splice(0)) release();
+    const snapshots = await Promise.all(requests);
+
+    expect(startedBeforeRelease).toBe(1);
+    expect(options.runtime.exists).toHaveBeenCalledOnce();
+    expect(options.eligibility.read).toHaveBeenCalledOnce();
+    expect(new Set(snapshots).size).toBe(1);
+  });
+
+  it('times out a stuck runtime probe while retaining its global slot until late settlement', async () => {
+    const scheduler = new ManualProbeScheduler();
+    let rejectLate!: (reason?: unknown) => void;
+    const options = dependencies({
+      maxSessions: 1,
+      tabs: [tab(TAB_A, 0, 'First')],
+    });
+    options.runtime.exists
+      .mockImplementationOnce(
+        () =>
+          new Promise<boolean>((_resolve, reject) => {
+            rejectLate = reject;
+          }),
+      )
+      .mockResolvedValue(true);
+    const service = new AdminService({
+      ...options,
+      probeConcurrency: 1,
+      probeTimeoutMs: 100,
+      probeScheduler: scheduler,
+    });
+
+    const firstPending = service.snapshot();
+    await vi.waitFor(() =>
+      expect(options.runtime.exists).toHaveBeenCalledOnce(),
+    );
+    expect(scheduler.activeCount()).toBe(1);
+    scheduler.fireNext();
+    const first = await firstPending;
+
+    expect(first.sessions[0]).toMatchObject({
+      observedState: 'unknown',
+      cleanupEligible: false,
+      lifecycleError: 'session_status_unavailable',
+    });
+    expect(scheduler.activeCount()).toBe(0);
+
+    const secondPending = service.snapshot();
+    await Promise.resolve();
+    expect(options.runtime.exists).toHaveBeenCalledOnce();
+    scheduler.fireNext();
+    const second = await secondPending;
+    expect(second.sessions[0]?.observedState).toBe('unknown');
+    expect(options.runtime.exists).toHaveBeenCalledOnce();
+
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    rejectLate(new Error('late secret tmux failure'));
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('unhandledRejection', unhandled);
+    expect(unhandled).not.toHaveBeenCalled();
+
+    const recovered = await service.snapshot();
+    expect(recovered.sessions[0]?.observedState).toBe('running');
+    expect(options.runtime.exists).toHaveBeenCalledTimes(2);
+    expect(scheduler.activeCount()).toBe(0);
+  });
+
+  it('times out stuck cleanup eligibility and recovers without leaking timers', async () => {
+    const scheduler = new ManualProbeScheduler();
+    let resolveLate!: (snapshot: EligibilitySnapshot) => void;
+    const options = dependencies({
+      maxSessions: 1,
+      tabs: [tab(TAB_A, 0, 'First')],
+    });
+    options.eligibility.read
+      .mockImplementationOnce(
+        () =>
+          new Promise<EligibilitySnapshot>((resolve) => {
+            resolveLate = resolve;
+          }),
+      )
+      .mockImplementation(async (request) => eligible(request));
+    const service = new AdminService({
+      ...options,
+      probeConcurrency: 1,
+      probeTimeoutMs: 100,
+      probeScheduler: scheduler,
+    });
+
+    const pending = service.snapshot();
+    await vi.waitFor(() =>
+      expect(options.eligibility.read).toHaveBeenCalledOnce(),
+    );
+    expect(scheduler.activeCount()).toBe(1);
+    scheduler.fireNext();
+    const timedOut = await pending;
+
+    expect(timedOut.sessions[0]).toMatchObject({
+      observedState: 'running',
+      cleanupEligible: false,
+      lifecycleError: 'cleanup_status_unavailable',
+    });
+    expect(scheduler.activeCount()).toBe(0);
+
+    const request = options.eligibility.read.mock.calls[0]?.[0];
+    expect(request).toBeDefined();
+    resolveLate(eligible(request!));
+    await Promise.resolve();
+    const recovered = await service.snapshot();
+    expect(recovered.sessions[0]).toMatchObject({
+      observedState: 'running',
+      cleanupEligible: true,
+      lifecycleError: null,
+    });
+    expect(scheduler.activeCount()).toBe(0);
+  });
+
   it('degrades failed probes and unsafe metrics without exposing raw dependency data', async () => {
     const options = dependencies({
       now: () => Number.NaN,
@@ -120,7 +252,7 @@ describe('AdminService', () => {
     options.eligibility.read.mockRejectedValue(
       new Error('cleanup environment HOME=/private'),
     );
-    options.bridges.entries.mockReturnValue(
+    options.bridges.snapshotFor.mockReturnValue(
       Object.freeze([
         Object.freeze({ sessionId: TAB_A, pid: Number.NaN, attached: true }),
       ]),
@@ -200,6 +332,77 @@ describe('AdminService', () => {
       'lastRunAt',
     ]);
   });
+
+  it('correlates current tabs through exact socket and bridge lookups with independent totals', async () => {
+    const staleIds = Array.from(
+      { length: 20 },
+      (_, index) =>
+        `${index.toString(16).padStart(8, '0')}-e29b-41d4-a716-446655440000`,
+    );
+    const options = dependencies();
+    const sockets = {
+      entries: vi.fn(() =>
+        Object.freeze([
+          ...staleIds.map((terminalTabId) =>
+            Object.freeze({ terminalTabId, count: 1 }),
+          ),
+          Object.freeze({ terminalTabId: TAB_A, count: 7 }),
+        ]),
+      ),
+      countForTab: vi.fn((id: string) => (id === TAB_A ? 7 : 0)),
+      connectedCount: vi.fn(() => 27),
+    };
+    const bridges = {
+      entries: vi.fn(() =>
+        Object.freeze([
+          ...staleIds.map((sessionId, index) =>
+            Object.freeze({
+              sessionId,
+              pid: index + 1,
+              attached: true as const,
+            }),
+          ),
+          Object.freeze({
+            sessionId: TAB_A,
+            pid: 9876,
+            attached: true as const,
+          }),
+        ]),
+      ),
+      snapshotFor: vi.fn((ids: readonly string[]) =>
+        Object.freeze(
+          ids.flatMap((id) =>
+            id === TAB_A
+              ? [
+                  Object.freeze({
+                    sessionId: id,
+                    pid: 9876,
+                    attached: true as const,
+                  }),
+                ]
+              : [],
+          ),
+        ),
+      ),
+      registeredCount: vi.fn(() => 21),
+    };
+
+    const snapshot = await new AdminService({
+      ...options,
+      sockets,
+      bridges,
+    }).snapshot();
+
+    expect(snapshot.sessions[0]).toMatchObject({
+      id: TAB_A,
+      connectedWebSockets: 7,
+      bridgePid: 9876,
+    });
+    expect(snapshot.totals.webSockets).toBe(27);
+    expect(snapshot.totals.bridges).toBe(21);
+    expect(sockets.entries).not.toHaveBeenCalled();
+    expect(bridges.entries).not.toHaveBeenCalled();
+  });
 });
 
 function dependencies(
@@ -230,19 +433,16 @@ function dependencies(
     tabs: { snapshot: vi.fn(() => ({ structureRevision: 1, tabs: records })) },
     runtime,
     bridges: {
-      entries: vi.fn<AdminServiceOptions['bridges']['entries']>(() =>
+      snapshotFor: vi.fn<AdminServiceOptions['bridges']['snapshotFor']>(() =>
         Object.freeze([
           Object.freeze({ sessionId: TAB_A, pid: 4321, attached: true }),
         ]),
       ),
+      registeredCount: vi.fn(() => 1),
     },
     sockets: {
-      entries: vi.fn<AdminServiceOptions['sockets']['entries']>(() =>
-        Object.freeze([
-          Object.freeze({ terminalTabId: TAB_A, count: 2 }),
-          Object.freeze({ terminalTabId: TAB_B, count: 1 }),
-        ]),
-      ),
+      countForTab: vi.fn((id: string) => (id === TAB_A ? 2 : 1)),
+      connectedCount: vi.fn(() => 3),
     },
     eligibility,
     cleanupSettings: {
@@ -281,4 +481,44 @@ function tab(
       id === TAB_A ? '2026-07-12T17:00:00.000Z' : '2026-07-12T17:30:00.000Z',
     desiredState,
   } as const;
+}
+
+function eligible(request: {
+  id: string;
+  thresholdMs: number;
+  cutoffMs: number;
+}): EligibilitySnapshot {
+  return Object.freeze({
+    ...request,
+    eligible: true,
+    reason: null,
+    generation: Object.freeze({ structure: 1, activity: 1, sockets: 1 }),
+  });
+}
+
+class ManualProbeScheduler {
+  private nextId = 0;
+  private readonly callbacks = new Map<object, () => void>();
+
+  setTimeout(callback: () => void): object {
+    const handle = Object.freeze({ id: (this.nextId += 1) });
+    this.callbacks.set(handle, callback);
+    return handle;
+  }
+
+  clearTimeout(handle: object): void {
+    this.callbacks.delete(handle);
+  }
+
+  fireNext(): void {
+    const entry = this.callbacks.entries().next().value as
+      [object, () => void] | undefined;
+    if (entry === undefined) throw new Error('No scheduled probe timeout');
+    this.callbacks.delete(entry[0]);
+    entry[1]();
+  }
+
+  activeCount(): number {
+    return this.callbacks.size;
+  }
 }

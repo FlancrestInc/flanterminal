@@ -1,3 +1,5 @@
+import { isSessionId } from '@flanterminal/shared';
+
 import type { BridgeOwner } from './terminal-bridge.js';
 
 export class BridgeRegistryShuttingDownError extends Error {
@@ -39,6 +41,30 @@ export class BridgeRegistry {
           }),
         ),
     );
+  }
+
+  snapshotFor(sessionIds: readonly string[]): readonly BridgeRuntimeSnapshot[] {
+    if (!Array.isArray(sessionIds)) return Object.freeze([]);
+    const seen = new Set<string>();
+    const snapshots: BridgeRuntimeSnapshot[] = [];
+    for (const sessionId of sessionIds.slice(0, MAX_RUNTIME_SNAPSHOTS)) {
+      if (!isSessionId(sessionId) || seen.has(sessionId)) continue;
+      seen.add(sessionId);
+      const owner = this.owners.get(sessionId);
+      if (owner === undefined) continue;
+      snapshots.push(
+        Object.freeze({
+          sessionId,
+          pid: ownerPid(owner),
+          attached: true,
+        }),
+      );
+    }
+    return Object.freeze(snapshots);
+  }
+
+  registeredCount(): number {
+    return this.owners.size;
   }
 
   /** Takes ownership of owner and closes it before any rejected result. */

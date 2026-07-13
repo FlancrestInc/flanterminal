@@ -14,10 +14,11 @@ import type {
 } from './cleanup-eligibility.js';
 import type { CleanupStatus } from './stale-session-cleaner.js';
 import { tmuxSessionName } from './tmux.js';
-import type { WebSocketRuntimeSnapshot } from './websocket-auth-index.js';
 
 const HARD_MAX_SESSIONS = 20;
 const DEFAULT_PROBE_CONCURRENCY = 4;
+const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
+const MAX_PROBE_TIMEOUT_MS = 60_000;
 const MAX_THRESHOLD_HOURS = 8_760;
 const HOUR_MS = 60 * 60 * 1_000;
 const MAX_DATE_MS = 253_402_300_799_999;
@@ -44,11 +45,13 @@ export interface AdminRuntimeSource {
 }
 
 export interface AdminBridgeSource {
-  entries(): readonly BridgeRuntimeSnapshot[];
+  snapshotFor(sessionIds: readonly string[]): readonly BridgeRuntimeSnapshot[];
+  registeredCount(): number;
 }
 
 export interface AdminSocketSource {
-  entries(): readonly WebSocketRuntimeSnapshot[];
+  countForTab(id: string): number;
+  connectedCount(): number;
 }
 
 export interface AdminEligibilitySource {
@@ -63,6 +66,11 @@ export interface AdminCleanupSource {
   status(): CleanupStatus;
 }
 
+export interface AdminProbeScheduler {
+  setTimeout(callback: () => void, delayMs: number): object;
+  clearTimeout(handle: object): void;
+}
+
 export type AdminServiceOptions = Readonly<{
   tabs: AdminTabSource;
   runtime: AdminRuntimeSource;
@@ -73,6 +81,8 @@ export type AdminServiceOptions = Readonly<{
   cleanup: AdminCleanupSource;
   maxSessions: number;
   probeConcurrency?: number;
+  probeTimeoutMs?: number;
+  probeScheduler?: AdminProbeScheduler;
   now?: () => number;
   uptime?: () => number;
   memoryUsage?: () => Readonly<{ rss: number; heapUsed: number }>;
@@ -88,12 +98,16 @@ export class AdminService {
   private readonly maxSessions: number;
   private readonly probeConcurrency: number;
   private readonly now: () => number;
+  private readonly probeTimeoutMs: number;
+  private readonly probeScheduler: AdminProbeScheduler;
+  private readonly probeGate: ProbeGate;
   private readonly uptime: () => number;
   private readonly memoryUsage: () => Readonly<{
     rss: number;
     heapUsed: number;
   }>;
   private readonly errors = new Map<string, AdminLifecycleError>();
+  private inFlightSnapshot: Promise<AdminSnapshot> | undefined;
 
   constructor(private readonly options: AdminServiceOptions) {
     if (
@@ -104,6 +118,7 @@ export class AdminService {
       throw new Error('Invalid administration session capacity');
     }
     const concurrency = options.probeConcurrency ?? DEFAULT_PROBE_CONCURRENCY;
+    const timeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
     if (
       !Number.isInteger(concurrency) ||
       concurrency < 1 ||
@@ -111,19 +126,43 @@ export class AdminService {
     ) {
       throw new Error('Invalid administration probe concurrency');
     }
+    if (
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs < 1 ||
+      timeoutMs > MAX_PROBE_TIMEOUT_MS
+    ) {
+      throw new Error('Invalid administration probe timeout');
+    }
     this.maxSessions = options.maxSessions;
     this.probeConcurrency = concurrency;
+    this.probeTimeoutMs = timeoutMs;
+    this.probeScheduler = options.probeScheduler ?? defaultProbeScheduler;
+    this.probeGate = new ProbeGate(concurrency);
     this.now = options.now ?? Date.now;
     this.uptime = options.uptime ?? (() => process.uptime());
     this.memoryUsage = options.memoryUsage ?? (() => process.memoryUsage());
   }
 
-  async snapshot(): Promise<AdminSnapshot> {
+  snapshot(): Promise<AdminSnapshot> {
+    if (this.inFlightSnapshot !== undefined) return this.inFlightSnapshot;
+    const operation = this.buildSnapshot();
+    this.inFlightSnapshot = operation;
+    void operation.then(
+      () => this.finishSnapshot(operation),
+      () => this.finishSnapshot(operation),
+    );
+    return operation;
+  }
+
+  private async buildSnapshot(): Promise<AdminSnapshot> {
     const now = safeEpoch(this.readNumber(this.now));
     const tabs = this.orderedTabs();
     this.retainCurrentErrors(new Set(tabs.map((tab) => tab.id)));
-    const bridges = bridgeMap(this.readBridgeEntries());
-    const sockets = socketMap(this.readSocketEntries());
+    const tabIds = tabs.map((tab) => tab.id);
+    const bridges = bridgeMap(this.readBridgeEntries(tabIds));
+    const sockets = this.readSocketCounts(tabIds);
+    const bridgeTotal = this.readBridgeTotal();
+    const socketTotal = this.readSocketTotal();
     const cleanupStatus = this.readCleanupStatus();
     const thresholdHours = this.readCleanupThreshold();
     const thresholdMs = thresholdHours * HOUR_MS;
@@ -161,15 +200,16 @@ export class AdminService {
         tabs: rows.length,
         runningSessions: rows.filter((row) => row.observedState === 'running')
           .length,
-        bridges: bridges.size,
-        webSockets: [...sockets.values()].reduce(
-          (sum, count) => sum + count,
-          0,
-        ),
+        bridges: bridgeTotal,
+        webSockets: socketTotal,
       },
       cleanup: cleanupStatus,
       sessions: rows,
     });
+  }
+
+  private finishSnapshot(operation: Promise<AdminSnapshot>): void {
+    if (this.inFlightSnapshot === operation) this.inFlightSnapshot = undefined;
   }
 
   recordLifecycleError(id: string, error: AdminLifecycleError): void {
@@ -207,7 +247,9 @@ export class AdminService {
     let observedState: SessionState;
     let dependencyError: AdminLifecycleError | null = null;
     try {
-      const exists = await this.options.runtime.exists(tab.id);
+      const exists = await this.probe(() =>
+        this.options.runtime.exists(tab.id),
+      );
       if (typeof exists !== 'boolean') throw new Error();
       observedState = exists ? 'running' : 'stopped';
     } catch {
@@ -216,13 +258,19 @@ export class AdminService {
     }
 
     let cleanupEligible = false;
-    if (thresholdHours > 0) {
+    if (
+      thresholdHours > 0 &&
+      tab.desiredState === 'active' &&
+      observedState === 'running'
+    ) {
       try {
-        const eligibility = await this.options.eligibility.read({
-          id: tab.id,
-          thresholdMs,
-          cutoffMs,
-        });
+        const eligibility = await this.probe(() =>
+          this.options.eligibility.read({
+            id: tab.id,
+            thresholdMs,
+            cutoffMs,
+          }),
+        );
         cleanupEligible =
           eligibility.id === tab.id &&
           eligibility.thresholdMs === thresholdMs &&
@@ -239,9 +287,20 @@ export class AdminService {
     });
   }
 
-  private readBridgeEntries(): readonly BridgeRuntimeSnapshot[] {
+  private probe<T>(operation: () => Promise<T>): Promise<T> {
+    return boundedProbe(
+      this.probeGate,
+      this.probeScheduler,
+      this.probeTimeoutMs,
+      operation,
+    );
+  }
+
+  private readBridgeEntries(
+    sessionIds: readonly string[],
+  ): readonly BridgeRuntimeSnapshot[] {
     try {
-      const entries = this.options.bridges.entries();
+      const entries = this.options.bridges.snapshotFor(sessionIds);
       return Array.isArray(entries)
         ? entries.slice(0, this.maxSessions)
         : Object.freeze([]);
@@ -250,14 +309,36 @@ export class AdminService {
     }
   }
 
-  private readSocketEntries(): readonly WebSocketRuntimeSnapshot[] {
+  private readSocketCounts(
+    sessionIds: readonly string[],
+  ): ReadonlyMap<string, number> {
+    const counts = new Map<string, number>();
+    for (const id of sessionIds.slice(0, this.maxSessions)) {
+      try {
+        counts.set(
+          id,
+          safeNonnegativeInteger(this.options.sockets.countForTab(id)),
+        );
+      } catch {
+        counts.set(id, 0);
+      }
+    }
+    return counts;
+  }
+
+  private readBridgeTotal(): number {
     try {
-      const entries = this.options.sockets.entries();
-      return Array.isArray(entries)
-        ? entries.slice(0, this.maxSessions)
-        : Object.freeze([]);
+      return safeNonnegativeInteger(this.options.bridges.registeredCount());
     } catch {
-      return Object.freeze([]);
+      return 0;
+    }
+  }
+
+  private readSocketTotal(): number {
+    try {
+      return safeNonnegativeInteger(this.options.sockets.connectedCount());
+    } catch {
+      return 0;
     }
   }
 
@@ -326,21 +407,6 @@ function bridgeMap(
   return result;
 }
 
-function socketMap(
-  entries: readonly WebSocketRuntimeSnapshot[],
-): ReadonlyMap<string, number> {
-  const result = new Map<string, number>();
-  for (const entry of entries) {
-    if (!isSessionId(entry.terminalTabId)) continue;
-    const count = safeNonnegativeInteger(entry.count);
-    result.set(
-      entry.terminalTabId,
-      safeNonnegativeInteger((result.get(entry.terminalTabId) ?? 0) + count),
-    );
-  }
-  return result;
-}
-
 function safePid(value: number | null): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
     ? value
@@ -399,4 +465,135 @@ async function mapConcurrent<T, R>(
   );
   await Promise.all(workers);
   return results;
+}
+
+const defaultProbeScheduler: AdminProbeScheduler = {
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
+};
+
+class ProbeTimeoutError extends Error {}
+
+type ProbeLease = Readonly<{
+  granted: Promise<() => void>;
+  cancel(): void;
+}>;
+
+type ProbeWaiter = {
+  cancelled: boolean;
+  granted: boolean;
+  release: (() => void) | undefined;
+  resolve(release: () => void): void;
+};
+
+class ProbeGate {
+  private active = 0;
+  private readonly waiters: ProbeWaiter[] = [];
+
+  constructor(private readonly capacity: number) {}
+
+  acquire(): ProbeLease {
+    let resolveGrant!: (release: () => void) => void;
+    const waiter: ProbeWaiter = {
+      cancelled: false,
+      granted: false,
+      release: undefined,
+      resolve: (release) => resolveGrant(release),
+    };
+    const granted = new Promise<() => void>((resolve) => {
+      resolveGrant = resolve;
+    });
+    this.waiters.push(waiter);
+    this.drain();
+    return Object.freeze({
+      granted,
+      cancel: () => {
+        if (waiter.cancelled) return;
+        waiter.cancelled = true;
+        if (waiter.granted) waiter.release?.();
+        else {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+        }
+      },
+    });
+  }
+
+  private drain(): void {
+    while (this.active < this.capacity && this.waiters.length > 0) {
+      const waiter = this.waiters.shift();
+      if (waiter === undefined || waiter.cancelled) continue;
+      this.active += 1;
+      waiter.granted = true;
+      let released = false;
+      const release = (): void => {
+        if (released) return;
+        released = true;
+        this.active -= 1;
+        this.drain();
+      };
+      waiter.release = release;
+      waiter.resolve(release);
+    }
+  }
+}
+
+function boundedProbe<T>(
+  gate: ProbeGate,
+  scheduler: AdminProbeScheduler,
+  timeoutMs: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let timer: object | undefined;
+    let cancelWaiting = (): void => undefined;
+    let started = false;
+    let returned = false;
+
+    const finish = (outcome: () => void): void => {
+      if (returned) return;
+      returned = true;
+      if (timer !== undefined) {
+        try {
+          scheduler.clearTimeout(timer);
+        } catch {
+          // The probe result remains authoritative if timer disposal fails.
+        }
+        timer = undefined;
+      }
+      outcome();
+    };
+
+    try {
+      timer = scheduler.setTimeout(() => {
+        timer = undefined;
+        if (!started) cancelWaiting();
+        finish(() => reject(new ProbeTimeoutError()));
+      }, timeoutMs);
+    } catch {
+      reject(new ProbeTimeoutError());
+      return;
+    }
+
+    const lease = gate.acquire();
+    cancelWaiting = lease.cancel;
+    void lease.granted.then((release) => {
+      if (returned) {
+        release();
+        return;
+      }
+      started = true;
+      const underlying = Promise.resolve().then(operation);
+      void underlying.then(
+        (value) => {
+          release();
+          finish(() => resolve(value));
+        },
+        (error: unknown) => {
+          release();
+          finish(() => reject(error));
+        },
+      );
+    });
+  });
 }

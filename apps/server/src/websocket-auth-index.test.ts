@@ -180,6 +180,7 @@ describe('WebSocketAuthIndex', () => {
 
     expect(index.entries()).toHaveLength(20);
     expect(index.connectedCount()).toBe(25);
+    expect(index.countForTab('00000018-e29b-41d4-a716-446655440000')).toBe(1);
   });
 
   it('rejects inactive, mismatched-generation, closed, and over-capacity registrations', () => {
