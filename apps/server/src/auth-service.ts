@@ -71,6 +71,7 @@ export class AuthService {
       fn: (id: string, reason: RevocationReason) => void | Promise<void>;
     }>
   >();
+  #establishmentTail: Promise<void> = Promise.resolve();
   #passwordTail: Promise<void> = Promise.resolve();
   constructor(o: AuthServiceOptions) {
     if (
@@ -99,62 +100,65 @@ export class AuthService {
     this.#observerMax = Math.min(64, Math.max(1, o.maxObservers ?? 64));
   }
 
-  async bootstrap(input: UpstreamAuthentication): Promise<AuthBootstrapResult> {
-    if (this.#mode === 'local') {
-      if (input.type !== 'none') throw new AuthServiceError();
-      return frozen({
-        bootstrap: frozen({ authenticated: false, mode: 'local' }),
-      });
-    }
-    if (this.#mode === 'none') {
-      if (input.type !== 'none') throw new AuthServiceError();
-      return this.#safeEstablish('none', 'anonymous');
-    }
-    if (input.type !== 'upstream' || input.identity.mode !== this.#mode)
-      throw new AuthServiceError();
-    const identity = validateIdentity(input.identity);
-    if (this.#mode === 'cloudflare-access' && identity.expiresAt === undefined)
-      throw new AuthServiceError();
-    if (identity.expiresAt !== undefined && identity.expiresAt <= this.#now())
-      throw new AuthServiceError();
-    return this.#safeEstablish(
-      this.#mode,
-      identity.identityLabel,
-      identity.expiresAt,
-    );
+  bootstrap(input: UpstreamAuthentication): Promise<AuthBootstrapResult> {
+    return this.#enqueueEstablishment(async () => {
+      if (this.#mode === 'local') {
+        if (input.type !== 'none') throw new AuthServiceError();
+        return frozen({
+          bootstrap: frozen({ authenticated: false, mode: 'local' }),
+        });
+      }
+      if (this.#mode === 'none') {
+        if (input.type !== 'none') throw new AuthServiceError();
+        return this.#safeEstablish('none', 'anonymous');
+      }
+      if (input.type !== 'upstream' || input.identity.mode !== this.#mode)
+        throw new AuthServiceError();
+      const identity = validateIdentity(input.identity);
+      if (
+        this.#mode === 'cloudflare-access' &&
+        identity.expiresAt === undefined
+      )
+        throw new AuthServiceError();
+      if (identity.expiresAt !== undefined && identity.expiresAt <= this.#now())
+        throw new AuthServiceError();
+      return this.#safeEstablish(
+        this.#mode,
+        identity.identityLabel,
+        identity.expiresAt,
+      );
+    });
   }
-  async login(input: LocalLoginAttempt): Promise<AuthBootstrapResult> {
-    if (this.#mode !== 'local') throw new AuthServiceError();
-    let allowed: boolean;
-    try {
-      allowed = this.#limiter.consume(input.address);
-    } catch {
-      throw new AuthServiceError();
-    }
-    if (!allowed)
-      return frozen({
-        bootstrap: frozen({ authenticated: false, mode: 'local' }),
-      });
-    let valid = false;
-    try {
-      valid = await this.#credentials.verify(input.username, input.password);
-    } catch {
-      throw new AuthServiceError();
-    }
-    if (!valid)
-      return frozen({
-        bootstrap: frozen({ authenticated: false, mode: 'local' }),
-      });
-    try {
-      const established = this.#safeEstablish(
+  login(input: LocalLoginAttempt): Promise<AuthBootstrapResult> {
+    return this.#enqueueEstablishment(async () => {
+      if (this.#mode !== 'local') throw new AuthServiceError();
+      let allowed: boolean;
+      try {
+        allowed = this.#limiter.consume(input.address);
+      } catch {
+        throw new AuthServiceError();
+      }
+      if (!allowed)
+        return frozen({
+          bootstrap: frozen({ authenticated: false, mode: 'local' }),
+        });
+      let valid = false;
+      try {
+        valid = await this.#credentials.verify(input.username, input.password);
+      } catch {
+        throw new AuthServiceError();
+      }
+      if (!valid)
+        return frozen({
+          bootstrap: frozen({ authenticated: false, mode: 'local' }),
+        });
+      return this.#safeEstablish(
         'local',
         normalizeLabel(input.username),
+        undefined,
+        () => this.#limiter.resetAddress(input.address),
       );
-      this.#limiter.resetAddress(input.address);
-      return established;
-    } catch {
-      throw new AuthServiceError();
-    }
+    });
   }
   authenticateCookie(
     rawCookie: string | undefined,
@@ -309,6 +313,7 @@ export class AuthService {
     mode: AuthMode,
     label: string,
     upstreamExpiresAt?: number,
+    beforeCommit?: () => void,
   ): AuthBootstrapResult {
     const now = this.#now();
     let cookie = '';
@@ -351,27 +356,40 @@ export class AuthService {
     view(s);
     const result = frozen({ bootstrap, cookieValue: cookie });
 
-    this.sweepExpired();
-    if (this.#byId.size >= this.#max) {
-      const oldest = [...this.#byId.values()].sort(
+    const revocations: Array<
+      Readonly<{ session: Stored; reason: RevocationReason }>
+    > = [];
+    const active: Stored[] = [];
+    for (const existing of this.#byId.values()) {
+      const reason = expiredReasonAt(existing, now);
+      if (reason) revocations.push({ session: existing, reason });
+      else active.push(existing);
+    }
+    if (active.length >= this.#max) {
+      const oldest = active.sort(
         (a, b) =>
           a.lastSeen - b.lastSeen ||
           a.createdAt - b.createdAt ||
           a.id.localeCompare(b.id),
       )[0]!;
-      this.#revoke(oldest, 'capacity');
+      revocations.push({ session: oldest, reason: 'capacity' });
     }
+    beforeCommit?.();
+    for (const revocation of revocations) this.#remove(revocation.session);
     this.#byDigest.set(s.digest, s);
     this.#byId.set(id, s);
+    for (const revocation of revocations)
+      this.#emitRevocation(revocation.session.id, revocation.reason);
     return result;
   }
   #safeEstablish(
     mode: AuthMode,
     label: string,
     upstreamExpiresAt?: number,
+    beforeCommit?: () => void,
   ): AuthBootstrapResult {
     try {
-      return this.#establish(mode, label, upstreamExpiresAt);
+      return this.#establish(mode, label, upstreamExpiresAt, beforeCommit);
     } catch {
       throw new AuthServiceError();
     }
@@ -402,17 +420,32 @@ export class AuthService {
     return n >= candidates[0][0] ? candidates[0][1] : undefined;
   }
   #revoke(s: Stored, reason: RevocationReason) {
-    if (!this.#byId.delete(s.id)) return;
+    if (!this.#remove(s)) return;
+    this.#emitRevocation(s.id, reason);
+  }
+  #remove(s: Stored): boolean {
+    if (!this.#byId.delete(s.id)) return false;
     this.#byDigest.delete(s.digest);
     s.digest = '';
+    return true;
+  }
+  #emitRevocation(id: string, reason: RevocationReason): void {
     for (const r of [...this.#observers]) {
       try {
-        const p = r.fn(s.id, reason);
+        const p = r.fn(id, reason);
         if (p) void Promise.resolve(p).catch(() => undefined);
       } catch {
         // Revocation observers cannot affect session authority.
       }
     }
+  }
+  #enqueueEstablishment<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#establishmentTail.then(operation, operation);
+    this.#establishmentTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 }
 function validateIdentity(i: UpstreamIdentity): UpstreamIdentity {
@@ -449,6 +482,15 @@ function normalizeLabel(v: string): string {
 }
 function hash(v: string) {
   return createHash('sha256').update(v).digest('hex');
+}
+function expiredReasonAt(s: Stored, now: number): RevocationReason | undefined {
+  const candidates: Array<readonly [number, RevocationReason]> = [
+    [s.idleExpiresAt, 'idle'],
+    [s.absoluteExpiresAt, 'absolute'],
+    [s.upstreamExpiresAt ?? Infinity, 'upstream'],
+  ];
+  candidates.sort((a, b) => a[0] - b[0]);
+  return now >= candidates[0]![0] ? candidates[0]![1] : undefined;
 }
 function frozen<T>(v: T): T {
   return Object.freeze(v);

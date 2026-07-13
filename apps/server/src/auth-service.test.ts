@@ -88,6 +88,8 @@ describe('AuthService', () => {
     ).rejects.toThrow('Authentication operation failed');
     const none = setup('none');
     await expect(none.service.login(login())).rejects.toThrow();
+    const recovered = await none.service.bootstrap({ type: 'none' });
+    expect(recovered.bootstrap.authenticated).toBe(true);
   });
 
   it('establishes none and matching upstream sessions with immutable secret-free views', async () => {
@@ -391,6 +393,61 @@ describe('AuthService', () => {
     );
     expect(service.authenticateCookie(first.cookieValue)?.id).toBe(victim.id);
     expect(resetAddress).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not publish or evict when successful-login address reset throws', async () => {
+    const h = setup('local', { maxSessions: 1 });
+    const revoked = vi.fn();
+    h.service.onRevoked(revoked);
+    const first = await h.service.login(login());
+    const victim = h.service.authenticateCookie(first.cookieValue)!;
+    h.limiter.resetAddress.mockImplementationOnce(() => {
+      throw new Error('reset failure');
+    });
+    await expect(h.service.login(login())).rejects.toThrow(
+      'Authentication operation failed',
+    );
+    expect(h.service.authenticateCookie(first.cookieValue)?.id).toBe(victim.id);
+    expect(revoked).not.toHaveBeenCalled();
+  });
+
+  it('queues observer-reentrant establishment after complete capacity replacement', async () => {
+    const h = setup('none', { maxSessions: 1 });
+    const first = await h.service.bootstrap({ type: 'none' });
+    const revocations: string[] = [];
+    let reentrant:
+      Promise<Awaited<ReturnType<typeof h.service.bootstrap>>> | undefined;
+    h.service.onRevoked((_id, reason) => {
+      revocations.push(reason);
+      if (!reentrant) reentrant = h.service.bootstrap({ type: 'none' });
+    });
+
+    const outer = await h.service.bootstrap({ type: 'none' });
+    expect(h.service.authenticateCookie(first.cookieValue)).toBeUndefined();
+    expect(h.service.authenticateCookie(outer.cookieValue)).toBeDefined();
+    const inner = await reentrant!;
+    expect(h.service.authenticateCookie(outer.cookieValue)).toBeUndefined();
+    expect(h.service.authenticateCookie(inner.cookieValue)).toBeDefined();
+    expect(revocations).toEqual(['capacity', 'capacity']);
+  });
+
+  it('serializes parallel bootstraps and remains capped deterministically', async () => {
+    const h = setup('none', { maxSessions: 1 });
+    const revoked = vi.fn();
+    h.service.onRevoked(revoked);
+    const results = await Promise.all([
+      h.service.bootstrap({ type: 'none' }),
+      h.service.bootstrap({ type: 'none' }),
+      h.service.bootstrap({ type: 'none' }),
+    ]);
+    expect(
+      h.service.authenticateCookie(results[0]!.cookieValue),
+    ).toBeUndefined();
+    expect(
+      h.service.authenticateCookie(results[1]!.cookieValue),
+    ).toBeUndefined();
+    expect(h.service.authenticateCookie(results[2]!.cookieValue)).toBeDefined();
+    expect(revoked).toHaveBeenCalledTimes(2);
   });
 
   it('contains credential operational failures behind the generic error', async () => {
