@@ -51,6 +51,11 @@ export type CleanupStatus = Readonly<{
   lastRunAt: string | null;
 }>;
 
+type TimerRegistration = {
+  handle?: object;
+  cancelling: boolean;
+};
+
 export class CleanupDisabledError extends Error {
   constructor() {
     super('Stale session cleanup is disabled');
@@ -66,7 +71,7 @@ const defaultScheduler: CleanupScheduler = {
 export class StaleSessionCleaner {
   private readonly scheduler: CleanupScheduler;
   private readonly now: () => number;
-  private timer: object | undefined;
+  private timer: TimerRegistration | undefined;
   private inFlight: Promise<CleanupResult> | undefined;
   private inFlightThresholdHours: number | undefined;
   private lastResult: CleanupResult | undefined;
@@ -220,26 +225,36 @@ export class StaleSessionCleaner {
 
   private schedule(): void {
     if (this.shuttingDown || this.timer !== undefined) return;
+    const registration: TimerRegistration = { cancelling: false };
+    this.timer = registration;
     try {
-      this.timer = this.scheduler.setTimeout(() => {
-        this.timer = undefined;
-        if (this.shuttingDown) return;
-        void this.startRun(this.thresholdHours());
-      }, this.options.intervalMs);
+      registration.handle = this.scheduler.setTimeout(
+        () => this.fireTimer(registration),
+        this.options.intervalMs,
+      );
     } catch {
-      this.timer = undefined;
+      if (this.timer === registration) this.timer = undefined;
     }
   }
 
   private cancelTimer(): void {
-    if (this.timer === undefined) return;
-    const timer = this.timer;
-    this.timer = undefined;
+    const registration = this.timer;
+    if (registration?.handle === undefined) return;
+    registration.cancelling = true;
     try {
-      this.scheduler.clearTimeout(timer);
+      this.scheduler.clearTimeout(registration.handle);
     } catch {
-      // Local ownership is cleared even when the scheduler cannot cancel it.
+      registration.cancelling = false;
+      return;
     }
+    if (this.timer === registration) this.timer = undefined;
+  }
+
+  private fireTimer(registration: TimerRegistration): void {
+    if (this.timer !== registration) return;
+    this.timer = undefined;
+    if (registration.cancelling || this.shuttingDown) return;
+    void this.startRun(this.thresholdHours());
   }
 
   private thresholdHours(): number {

@@ -179,6 +179,29 @@ describe('StaleSessionCleaner', () => {
     expect(scheduler.pendingCount).toBe(0);
   });
 
+  it('retains one timer when runNow cannot cancel the scheduled callback', async () => {
+    const scheduler = new FakeScheduler();
+    const harness = cleanerHarness({ scheduler });
+    scheduler.failClear = true;
+
+    await harness.cleaner.runNow();
+    await settle();
+
+    expect(scheduler.pendingCount).toBe(1);
+    scheduler.failClear = false;
+    scheduler.runNext();
+    await harness.cleaner.waitForIdle();
+    await settle();
+    expect(scheduler.pendingCount).toBe(1);
+
+    const firstShutdown = harness.cleaner.shutdown();
+    const secondShutdown = harness.cleaner.shutdown();
+    expect(secondShutdown).toBe(firstShutdown);
+    await firstShutdown;
+    expect(scheduler.pendingCount).toBe(0);
+    expect(harness.cleaner.status().running).toBe(false);
+  });
+
   it('cancels one timer and waits for in-flight cleanup without rescheduling', async () => {
     const gate = deferred<CleanupTerminationResult>();
     const harness = cleanerHarness({ terminate: vi.fn(() => gate.promise) });
