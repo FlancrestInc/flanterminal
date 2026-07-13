@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { safeNormalizedStringSchema } from './safe-string.js';
 import {
   desiredStateSchema,
-  displayNameSchema,
+  persistedDisplayNameSchema,
   sessionStateSchema,
   tabIdSchema,
 } from './tabs.js';
@@ -29,7 +29,7 @@ export type AdminAction = z.infer<typeof adminActionSchema>;
 export const adminSessionRowSchema = z
   .object({
     id: tabIdSchema,
-    displayName: displayNameSchema,
+    displayName: persistedDisplayNameSchema,
     tmuxSessionName: boundedDisplayString(128),
     desiredState: desiredStateSchema,
     observedState: sessionStateSchema,

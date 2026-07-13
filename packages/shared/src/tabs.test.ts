@@ -225,6 +225,17 @@ describe('tab records and views', () => {
     ).toBe(false);
   });
 
+  it('loads a legacy Phase 2 name while keeping IDs and positions unchanged', () => {
+    const legacyName = '\ud83d\ude80'.repeat(80);
+    const document = {
+      formatVersion: 1,
+      structureRevision: 9,
+      tabs: [{ ...record, displayName: legacyName }],
+    };
+
+    expect(persistedTabsDocumentSchema.parse(document)).toEqual(document);
+  });
+
   it.each([
     ['duplicate ID', [record, { ...record, position: 1 }]],
     ['duplicate position', [record, { ...record, id: SECOND_TAB_ID }]],
@@ -264,6 +275,17 @@ describe('tab API contracts', () => {
         .success,
     ).toBe(false);
     expect(renameTabBodySchema.safeParse({}).success).toBe(false);
+  });
+
+  it('rejects legacy over-byte-limit names for new create and rename inputs', () => {
+    const legacyName = '\ud83d\ude80'.repeat(80);
+
+    expect(
+      createTabBodySchema.safeParse({ displayName: legacyName }).success,
+    ).toBe(false);
+    expect(
+      renameTabBodySchema.safeParse({ displayName: legacyName }).success,
+    ).toBe(false);
   });
 
   it('requires a strict nonnegative revision and canonical IDs for reorder', () => {

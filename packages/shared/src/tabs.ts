@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { safeNormalizedStringSchema } from './safe-string.js';
+import { safeNormalizedStringSchema, utf8ByteLength } from './safe-string.js';
 
 const TAB_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -13,11 +13,15 @@ export const SESSION_RESTARTING = 4012;
 
 export const tabIdSchema = z.string().regex(TAB_ID_PATTERN);
 
-export const displayNameSchema = safeNormalizedStringSchema({
+export const persistedDisplayNameSchema = safeNormalizedStringSchema({
   trim: true,
   allowJoinControls: true,
-  maxUtf8Bytes: 128,
 }).refine((value) => [...value].length >= 1 && [...value].length <= 80);
+
+export const displayNameSchema = persistedDisplayNameSchema.refine(
+  (value) => utf8ByteLength(value) <= 128,
+  { message: 'Tab display name exceeds UTF-8 byte limit' },
+);
 
 export const desiredStateSchema = z.enum(['active', 'stopped']);
 export const sessionStateSchema = z.enum(['running', 'stopped', 'unknown']);
@@ -39,7 +43,7 @@ const utcTimestampSchema = z.iso.datetime({ offset: false });
 export const tabRecordSchema = z
   .object({
     id: tabIdSchema,
-    displayName: displayNameSchema,
+    displayName: persistedDisplayNameSchema,
     position: z.number().int().nonnegative(),
     createdAt: utcTimestampSchema,
     lastActivityAt: utcTimestampSchema,

@@ -92,12 +92,12 @@ describe('administration contracts', () => {
         sessions: [
           {
             ...row,
-            displayName: '\ud83d\ude80'.repeat(32),
+            displayName: '\ud83d\ude80'.repeat(80),
             lifecycleError: 'Cafe\u0301',
           },
         ],
       }).sessions[0]?.displayName,
-    ).toBe('\ud83d\ude80'.repeat(32));
+    ).toBe('\ud83d\ude80'.repeat(80));
     expect(
       parseAdminSnapshot({
         ...snapshot,
@@ -115,7 +115,7 @@ describe('administration contracts', () => {
     expect(() =>
       parseAdminSnapshot({
         ...snapshot,
-        sessions: [{ ...row, displayName: '\ud83d\ude80'.repeat(33) }],
+        sessions: [{ ...row, displayName: '\ud83d\ude80'.repeat(81) }],
       }),
     ).toThrow();
   });
