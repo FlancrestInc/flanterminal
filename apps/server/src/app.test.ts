@@ -225,6 +225,54 @@ describe('createApp', () => {
     expect(http.auth.authService.authenticateCookie).not.toHaveBeenCalled();
   });
 
+  it.each(['/terminal', '/'])(
+    'passes the forwarded client IP to local login only through a configured trusted proxy at %s',
+    async (basePath) => {
+      const http = httpDependencies();
+      const response = await request(`${apiPath(basePath)}/auth/login`, {
+        basePath,
+        trustProxy: '127.0.0.1/32',
+        http,
+        init: {
+          method: 'POST',
+          headers: {
+            Origin: PUBLIC_ORIGIN,
+            'Content-Type': 'application/json',
+            'X-Forwarded-For': '198.51.100.7',
+          },
+          body: JSON.stringify({ username: 'admin', password: 'correct' }),
+        },
+      });
+
+      expect(response.status).toBe(200);
+      expect(http.auth.authService.login).toHaveBeenCalledWith(
+        expect.objectContaining({ address: '198.51.100.7' }),
+      );
+    },
+  );
+
+  it('ignores spoofed forwarding when proxy trust is disabled', async () => {
+    const http = httpDependencies();
+    const response = await request('/terminal/api/auth/login', {
+      trustProxy: false,
+      http,
+      init: {
+        method: 'POST',
+        headers: {
+          Origin: PUBLIC_ORIGIN,
+          'Content-Type': 'application/json',
+          'X-Forwarded-For': '198.51.100.9',
+        },
+        body: JSON.stringify({ username: 'admin', password: 'correct' }),
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(http.auth.authService.login).toHaveBeenCalledWith(
+      expect.objectContaining({ address: '127.0.0.1' }),
+    );
+  });
+
   it('keeps private data fail-closed when Phase 3 HTTP services are absent', async () => {
     for (const path of [
       '/terminal/api/config',
@@ -410,16 +458,15 @@ describe('createApp', () => {
       const response = await request('/health', { publicUrl, basePath });
       const csp = response.headers.get('content-security-policy') ?? '';
 
-      const websocketProtocol = publicUrl.startsWith('https:') ? 'wss' : 'ws';
-      const publicOrigin = new URL(publicUrl);
-      const wsPath = withTestBase(basePath, '/ws');
+      const directives = parseCsp(csp);
       expect(csp).toContain("default-src 'self'");
       expect(csp).toContain("script-src 'self'");
-      expect(csp).toContain("style-src 'self'");
+      expect(directives.get('script-src')).toEqual(["'self'"]);
+      expect(directives.get('style-src')).toEqual([
+        "'self'",
+        "'unsafe-inline'",
+      ]);
       expect(csp).toContain("font-src 'self'");
-      expect(csp).toContain(
-        `connect-src 'self' ${websocketProtocol}://${publicOrigin.host}${wsPath}`,
-      );
       expect(csp).toContain("frame-ancestors 'none'");
       expect(csp).not.toMatch(/\b(?:https?:|wss?:)\s*\*/);
       expect(csp).not.toContain('data:');
@@ -428,6 +475,35 @@ describe('createApp', () => {
       expect(response.headers.get('referrer-policy')).toBe('no-referrer');
       expect(response.headers.has('strict-transport-security')).toBe(
         publicUrl.startsWith('https:'),
+      );
+    },
+  );
+
+  it.each([
+    ['http://localhost:3000', '/terminal'],
+    ['https://terminal.example', '/terminal'],
+    ['https://terminal.example', '/'],
+  ])(
+    'allows the explicit WebSocket session prefix for %s at %s',
+    async (publicUrl, basePath) => {
+      const response = await request('/health', { publicUrl, basePath });
+      const directives = parseCsp(
+        response.headers.get('content-security-policy') ?? '',
+      );
+      const websocketProtocol = publicUrl.startsWith('https:') ? 'wss' : 'ws';
+      const host = new URL(publicUrl).host;
+      const wsPath = withTestBase(basePath, '/ws');
+      const websocketSessionPrefix = `${websocketProtocol}://${host}${wsPath}/`;
+
+      expect(directives.get('connect-src')).toEqual([
+        "'self'",
+        websocketSessionPrefix,
+      ]);
+      expect(directives.get('connect-src')).not.toContain(
+        `${websocketProtocol}://${host}${wsPath}`,
+      );
+      expect(`${websocketSessionPrefix}sessions/${FIXED_SESSION_ID}`).toBe(
+        `${websocketProtocol}://${host}${wsPath}/sessions/${FIXED_SESSION_ID}`,
       );
     },
   );
@@ -572,6 +648,7 @@ async function request(
     ready?: boolean;
     basePath?: string;
     publicUrl?: string;
+    trustProxy?: false | string;
     redirect?: RequestRedirect;
     tabs?: boolean;
     init?: RequestInit;
@@ -595,6 +672,7 @@ async function request(
     config: config(
       options.basePath ?? '/terminal',
       options.publicUrl ?? PUBLIC_ORIGIN,
+      options.trustProxy ?? false,
     ),
     readiness:
       options.readiness ??
@@ -800,10 +878,24 @@ function withTestBase(basePath: string, path: string): string {
   return basePath === '/' ? path : `${basePath}${path}`;
 }
 
-function config(basePath: string, publicUrl = PUBLIC_ORIGIN) {
+function parseCsp(value: string): Map<string, string[]> {
+  return new Map(
+    value.split(';').map((directive) => {
+      const [name = '', ...sources] = directive.trim().split(/\s+/);
+      return [name, sources];
+    }),
+  );
+}
+
+function config(
+  basePath: string,
+  publicUrl = PUBLIC_ORIGIN,
+  trustProxy: false | string = false,
+) {
   return loadConfig({
     APP_BASE_PATH: basePath,
     APP_PUBLIC_URL: publicUrl,
+    TRUST_PROXY: trustProxy === false ? 'false' : trustProxy,
     DEFAULT_SHELL: '/bin/bash',
     HOME_DIR: '/home/secret',
   });

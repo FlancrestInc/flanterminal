@@ -50,6 +50,7 @@ export function createApp(options: CreateAppOptions): Express {
 
   app.disable('x-powered-by');
   app.enable('case sensitive routing');
+  app.set('trust proxy', options.config.trustProxy);
   app.use(securityHeaders(options.config));
 
   app.use((request, response, next) => {
@@ -191,7 +192,7 @@ function securityHeaders(config: AppConfig): RequestHandler {
   const websocketEndpoint = `${websocketProtocol}//${publicUrl.host}${withBase(
     config.basePath,
     '/ws',
-  )}`;
+  )}/`;
   return helmet({
     contentSecurityPolicy: {
       directives: {
@@ -205,7 +206,8 @@ function securityHeaders(config: AppConfig): RequestHandler {
         objectSrc: ["'none'"],
         scriptSrc: ["'self'"],
         scriptSrcAttr: ["'none'"],
-        styleSrc: ["'self'"],
+        // xterm 6 injects style elements and uses element.style at runtime.
+        styleSrc: ["'self'", "'unsafe-inline'"],
         upgradeInsecureRequests: null,
       },
     },
