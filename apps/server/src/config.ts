@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 import {
   MAX_FONT_SIZE,
   MAX_RECONNECT_SECONDS,
@@ -14,6 +16,12 @@ import {
 import { z } from 'zod';
 
 const MAX_WS_BUFFER_BYTES = 1_048_576;
+const MAX_PATH_BYTES = 4_096;
+const utf8Encoder = new TextEncoder();
+const forbiddenCharacterPattern = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}\p{Cf}]/u;
+const httpTokenPattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const safeTokenPattern = /^[A-Za-z0-9_-]+$/;
+const usernamePattern = /^[A-Za-z0-9._@-]+$/;
 const logLevels = [
   'trace',
   'debug',
@@ -23,7 +31,6 @@ const logLevels = [
   'fatal',
   'silent',
 ] as const;
-const absolutePathSchema = z.string().startsWith('/');
 
 function integerString(minimum: number, maximum: number) {
   return z
@@ -33,63 +40,219 @@ function integerString(minimum: number, maximum: number) {
     .pipe(z.number().int().min(minimum).max(maximum));
 }
 
-function clampedIntegerString(minimum: number, maximum: number) {
+function integerInput(minimum: number, maximum: number) {
+  return z.union([
+    z.number().int().min(minimum).max(maximum),
+    integerString(minimum, maximum),
+  ]);
+}
+
+function clampedIntegerInput(minimum: number, maximum: number) {
   return z
-    .string()
-    .regex(/^-?\d+$/)
-    .transform(Number)
-    .pipe(z.number().int().finite())
+    .union([
+      z.number().int().finite(),
+      z
+        .string()
+        .regex(/^-?\d+$/)
+        .transform(Number)
+        .pipe(z.number().int().finite()),
+    ])
     .transform((value) => Math.min(maximum, Math.max(minimum, value)));
 }
 
-const publicUrlSchema = z.string().transform((value, context) => {
-  try {
-    const url = new URL(value);
-    if (
-      (url.protocol !== 'http:' && url.protocol !== 'https:') ||
-      url.pathname !== '/' ||
-      url.search !== '' ||
-      url.hash !== '' ||
-      url.username !== '' ||
-      url.password !== ''
-    ) {
-      throw new Error('invalid URL');
-    }
-    return url.origin;
-  } catch {
-    context.addIssue({ code: 'custom', message: 'invalid public URL' });
-    return z.NEVER;
-  }
-});
+const safeAbsolutePathSchema = z
+  .string()
+  .transform((value) => value.normalize('NFC'))
+  .refine(
+    (value) =>
+      value.startsWith('/') &&
+      utf8Encoder.encode(value).byteLength <= MAX_PATH_BYTES &&
+      [...value].every(
+        (character) => !forbiddenCharacterPattern.test(character),
+      ),
+  );
 
-const envSchema = z
+const publicUrlSchema = originSchema(['http:', 'https:']);
+const cloudflareDomainSchema = originSchema(['https:']);
+
+function originSchema(protocols: readonly string[]) {
+  return z.string().transform((value, context) => {
+    try {
+      const url = new URL(value);
+      if (
+        !protocols.includes(url.protocol) ||
+        url.pathname !== '/' ||
+        url.search !== '' ||
+        url.hash !== '' ||
+        url.username !== '' ||
+        url.password !== ''
+      ) {
+        throw new Error('invalid URL');
+      }
+      return url.origin;
+    } catch {
+      context.addIssue({ code: 'custom', message: 'invalid origin' });
+      return z.NEVER;
+    }
+  });
+}
+
+const trustProxySchema = z
+  .union([
+    z.literal(false),
+    z.literal('false').transform(() => false as const),
+    integerInput(1, 8),
+    z.string().transform(parseProxyList),
+    z.array(z.string()).transform(parseProxyList),
+  ])
+  .transform((value) => (Array.isArray(value) ? Object.freeze(value) : value));
+
+const allowedShellsSchema = z
+  .union([
+    z.string().transform((value) => value.split(',')),
+    z.array(z.string()),
+  ])
+  .transform((values, context) => {
+    const shells: string[] = [];
+    for (const value of values) {
+      const parsed = safeAbsolutePathSchema.safeParse(value.trim());
+      if (!parsed.success) {
+        context.addIssue({ code: 'custom', message: 'invalid shell path' });
+        return z.NEVER;
+      }
+      shells.push(parsed.data);
+    }
+    if (shells.length === 0 || new Set(shells).size !== shells.length) {
+      context.addIssue({ code: 'custom', message: 'invalid shell list' });
+      return z.NEVER;
+    }
+    return Object.freeze(shells);
+  });
+
+const localUsernameSchema = z
+  .string()
+  .transform((value) => value.normalize('NFC'))
+  .refine(
+    (value) =>
+      [...value].length >= 1 &&
+      [...value].length <= 64 &&
+      usernamePattern.test(value),
+  );
+
+const fileValuesSchema = z
   .object({
-    APP_PORT: integerString(1, 65_535),
+    port: z.number().int().optional(),
+    bindHost: z.string().optional(),
+    basePath: z.string().optional(),
+    publicUrl: z.string().optional(),
+    defaultShell: z.string().optional(),
+    defaultFontSize: z.number().int().optional(),
+    xtermScrollback: z.number().int().optional(),
+    tmuxHistoryLimit: z.number().int().optional(),
+    wsHeartbeatSeconds: z.number().int().optional(),
+    wsMaxBufferBytes: z.number().int().optional(),
+    resizeDebounceMs: z.number().int().optional(),
+    reconnectMaxSeconds: z.number().int().optional(),
+    logLevel: z.string().optional(),
+    homeDir: z.string().optional(),
+    dataDir: z.string().optional(),
+    sessionMaxCount: z.number().int().optional(),
+    authMode: z.string().optional(),
+    localAuthUsername: z.string().optional(),
+    bcryptCost: z.number().int().optional(),
+    authIdleMinutes: z.number().int().optional(),
+    authAbsoluteHours: z.number().int().optional(),
+    authSessionMaxCount: z.number().int().optional(),
+    cloudflareTeamDomain: z.string().optional(),
+    cloudflareAccessAud: z.string().optional(),
+    trustProxy: z
+      .union([z.literal(false), z.number().int(), z.array(z.string())])
+      .optional(),
+    trustedAuthHeader: z.string().optional(),
+    allowedShells: z.array(z.string()).optional(),
+    maxFontSize: z.number().int().optional(),
+    maxXtermScrollback: z.number().int().optional(),
+    maxTmuxHistoryLimit: z.number().int().optional(),
+    maxStaleSessionCleanupHours: z.number().int().optional(),
+    sessionCleanupIntervalMinutes: z.number().int().optional(),
+  })
+  .strict();
+
+const mergedSchema = z
+  .object({
+    APP_CONFIG_FILE: safeAbsolutePathSchema.optional(),
+    APP_PORT: integerInput(1, 65_535),
     APP_BIND_HOST: z.string().min(1).max(255),
     APP_BASE_PATH: basePathSchema,
     APP_PUBLIC_URL: publicUrlSchema,
-    DEFAULT_SHELL: absolutePathSchema,
-    DEFAULT_FONT_SIZE: integerString(MIN_FONT_SIZE, MAX_FONT_SIZE),
-    XTERM_SCROLLBACK: clampedIntegerString(MIN_SCROLLBACK, MAX_SCROLLBACK),
-    TMUX_HISTORY_LIMIT: integerString(0, 1_000_000),
-    WS_HEARTBEAT_SECONDS: integerString(5, 300),
-    WS_MAX_BUFFER_BYTES: integerString(65_536, MAX_WS_BUFFER_BYTES),
-    RESIZE_DEBOUNCE_MS: integerString(
+    DEFAULT_SHELL: safeAbsolutePathSchema,
+    DEFAULT_FONT_SIZE: integerInput(MIN_FONT_SIZE, MAX_FONT_SIZE),
+    XTERM_SCROLLBACK: clampedIntegerInput(MIN_SCROLLBACK, MAX_SCROLLBACK),
+    TMUX_HISTORY_LIMIT: integerInput(0, 1_000_000),
+    WS_HEARTBEAT_SECONDS: integerInput(5, 300),
+    WS_MAX_BUFFER_BYTES: integerInput(65_536, MAX_WS_BUFFER_BYTES),
+    RESIZE_DEBOUNCE_MS: integerInput(
       MIN_RESIZE_DEBOUNCE_MS,
       MAX_RESIZE_DEBOUNCE_MS,
     ),
-    RECONNECT_MAX_SECONDS: integerString(
+    RECONNECT_MAX_SECONDS: integerInput(
       MIN_RECONNECT_SECONDS,
       MAX_RECONNECT_SECONDS,
     ),
     LOG_LEVEL: z.enum(logLevels),
-    HOME_DIR: absolutePathSchema,
-    DATA_DIR: absolutePathSchema,
-    SESSION_MAX_COUNT: integerString(1, 20),
+    HOME_DIR: safeAbsolutePathSchema,
+    DATA_DIR: safeAbsolutePathSchema,
+    SESSION_MAX_COUNT: integerInput(1, 20),
+    AUTH_MODE: z.enum(['local', 'cloudflare-access', 'trusted-header', 'none']),
+    LOCAL_AUTH_USERNAME: localUsernameSchema,
+    LOCAL_AUTH_PASSWORD_FILE: safeAbsolutePathSchema,
+    BCRYPT_COST: integerInput(10, 15),
+    AUTH_IDLE_MINUTES: integerInput(5, 1_440),
+    AUTH_ABSOLUTE_HOURS: integerInput(1, 168),
+    AUTH_SESSION_MAX_COUNT: integerInput(1, 256),
+    CLOUDFLARE_TEAM_DOMAIN: cloudflareDomainSchema.optional(),
+    CLOUDFLARE_ACCESS_AUD: z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(safeTokenPattern)
+      .optional(),
+    TRUST_PROXY: trustProxySchema,
+    TRUSTED_AUTH_HEADER: z.string().min(1).max(128).regex(httpTokenPattern),
+    ALLOWED_SHELLS: allowedShellsSchema,
+    MAX_FONT_SIZE: integerInput(8, 32),
+    MAX_XTERM_SCROLLBACK: integerInput(0, 100_000),
+    MAX_TMUX_HISTORY_LIMIT: integerInput(0, 1_000_000),
+    MAX_STALE_SESSION_CLEANUP_HOURS: integerInput(0, 8_760),
+    SESSION_CLEANUP_INTERVAL_MINUTES: integerInput(5, 1_440),
   })
-  .strict();
+  .strict()
+  .superRefine((config, context) => {
+    if (
+      config.AUTH_MODE === 'cloudflare-access' &&
+      (config.CLOUDFLARE_TEAM_DOMAIN === undefined ||
+        config.CLOUDFLARE_ACCESS_AUD === undefined)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'missing Cloudflare settings',
+      });
+    }
+    if (config.AUTH_MODE === 'trusted-header' && config.TRUST_PROXY === false) {
+      context.addIssue({ code: 'custom', message: 'trusted proxy required' });
+    }
+    if (!config.ALLOWED_SHELLS.includes(config.DEFAULT_SHELL)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'default shell not allowed',
+      });
+    }
+  });
 
 type LogLevel = (typeof logLevels)[number];
+export type AuthMode =
+  'local' | 'cloudflare-access' | 'trusted-header' | 'none';
+export type TrustProxy = false | number | readonly string[];
 
 export type AppConfig = Readonly<{
   port: number;
@@ -110,33 +273,147 @@ export type AppConfig = Readonly<{
   homeDir: string;
   dataDir: string;
   sessionMaxCount: number;
+  appConfigFile?: string;
+  authMode: AuthMode;
+  localAuthUsername: string;
+  localAuthPasswordFile: string;
+  bcryptCost: number;
+  authIdleMinutes: number;
+  authAbsoluteHours: number;
+  authSessionMaxCount: number;
+  cloudflareTeamDomain?: string;
+  cloudflareAccessAud?: string;
+  trustProxy: TrustProxy;
+  trustedAuthHeader: string;
+  allowedShells: readonly string[];
+  maxFontSize: number;
+  maxXtermScrollback: number;
+  maxTmuxHistoryLimit: number;
+  maxStaleSessionCleanupHours: number;
+  sessionCleanupIntervalMinutes: number;
 }>;
 
 export type ConfigEnvironment = Readonly<Record<string, string | undefined>>;
+export type ConfigFileValues = Readonly<Record<string, unknown>>;
 
-export function loadConfig(env: ConfigEnvironment): AppConfig {
+export function loadConfig(
+  env: ConfigEnvironment,
+  fileValues: ConfigFileValues = {},
+): AppConfig {
   try {
-    const parsed = envSchema.parse({
-      APP_PORT: env.APP_PORT ?? '3000',
-      APP_BIND_HOST: env.APP_BIND_HOST ?? '0.0.0.0',
-      APP_BASE_PATH: env.APP_BASE_PATH ?? '/',
-      APP_PUBLIC_URL: env.APP_PUBLIC_URL ?? 'http://localhost:3000',
-      DEFAULT_SHELL: env.DEFAULT_SHELL ?? '/bin/bash',
-      DEFAULT_FONT_SIZE: env.DEFAULT_FONT_SIZE ?? '14',
-      XTERM_SCROLLBACK: env.XTERM_SCROLLBACK ?? '10000',
-      TMUX_HISTORY_LIMIT: env.TMUX_HISTORY_LIMIT ?? '20000',
-      WS_HEARTBEAT_SECONDS: env.WS_HEARTBEAT_SECONDS ?? '30',
-      WS_MAX_BUFFER_BYTES: env.WS_MAX_BUFFER_BYTES ?? '1048576',
-      RESIZE_DEBOUNCE_MS: env.RESIZE_DEBOUNCE_MS ?? '100',
-      RECONNECT_MAX_SECONDS: env.RECONNECT_MAX_SECONDS ?? '15',
-      LOG_LEVEL: env.LOG_LEVEL ?? 'info',
-      HOME_DIR: env.HOME_DIR ?? '/home/webterm',
-      DATA_DIR: env.DATA_DIR ?? '/app/data',
-      SESSION_MAX_COUNT: env.SESSION_MAX_COUNT ?? '10',
+    const file = fileValuesSchema.parse(fileValues);
+    const pick = <K extends keyof typeof file>(
+      environmentKey: string,
+      fileKey: K,
+      fallback: unknown,
+    ): unknown => env[environmentKey] ?? file[fileKey] ?? fallback;
+    const parsed = mergedSchema.parse({
+      ...(env.APP_CONFIG_FILE === undefined
+        ? {}
+        : { APP_CONFIG_FILE: env.APP_CONFIG_FILE }),
+      APP_PORT: pick('APP_PORT', 'port', 3000),
+      APP_BIND_HOST: pick('APP_BIND_HOST', 'bindHost', '0.0.0.0'),
+      APP_BASE_PATH: pick('APP_BASE_PATH', 'basePath', '/'),
+      APP_PUBLIC_URL: pick(
+        'APP_PUBLIC_URL',
+        'publicUrl',
+        'http://localhost:3000',
+      ),
+      DEFAULT_SHELL: pick('DEFAULT_SHELL', 'defaultShell', '/bin/bash'),
+      DEFAULT_FONT_SIZE: pick('DEFAULT_FONT_SIZE', 'defaultFontSize', 14),
+      XTERM_SCROLLBACK: pick('XTERM_SCROLLBACK', 'xtermScrollback', 10_000),
+      TMUX_HISTORY_LIMIT: pick(
+        'TMUX_HISTORY_LIMIT',
+        'tmuxHistoryLimit',
+        20_000,
+      ),
+      WS_HEARTBEAT_SECONDS: pick(
+        'WS_HEARTBEAT_SECONDS',
+        'wsHeartbeatSeconds',
+        30,
+      ),
+      WS_MAX_BUFFER_BYTES: pick(
+        'WS_MAX_BUFFER_BYTES',
+        'wsMaxBufferBytes',
+        1_048_576,
+      ),
+      RESIZE_DEBOUNCE_MS: pick('RESIZE_DEBOUNCE_MS', 'resizeDebounceMs', 100),
+      RECONNECT_MAX_SECONDS: pick(
+        'RECONNECT_MAX_SECONDS',
+        'reconnectMaxSeconds',
+        15,
+      ),
+      LOG_LEVEL: pick('LOG_LEVEL', 'logLevel', 'info'),
+      HOME_DIR: pick('HOME_DIR', 'homeDir', '/home/webterm'),
+      DATA_DIR: pick('DATA_DIR', 'dataDir', '/app/data'),
+      SESSION_MAX_COUNT: pick('SESSION_MAX_COUNT', 'sessionMaxCount', 10),
+      AUTH_MODE: pick('AUTH_MODE', 'authMode', 'local'),
+      LOCAL_AUTH_USERNAME: pick(
+        'LOCAL_AUTH_USERNAME',
+        'localAuthUsername',
+        'webterm',
+      ),
+      LOCAL_AUTH_PASSWORD_FILE:
+        env.LOCAL_AUTH_PASSWORD_FILE ?? '/run/secrets/local_auth_password',
+      BCRYPT_COST: pick('BCRYPT_COST', 'bcryptCost', 12),
+      AUTH_IDLE_MINUTES: pick('AUTH_IDLE_MINUTES', 'authIdleMinutes', 60),
+      AUTH_ABSOLUTE_HOURS: pick('AUTH_ABSOLUTE_HOURS', 'authAbsoluteHours', 24),
+      AUTH_SESSION_MAX_COUNT: pick(
+        'AUTH_SESSION_MAX_COUNT',
+        'authSessionMaxCount',
+        32,
+      ),
+      ...(pick('CLOUDFLARE_TEAM_DOMAIN', 'cloudflareTeamDomain', undefined) ===
+      undefined
+        ? {}
+        : {
+            CLOUDFLARE_TEAM_DOMAIN: pick(
+              'CLOUDFLARE_TEAM_DOMAIN',
+              'cloudflareTeamDomain',
+              undefined,
+            ),
+          }),
+      ...(pick('CLOUDFLARE_ACCESS_AUD', 'cloudflareAccessAud', undefined) ===
+      undefined
+        ? {}
+        : {
+            CLOUDFLARE_ACCESS_AUD: pick(
+              'CLOUDFLARE_ACCESS_AUD',
+              'cloudflareAccessAud',
+              undefined,
+            ),
+          }),
+      TRUST_PROXY: pick('TRUST_PROXY', 'trustProxy', false),
+      TRUSTED_AUTH_HEADER: pick(
+        'TRUSTED_AUTH_HEADER',
+        'trustedAuthHeader',
+        'X-Auth-User',
+      ),
+      ALLOWED_SHELLS: pick('ALLOWED_SHELLS', 'allowedShells', ['/bin/bash']),
+      MAX_FONT_SIZE: pick('MAX_FONT_SIZE', 'maxFontSize', 32),
+      MAX_XTERM_SCROLLBACK: pick(
+        'MAX_XTERM_SCROLLBACK',
+        'maxXtermScrollback',
+        100_000,
+      ),
+      MAX_TMUX_HISTORY_LIMIT: pick(
+        'MAX_TMUX_HISTORY_LIMIT',
+        'maxTmuxHistoryLimit',
+        1_000_000,
+      ),
+      MAX_STALE_SESSION_CLEANUP_HOURS: pick(
+        'MAX_STALE_SESSION_CLEANUP_HOURS',
+        'maxStaleSessionCleanupHours',
+        8_760,
+      ),
+      SESSION_CLEANUP_INTERVAL_MINUTES: pick(
+        'SESSION_CLEANUP_INTERVAL_MINUTES',
+        'sessionCleanupIntervalMinutes',
+        15,
+      ),
     });
     const publicUrl = new URL(parsed.APP_PUBLIC_URL);
-
-    return Object.freeze({
+    return deepFreeze({
       port: parsed.APP_PORT,
       bindHost: parsed.APP_BIND_HOST,
       basePath: parsed.APP_BASE_PATH,
@@ -155,6 +432,30 @@ export function loadConfig(env: ConfigEnvironment): AppConfig {
       homeDir: parsed.HOME_DIR,
       dataDir: parsed.DATA_DIR,
       sessionMaxCount: parsed.SESSION_MAX_COUNT,
+      ...(parsed.APP_CONFIG_FILE === undefined
+        ? {}
+        : { appConfigFile: parsed.APP_CONFIG_FILE }),
+      authMode: parsed.AUTH_MODE,
+      localAuthUsername: parsed.LOCAL_AUTH_USERNAME,
+      localAuthPasswordFile: parsed.LOCAL_AUTH_PASSWORD_FILE,
+      bcryptCost: parsed.BCRYPT_COST,
+      authIdleMinutes: parsed.AUTH_IDLE_MINUTES,
+      authAbsoluteHours: parsed.AUTH_ABSOLUTE_HOURS,
+      authSessionMaxCount: parsed.AUTH_SESSION_MAX_COUNT,
+      ...(parsed.CLOUDFLARE_TEAM_DOMAIN === undefined
+        ? {}
+        : { cloudflareTeamDomain: parsed.CLOUDFLARE_TEAM_DOMAIN }),
+      ...(parsed.CLOUDFLARE_ACCESS_AUD === undefined
+        ? {}
+        : { cloudflareAccessAud: parsed.CLOUDFLARE_ACCESS_AUD }),
+      trustProxy: parsed.TRUST_PROXY,
+      trustedAuthHeader: parsed.TRUSTED_AUTH_HEADER,
+      allowedShells: parsed.ALLOWED_SHELLS,
+      maxFontSize: parsed.MAX_FONT_SIZE,
+      maxXtermScrollback: parsed.MAX_XTERM_SCROLLBACK,
+      maxTmuxHistoryLimit: parsed.MAX_TMUX_HISTORY_LIMIT,
+      maxStaleSessionCleanupHours: parsed.MAX_STALE_SESSION_CLEANUP_HOURS,
+      sessionCleanupIntervalMinutes: parsed.SESSION_CLEANUP_INTERVAL_MINUTES,
     });
   } catch {
     throw new Error('Invalid server configuration');
@@ -169,4 +470,45 @@ export function toClientConfig(config: AppConfig): ClientConfig {
     resizeDebounceMs: config.resizeDebounceMs,
     reconnectMaxSeconds: config.reconnectMaxSeconds,
   });
+}
+
+function parseProxyList(
+  values: string | readonly string[],
+  context: z.RefinementCtx,
+) {
+  const candidates = (
+    typeof values === 'string' ? values.split(',') : values
+  ).map((value) => value.trim().toLowerCase());
+  const normalized = candidates.map(normalizeProxyEntry);
+  if (
+    normalized.length === 0 ||
+    normalized.some((value) => value === undefined) ||
+    new Set(normalized).size !== normalized.length
+  ) {
+    context.addIssue({ code: 'custom', message: 'invalid proxy value' });
+    return z.NEVER;
+  }
+  return normalized as string[];
+}
+
+function normalizeProxyEntry(value: string): string | undefined {
+  const slash = value.indexOf('/');
+  if (slash === -1) return isIP(value) === 0 ? undefined : value;
+  if (slash !== value.lastIndexOf('/')) return undefined;
+  const address = value.slice(0, slash);
+  const prefixText = value.slice(slash + 1);
+  if (!/^\d+$/.test(prefixText)) return undefined;
+  const family = isIP(address);
+  const prefix = Number(prefixText);
+  if (family === 0 || prefix > (family === 4 ? 32 : 128)) return undefined;
+  return `${address}/${prefix}`;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) {
+    return value;
+  }
+  Object.freeze(value);
+  for (const child of Object.values(value)) deepFreeze(child);
+  return value;
 }

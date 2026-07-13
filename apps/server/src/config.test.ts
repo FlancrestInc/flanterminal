@@ -25,6 +25,21 @@ describe('loadConfig', () => {
       homeDir: '/home/webterm',
       dataDir: '/app/data',
       sessionMaxCount: 10,
+      authMode: 'local',
+      localAuthUsername: 'webterm',
+      localAuthPasswordFile: '/run/secrets/local_auth_password',
+      bcryptCost: 12,
+      authIdleMinutes: 60,
+      authAbsoluteHours: 24,
+      authSessionMaxCount: 32,
+      trustProxy: false,
+      trustedAuthHeader: 'X-Auth-User',
+      allowedShells: ['/bin/bash'],
+      maxFontSize: 32,
+      maxXtermScrollback: 100_000,
+      maxTmuxHistoryLimit: 1_000_000,
+      maxStaleSessionCleanupHours: 8_760,
+      sessionCleanupIntervalMinutes: 15,
     });
     expect(Object.isFrozen(config)).toBe(true);
   });
@@ -32,6 +47,227 @@ describe('loadConfig', () => {
   it('uses only the supplied env object', () => {
     expect(loadConfig({}).port).toBe(3000);
     expect(loadConfig({ APP_PORT: '3456' }).port).toBe(3456);
+  });
+
+  it('merges defaults, config file, then environment and normalizes once', () => {
+    const config = loadConfig(
+      {
+        APP_PORT: '5000',
+        AUTH_MODE: 'none',
+        ALLOWED_SHELLS: ' /bin/bash, /bin/fish ',
+      },
+      {
+        port: 4000,
+        authMode: 'trusted-header',
+        trustProxy: ['10.0.0.0/8'],
+        allowedShells: ['/bin/bash', '/bin/zsh'],
+      },
+    );
+
+    expect(config).toMatchObject({
+      port: 5000,
+      authMode: 'none',
+      trustProxy: ['10.0.0.0/8'],
+      allowedShells: ['/bin/bash', '/bin/fish'],
+    });
+    expect(Object.isFrozen(config.trustProxy)).toBe(true);
+    expect(Object.isFrozen(config.allowedShells)).toBe(true);
+  });
+
+  it('accepts every Phase 3 inclusive numeric boundary', () => {
+    const minimum = loadConfig({
+      BCRYPT_COST: '10',
+      AUTH_IDLE_MINUTES: '5',
+      AUTH_ABSOLUTE_HOURS: '1',
+      AUTH_SESSION_MAX_COUNT: '1',
+      MAX_FONT_SIZE: '8',
+      MAX_XTERM_SCROLLBACK: '0',
+      MAX_TMUX_HISTORY_LIMIT: '0',
+      MAX_STALE_SESSION_CLEANUP_HOURS: '0',
+      SESSION_CLEANUP_INTERVAL_MINUTES: '5',
+    });
+    const maximum = loadConfig({
+      BCRYPT_COST: '15',
+      AUTH_IDLE_MINUTES: '1440',
+      AUTH_ABSOLUTE_HOURS: '168',
+      AUTH_SESSION_MAX_COUNT: '256',
+      MAX_FONT_SIZE: '32',
+      MAX_XTERM_SCROLLBACK: '100000',
+      MAX_TMUX_HISTORY_LIMIT: '1000000',
+      MAX_STALE_SESSION_CLEANUP_HOURS: '8760',
+      SESSION_CLEANUP_INTERVAL_MINUTES: '1440',
+    });
+
+    expect(minimum).toMatchObject({
+      bcryptCost: 10,
+      authIdleMinutes: 5,
+      authAbsoluteHours: 1,
+      authSessionMaxCount: 1,
+      maxFontSize: 8,
+      maxXtermScrollback: 0,
+      maxTmuxHistoryLimit: 0,
+      maxStaleSessionCleanupHours: 0,
+      sessionCleanupIntervalMinutes: 5,
+    });
+    expect(maximum).toMatchObject({
+      bcryptCost: 15,
+      authIdleMinutes: 1_440,
+      authAbsoluteHours: 168,
+      authSessionMaxCount: 256,
+      maxFontSize: 32,
+      maxXtermScrollback: 100_000,
+      maxTmuxHistoryLimit: 1_000_000,
+      maxStaleSessionCleanupHours: 8_760,
+      sessionCleanupIntervalMinutes: 1_440,
+    });
+  });
+
+  it.each([
+    ['BCRYPT_COST', '9'],
+    ['BCRYPT_COST', '16'],
+    ['AUTH_IDLE_MINUTES', '4'],
+    ['AUTH_IDLE_MINUTES', '1441'],
+    ['AUTH_ABSOLUTE_HOURS', '0'],
+    ['AUTH_ABSOLUTE_HOURS', '169'],
+    ['AUTH_SESSION_MAX_COUNT', '0'],
+    ['AUTH_SESSION_MAX_COUNT', '257'],
+    ['MAX_FONT_SIZE', '7'],
+    ['MAX_FONT_SIZE', '33'],
+    ['MAX_XTERM_SCROLLBACK', '-1'],
+    ['MAX_XTERM_SCROLLBACK', '100001'],
+    ['MAX_TMUX_HISTORY_LIMIT', '-1'],
+    ['MAX_TMUX_HISTORY_LIMIT', '1000001'],
+    ['MAX_STALE_SESSION_CLEANUP_HOURS', '-1'],
+    ['MAX_STALE_SESSION_CLEANUP_HOURS', '8761'],
+    ['SESSION_CLEANUP_INTERVAL_MINUTES', '4'],
+    ['SESSION_CLEANUP_INTERVAL_MINUTES', '1441'],
+  ])('rejects Phase 3 numeric bound %s=%s', (key, value) => {
+    expect(() => loadConfig({ [key]: value })).toThrow(
+      'Invalid server configuration',
+    );
+  });
+
+  it('validates mode-specific Cloudflare settings without requiring local credential access', () => {
+    expect(() => loadConfig({ AUTH_MODE: 'cloudflare-access' })).toThrow(
+      'Invalid server configuration',
+    );
+    expect(() =>
+      loadConfig({
+        AUTH_MODE: 'cloudflare-access',
+        CLOUDFLARE_TEAM_DOMAIN: 'https://team.cloudflareaccess.com/path',
+        CLOUDFLARE_ACCESS_AUD: 'audience',
+      }),
+    ).toThrow('Invalid server configuration');
+
+    const config = loadConfig({
+      AUTH_MODE: 'cloudflare-access',
+      CLOUDFLARE_TEAM_DOMAIN: 'https://team.cloudflareaccess.com',
+      CLOUDFLARE_ACCESS_AUD: 'audience_123',
+      LOCAL_AUTH_PASSWORD_FILE: '/does/not/need/to/exist',
+    });
+    expect(config).toMatchObject({
+      authMode: 'cloudflare-access',
+      cloudflareTeamDomain: 'https://team.cloudflareaccess.com',
+      cloudflareAccessAud: 'audience_123',
+    });
+  });
+
+  it('bounds safe usernames and Cloudflare audience tokens', () => {
+    expect(
+      loadConfig({ LOCAL_AUTH_USERNAME: 'a'.repeat(64) }).localAuthUsername,
+    ).toBe('a'.repeat(64));
+    expect(() => loadConfig({ LOCAL_AUTH_USERNAME: '' })).toThrow();
+    expect(() => loadConfig({ LOCAL_AUTH_USERNAME: 'a'.repeat(65) })).toThrow();
+    expect(() => loadConfig({ LOCAL_AUTH_USERNAME: 'unsafe name' })).toThrow();
+
+    const cloudflare = {
+      AUTH_MODE: 'cloudflare-access',
+      CLOUDFLARE_TEAM_DOMAIN: 'https://team.cloudflareaccess.com',
+    } as const;
+    expect(
+      loadConfig({ ...cloudflare, CLOUDFLARE_ACCESS_AUD: 'a'.repeat(256) })
+        .cloudflareAccessAud,
+    ).toBe('a'.repeat(256));
+    expect(() =>
+      loadConfig({ ...cloudflare, CLOUDFLARE_ACCESS_AUD: 'a'.repeat(257) }),
+    ).toThrow();
+    expect(() =>
+      loadConfig({ ...cloudflare, CLOUDFLARE_ACCESS_AUD: 'unsafe audience' }),
+    ).toThrow();
+  });
+
+  it('rejects invalid modes and HTTP header names', () => {
+    expect(() => loadConfig({ AUTH_MODE: 'oauth' })).toThrow();
+    expect(() => loadConfig({ TRUSTED_AUTH_HEADER: 'X Auth User' })).toThrow();
+    expect(
+      loadConfig({ TRUSTED_AUTH_HEADER: 'X_Auth-User' }).trustedAuthHeader,
+    ).toBe('X_Auth-User');
+  });
+
+  it('requires trusted proxy only for trusted-header mode', () => {
+    expect(() => loadConfig({ AUTH_MODE: 'trusted-header' })).toThrow(
+      'Invalid server configuration',
+    );
+    expect(
+      loadConfig({
+        AUTH_MODE: 'trusted-header',
+        TRUST_PROXY: '2',
+        TRUSTED_AUTH_HEADER: 'X-Forwarded-User',
+      }),
+    ).toMatchObject({
+      authMode: 'trusted-header',
+      trustProxy: 2,
+      trustedAuthHeader: 'X-Forwarded-User',
+    });
+    expect(
+      loadConfig({ AUTH_MODE: 'none', TRUST_PROXY: 'false' }).trustProxy,
+    ).toBe(false);
+  });
+
+  it('normalizes and validates proxy CIDRs, shells, and environment-only paths', () => {
+    const config = loadConfig({
+      APP_CONFIG_FILE: '/etc/flanterminal.json',
+      LOCAL_AUTH_PASSWORD_FILE: '/run/secrets/password',
+      TRUST_PROXY: ' 10.0.0.0/8,2001:DB8::/32 ',
+      DEFAULT_SHELL: '/bin/zsh',
+      ALLOWED_SHELLS: ' /bin/bash,/bin/zsh ',
+    });
+
+    expect(config).toMatchObject({
+      appConfigFile: '/etc/flanterminal.json',
+      localAuthPasswordFile: '/run/secrets/password',
+      trustProxy: ['10.0.0.0/8', '2001:db8::/32'],
+      allowedShells: ['/bin/bash', '/bin/zsh'],
+    });
+    expect(() => loadConfig({ APP_CONFIG_FILE: 'config.json' })).toThrow();
+    expect(() =>
+      loadConfig({ LOCAL_AUTH_PASSWORD_FILE: 'password' }),
+    ).toThrow();
+    expect(() =>
+      loadConfig({ TRUST_PROXY: '10.0.0.0/8,10.0.0.0/8' }),
+    ).toThrow();
+    expect(() => loadConfig({ TRUST_PROXY: 'not-an-ip' })).toThrow();
+    expect(() =>
+      loadConfig({ ALLOWED_SHELLS: '/bin/bash,/bin/bash' }),
+    ).toThrow();
+    expect(() =>
+      loadConfig({ DEFAULT_SHELL: '/bin/zsh', ALLOWED_SHELLS: '/bin/bash' }),
+    ).toThrow();
+  });
+
+  it('accepts native config arrays and rejects env-only or unknown file keys', () => {
+    expect(
+      loadConfig({}, { trustProxy: ['127.0.0.1', '::1/128'] }),
+    ).toMatchObject({ trustProxy: ['127.0.0.1', '::1/128'] });
+    expect(() => loadConfig({}, { appConfigFile: '/tmp/config.json' })).toThrow(
+      'Invalid server configuration',
+    );
+    expect(() =>
+      loadConfig({}, { localAuthPasswordFile: '/tmp/password' }),
+    ).toThrow('Invalid server configuration');
+    expect(() => loadConfig({}, { unknown: true })).toThrow(
+      'Invalid server configuration',
+    );
   });
 
   it('normalizes base paths and derives public origin fields', () => {
