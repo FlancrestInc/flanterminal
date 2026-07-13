@@ -770,6 +770,21 @@ describe('terminal websocket server', () => {
     expect(auth.unsubscribe).toHaveBeenCalledOnce();
     expect(gateway.connectedCount()).toBe(0);
   });
+
+  it('closes authenticated sockets when the HTTP server closes independently', async () => {
+    const harness = await createHarness();
+    const client = await connect(harness.url);
+    await nextMessage(client);
+    const closed = once(client, 'close');
+
+    await new Promise<void>((resolve) => harness.server.close(() => resolve()));
+    const [code, reason] = (await closed) as [number, Buffer];
+
+    expect(code).toBe(AUTHENTICATION_REQUIRED);
+    expect(reason.toString()).toBe(AUTHENTICATION_REQUIRED_REASON);
+    expect(harness.gateway.connectedCount()).toBe(0);
+    expect(harness.auth.unsubscribe).toHaveBeenCalledOnce();
+  });
 });
 
 async function createHarness(
@@ -834,6 +849,7 @@ async function createHarness(
     activity: { mark: vi.fn() },
   });
   const server = createServer();
+  const auth = authHarness();
   const gateway = createTerminalWebSocketServer({
     server,
     publicOrigin: 'http://app.test',
@@ -842,7 +858,7 @@ async function createHarness(
     registry,
     logger: log,
     heartbeatIntervalMs: 30_000,
-    ...authHarness().options,
+    ...auth.options,
     ...(options.scheduler === undefined
       ? {}
       : { scheduler: options.scheduler }),
@@ -858,6 +874,7 @@ async function createHarness(
     spawn,
     pty,
     logger: log.info,
+    auth,
     emitData(data: string) {
       onData?.(data);
     },

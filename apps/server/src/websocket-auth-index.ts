@@ -182,7 +182,10 @@ export class WebSocketAuthIndex {
     } catch {
       // Disposal remains idempotent even if a dependency misbehaves.
     }
-    for (const socket of [...this.#bySocket.keys()]) this.unregister(socket);
+    for (const socket of [...this.#bySocket.keys()]) {
+      this.unregister(socket);
+      closeAuthenticationRequired(socket);
+    }
   }
 
   #isActive(authority: ApplicationSessionAuthority): boolean {

@@ -136,9 +136,40 @@ describe('WebSocketAuthIndex', () => {
     index.dispose();
 
     expect(auth.unsubscribe).toHaveBeenCalledOnce();
+    expect(socket.close).toHaveBeenCalledOnce();
+    expect(socket.close).toHaveBeenCalledWith(4003, 'authentication_required');
     expect(socket.listenerCount()).toBe(0);
     expect(index.connectedCount()).toBe(0);
     expect(index.registerIfActive(AUTH_A, TAB_A, new FakeSocket())).toBe(false);
+  });
+
+  it('closes every live socket on dispose even when one close throws', () => {
+    const auth = authSource();
+    const index = new WebSocketAuthIndex({
+      auth,
+      maxApplicationSessions: 2,
+      maxSockets: 4,
+    });
+    const throwing = new FakeSocket();
+    throwing.close.mockImplementation(() => {
+      throw new Error('contained close failure');
+    });
+    const second = new FakeSocket();
+    index.registerIfActive(AUTH_A, TAB_A, throwing);
+    index.registerIfActive(AUTH_B, TAB_B, second);
+
+    expect(() => index.dispose()).not.toThrow();
+    index.dispose();
+
+    expect(throwing.close).toHaveBeenCalledOnce();
+    expect(second.close).toHaveBeenCalledOnce();
+    expect(second.close).toHaveBeenCalledWith(4003, 'authentication_required');
+    expect(throwing.listenerCount()).toBe(0);
+    expect(second.listenerCount()).toBe(0);
+    expect(index.connectedCount()).toBe(0);
+    expect(index.countForTab(TAB_A)).toBe(0);
+    expect(index.countForTab(TAB_B)).toBe(0);
+    expect(auth.unsubscribe).toHaveBeenCalledOnce();
   });
 });
 

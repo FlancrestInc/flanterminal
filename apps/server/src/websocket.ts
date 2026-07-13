@@ -335,9 +335,23 @@ export function createTerminalWebSocketServer(
   };
   const disposeAuthentication = (): void => authIndex?.dispose();
   const onHttpServerClose = (): void => {
+    stopAccepting();
     stopHeartbeat();
     disposeAuthentication();
+    restoreHttpServerClose();
   };
+  const originalHttpServerClose = options.server.close;
+  const hookedHttpServerClose = new Proxy(originalHttpServerClose, {
+    apply(target, thisArgument, argumentsList) {
+      onHttpServerClose();
+      return Reflect.apply(target, thisArgument, argumentsList) as Server;
+    },
+  }) as Server['close'];
+  function restoreHttpServerClose(): void {
+    if (options.server.close === hookedHttpServerClose)
+      options.server.close = originalHttpServerClose;
+  }
+  options.server.close = hookedHttpServerClose;
   options.server.once('close', onHttpServerClose);
 
   return {
@@ -351,6 +365,7 @@ export function createTerminalWebSocketServer(
       stopHeartbeat();
       closeClients();
       disposeAuthentication();
+      restoreHttpServerClose();
       options.server.off('close', onHttpServerClose);
       closePromise = new Promise<void>((resolve) =>
         websocketServer.close(() => resolve()),

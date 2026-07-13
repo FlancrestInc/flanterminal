@@ -6,6 +6,7 @@ import {
   OPEN_SOCKET_STATE,
   TerminalBridge,
   type SocketPort,
+  type TerminalBridgeOptions,
 } from './terminal-bridge.js';
 
 type FakeDisposable = { dispose: Mock<() => void> };
@@ -13,6 +14,40 @@ const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const OTHER_SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
 
 describe('TerminalBridge', () => {
+  it.each(['omitted', 'malformed'] as const)(
+    'fails closed when the authenticated input gate is %s',
+    (configuration) => {
+      const socket = new FakeSocket();
+      const pty = new FakePty();
+      const options = {
+        sessionId: SESSION_ID,
+        socket,
+        pty,
+        logger: new CapturingLogger(),
+        maxBufferedBytes: 1024,
+        ...(configuration === 'malformed'
+          ? { authenticatedInput: { authenticate: () => 'true' } }
+          : {}),
+      } as unknown as TerminalBridgeOptions;
+      new TerminalBridge(options);
+
+      socket.emitMessage(
+        JSON.stringify({
+          v: 1,
+          type: 'input',
+          sessionId: SESSION_ID,
+          data: 'must not reach pty',
+        }),
+      );
+
+      expect(pty.write).not.toHaveBeenCalled();
+      expect(socket.close).toHaveBeenCalledWith(
+        4003,
+        'authentication_required',
+      );
+    },
+  );
+
   it('authenticates accepted same-session input immediately before PTY write', () => {
     const socket = new FakeSocket();
     const pty = new FakePty();
@@ -510,7 +545,7 @@ function createBridge(
   logger: LifecycleLogger = new CapturingLogger(),
   maxBufferedBytes = 1024,
   onActivity?: (sessionId: string) => void,
-  authenticateInput?: () => boolean,
+  authenticateInput: () => boolean = () => true,
 ) {
   return new TerminalBridge({
     sessionId: SESSION_ID,
@@ -519,9 +554,7 @@ function createBridge(
     logger,
     maxBufferedBytes,
     ...(onActivity === undefined ? {} : { onActivity }),
-    ...(authenticateInput === undefined
-      ? {}
-      : { authenticatedInput: { authenticate: authenticateInput } }),
+    authenticatedInput: { authenticate: authenticateInput },
   });
 }
 
@@ -538,6 +571,7 @@ function expectDisposedOnce(
 
 class FakeSocket implements SocketPort {
   readonly OPEN = OPEN_SOCKET_STATE;
+  readonly authenticatedInput = { authenticate: () => true };
   readyState = OPEN_SOCKET_STATE;
   bufferedAmount = 0;
   sent: string[] = [];

@@ -1081,6 +1081,7 @@ function fakePty(): PtyProcess {
 function fakeSocket(): SocketPort {
   return {
     OPEN: 1,
+    authenticatedInput: { authenticate: vi.fn(() => true) },
     readyState: 1,
     bufferedAmount: 0,
     send: vi.fn(),

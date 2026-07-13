@@ -24,7 +24,7 @@ export interface SocketPort {
   onMessage(listener: (data: unknown, isBinary: boolean) => void): Disposable;
   onClose(listener: () => void): Disposable;
   onError(listener: () => void): Disposable;
-  readonly authenticatedInput?: AuthenticatedInputPort;
+  readonly authenticatedInput: AuthenticatedInputPort;
 }
 
 export interface BridgeOwner {
@@ -43,7 +43,7 @@ export type TerminalBridgeOptions = Readonly<{
   logger: LifecycleLogger;
   maxBufferedBytes: number;
   onActivity?: (sessionId: string) => void;
-  authenticatedInput?: AuthenticatedInputPort;
+  authenticatedInput: AuthenticatedInputPort;
 }>;
 
 export class TerminalBridge implements BridgeOwner {
@@ -183,8 +183,7 @@ export class TerminalBridge implements BridgeOwner {
 
   private authenticateInput(): boolean {
     try {
-      if (this.options.authenticatedInput?.authenticate() !== false)
-        return true;
+      if (this.options.authenticatedInput?.authenticate() === true) return true;
     } catch {
       // Authentication failures are deliberately indistinguishable from revocation.
     }
