@@ -572,6 +572,14 @@ button {
   white-space: nowrap;
 }
 
+.admin-header h1:focus {
+  outline: 0;
+  text-decoration: underline;
+  text-decoration-color: var(--ui-accent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}
+
 .admin-header-actions {
   display: flex;
   flex: 0 0 auto;
@@ -631,16 +639,19 @@ button {
   scrollbar-width: thin;
 }
 
-.admin-summary span {
+.admin-summary span,
+.admin-summary time {
   padding: 0 12px;
   border-right: 1px solid var(--ui-border);
+  color: inherit;
+  text-decoration: none;
 }
 
-.admin-summary span:first-child {
+.admin-summary > :first-child {
   padding-left: 0;
 }
 
-.admin-summary span:last-child {
+.admin-summary > :last-child {
   border-right: 0;
 }
 
@@ -1363,6 +1374,11 @@ button {
 }
 
 @media (forced-colors: active) {
+  .admin-header h1:focus {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+
   .top-bar,
   .icon-button,
   .status-dot {

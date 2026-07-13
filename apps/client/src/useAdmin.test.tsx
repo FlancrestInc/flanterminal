@@ -199,6 +199,182 @@ describe('useAdmin', () => {
     expect(client.load).toHaveBeenCalledTimes(4);
   });
 
+  it('starts a distinct authoritative GET causally after every completed mutation', async () => {
+    const actionA = deferred<void>();
+    const actionB = deferred<void>();
+    const getA = deferred<AdminSnapshot>();
+    const getB = deferred<AdminSnapshot>();
+    let loadCount = 0;
+    const client = api({
+      load: vi.fn(() => {
+        loadCount += 1;
+        if (loadCount === 1) return Promise.resolve(snapshot());
+        if (loadCount === 2) return getA.promise;
+        return getB.promise;
+      }),
+      sessionAction: vi.fn((id) =>
+        id === A ? actionA.promise : actionB.promise,
+      ),
+    });
+    const { result } = renderHook(() => useAdmin(client, { active: true }));
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.runSessionAction(A, 'restart_bridge');
+      second = result.current.runSessionAction(B, 'restart_bridge');
+    });
+    await waitFor(() => expect(client.sessionAction).toHaveBeenCalledTimes(2));
+    actionA.resolve();
+    await waitFor(() => expect(client.load).toHaveBeenCalledTimes(2));
+    actionB.resolve();
+    await act(async () => Promise.resolve());
+    expect(client.load).toHaveBeenCalledTimes(2);
+
+    getA.resolve(snapshot('2026-07-13T13:00:00.000Z'));
+    await waitFor(() => expect(client.load).toHaveBeenCalledTimes(3));
+    getB.resolve(snapshot('2026-07-13T14:00:00.000Z'));
+    await act(async () => Promise.all([first, second]));
+    expect(result.current.snapshot?.generatedAt).toBe(
+      '2026-07-13T14:00:00.000Z',
+    );
+  });
+
+  it('invalidates same-session queued work when the view ownership epoch closes', async () => {
+    const actionA = deferred<void>();
+    const sessionAction = vi.fn<AdminApi['sessionAction']>(
+      () => actionA.promise,
+    );
+    const client = api({ sessionAction });
+    const hook = renderHook(({ active }) => useAdmin(client, { active }), {
+      initialProps: { active: true },
+    });
+    await waitFor(() => expect(hook.result.current.snapshot).not.toBeNull());
+    act(() => {
+      void hook.result.current.runSessionAction(A, 'terminate');
+      void hook.result.current.runSessionAction(A, 'recreate');
+    });
+    await waitFor(() => expect(sessionAction).toHaveBeenCalledOnce());
+
+    hook.rerender({ active: false });
+    hook.rerender({ active: true });
+    await waitFor(() => expect(client.load).toHaveBeenCalledTimes(2));
+    const reopenedSnapshot = hook.result.current.snapshot;
+    actionA.resolve();
+    await act(async () => Promise.resolve());
+    await act(async () => Promise.resolve());
+
+    expect(sessionAction).toHaveBeenCalledOnce();
+    expect(hook.result.current.snapshot).toBe(reopenedSnapshot);
+    expect(hook.result.current.sessionErrors).toEqual({});
+    expect(hook.result.current.busySessionIds.size).toBe(0);
+  });
+
+  it('invalidates queued work across a hidden and reopened document epoch', async () => {
+    const actionA = deferred<void>();
+    const sessionAction = vi.fn<AdminApi['sessionAction']>(
+      () => actionA.promise,
+    );
+    const client = api({ sessionAction });
+    const { result } = renderHook(() => useAdmin(client, { active: true }));
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+    act(() => {
+      void result.current.runSessionAction(A, 'terminate');
+      void result.current.runSessionAction(A, 'recreate');
+    });
+    await waitFor(() => expect(sessionAction).toHaveBeenCalledOnce());
+
+    act(() => setVisibility('hidden'));
+    act(() => setVisibility('visible'));
+    await waitFor(() => expect(client.load).toHaveBeenCalledTimes(2));
+    actionA.resolve();
+    await act(async () => Promise.resolve());
+    await act(async () => Promise.resolve());
+
+    expect(sessionAction).toHaveBeenCalledOnce();
+    expect(result.current.sessionErrors).toEqual({});
+    expect(result.current.busySessionIds.size).toBe(0);
+  });
+
+  it('invalidates queued work after authentication loss before a new view epoch', async () => {
+    const actionA = deferred<void>();
+    const onAuthenticationRequired = vi.fn();
+    let loads = 0;
+    const sessionAction = vi.fn<AdminApi['sessionAction']>(
+      () => actionA.promise,
+    );
+    const client = api({
+      sessionAction,
+      load: vi.fn(async () => {
+        loads += 1;
+        if (loads === 2)
+          throw new AdminApiError('authentication_required', 401);
+        return snapshot(`2026-07-13T1${loads}:00:00.000Z`);
+      }),
+    });
+    const hook = renderHook(
+      ({ active }) => useAdmin(client, { active, onAuthenticationRequired }),
+      { initialProps: { active: true } },
+    );
+    await waitFor(() => expect(hook.result.current.snapshot).not.toBeNull());
+    act(() => {
+      void hook.result.current.runSessionAction(A, 'terminate');
+      void hook.result.current.runSessionAction(A, 'recreate');
+    });
+    await waitFor(() => expect(sessionAction).toHaveBeenCalledOnce());
+    await act(async () => hook.result.current.refresh());
+    expect(onAuthenticationRequired).toHaveBeenCalledOnce();
+
+    hook.rerender({ active: false });
+    hook.rerender({ active: true });
+    await waitFor(() => expect(client.load).toHaveBeenCalledTimes(3));
+    actionA.resolve();
+    await act(async () => Promise.resolve());
+    await act(async () => Promise.resolve());
+
+    expect(sessionAction).toHaveBeenCalledOnce();
+    expect(hook.result.current.sessionErrors).toEqual({});
+    expect(hook.result.current.busySessionIds.size).toBe(0);
+  });
+
+  it('keeps repeated open-close queue invalidation bounded to current work', async () => {
+    const pending: Array<ReturnType<typeof deferred<void>>> = [];
+    const sessionAction = vi.fn<AdminApi['sessionAction']>(() => {
+      const next = deferred<void>();
+      pending.push(next);
+      return next.promise;
+    });
+    const client = api({ sessionAction });
+    const hook = renderHook(({ active }) => useAdmin(client, { active }), {
+      initialProps: { active: true },
+    });
+    await waitFor(() => expect(hook.result.current.snapshot).not.toBeNull());
+
+    for (let index = 0; index < 6; index += 1) {
+      act(() => {
+        void hook.result.current.runSessionAction(A, 'terminate');
+        void hook.result.current.runSessionAction(A, 'recreate');
+      });
+      await waitFor(() =>
+        expect(sessionAction).toHaveBeenCalledTimes(index + 1),
+      );
+      hook.rerender({ active: false });
+      hook.rerender({ active: true });
+      await waitFor(() => expect(client.load).toHaveBeenCalledTimes(index + 2));
+      pending[index]!.resolve();
+      await act(async () => Promise.resolve());
+      await act(async () => Promise.resolve());
+      expect(hook.result.current.busySessionIds.size).toBe(0);
+    }
+
+    expect(sessionAction).toHaveBeenCalledTimes(6);
+    expect(
+      sessionAction.mock.calls.every(([, action]) => action === 'terminate'),
+    ).toBe(true);
+    expect(hook.result.current.sessionErrors).toEqual({});
+  });
+
   it('refetches authority after a failed action and isolates its bounded row error', async () => {
     let includeRows = true;
     const row = (id: string) => ({
@@ -247,6 +423,19 @@ describe('useAdmin', () => {
     expect(result.current.cleanupResult?.terminated).toBe(1);
     expect(client.load).toHaveBeenCalledTimes(2);
     expect(result.current.cleanupBusy).toBe(false);
+  });
+
+  it('does not enqueue post-mutation authority for an aborted cleanup', async () => {
+    const client = api({
+      cleanup: vi.fn(async () => {
+        throw new DOMException('cancelled', 'AbortError');
+      }),
+    });
+    const { result } = renderHook(() => useAdmin(client, { active: true }));
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+    await act(async () => result.current.runCleanup());
+    expect(client.load).toHaveBeenCalledOnce();
+    expect(result.current.cleanupError).toBeNull();
   });
 
   it('propagates authentication loss, aborts ownership, and exposes no server detail', async () => {

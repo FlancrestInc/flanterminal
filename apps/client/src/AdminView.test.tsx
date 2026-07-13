@@ -84,6 +84,9 @@ describe('AdminView', () => {
     expect(screen.getByText('1 running')).toBeVisible();
     expect(screen.getByText('1 bridge')).toBeVisible();
     expect(screen.getByText('2 sockets')).toBeVisible();
+    expect(screen.getByLabelText('Snapshot generated at')).toHaveTextContent(
+      '2026-07-13 12:00:00 UTC',
+    );
     expect(screen.getByText('Gospel')).toBeVisible();
     expect(screen.getByText(A)).toBeVisible();
     expect(screen.getByText(`webterm-${A}`)).toBeVisible();

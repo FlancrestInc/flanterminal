@@ -264,20 +264,59 @@ describe('App', () => {
     const terminal = await screen.findByLabelText(`Terminal ${A}`);
     expect(administration.load).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Administration' }));
-    expect(
-      await screen.findByRole('heading', { name: 'Administration' }),
-    ).toBeVisible();
+    const administrationTrigger = screen.getByRole('button', {
+      name: 'Administration',
+    });
+    administrationTrigger.focus();
+    fireEvent.click(administrationTrigger, { detail: 0 });
+    const administrationHeading = await screen.findByRole('heading', {
+      name: 'Administration',
+    });
+    expect(administrationHeading).toBeVisible();
+    await waitFor(() => expect(administrationHeading).toHaveFocus());
+    expect(document.activeElement?.closest('.app-shell')).toBeNull();
     expect(terminal).toBeInTheDocument();
     expect(terminal.closest('.app-shell')).toHaveAttribute('hidden');
     expect(administration.load).toHaveBeenCalledOnce();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Back to terminal' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Back to terminal' }), {
+      detail: 0,
+    });
     expect(screen.getByLabelText(`Terminal ${A}`)).toBe(terminal);
     expect(
       screen.queryByRole('heading', { name: 'Administration' }),
     ).not.toBeInTheDocument();
+    await waitFor(() => expect(administrationTrigger).toHaveFocus());
     await waitFor(() => expect(tabs.list).toHaveBeenCalledTimes(2));
+  });
+
+  it('keeps settings and administration mutually exclusive across focus transitions', async () => {
+    render(
+      <App
+        config={config}
+        api={api()}
+        adminApi={adminApi()}
+        {...settingsProps}
+      />,
+    );
+    const admin = await screen.findByRole('button', { name: 'Administration' });
+    fireEvent.click(admin, { detail: 0 });
+    expect(
+      await screen.findByRole('heading', { name: 'Administration' }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole('heading', { name: 'Settings' }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to terminal' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }), {
+      detail: 0,
+    });
+    expect(
+      await screen.findByRole('heading', { name: 'Settings' }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole('heading', { name: 'Administration' }),
+    ).not.toBeInTheDocument();
   });
 
   it('does not intercept workspace shortcuts when they are disabled', async () => {

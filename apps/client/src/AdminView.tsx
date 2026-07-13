@@ -7,7 +7,7 @@ import {
   ServerCog,
   Trash2,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { ConfirmDialog } from './ConfirmDialog.js';
 import type { AdminController } from './useAdmin.js';
@@ -27,7 +27,12 @@ type Confirmation =
 
 export function AdminView({ controller, onBack }: AdminViewProps) {
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const snapshot = controller.snapshot;
+
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
 
   const confirm = () => {
     const next = confirmation;
@@ -52,7 +57,9 @@ export function AdminView({ controller, onBack }: AdminViewProps) {
         >
           <ArrowLeft size={17} aria-hidden="true" />
         </button>
-        <h1>Administration</h1>
+        <h1 ref={headingRef} tabIndex={-1}>
+          Administration
+        </h1>
         <div className="admin-header-actions">
           <button
             className="icon-button"
@@ -115,6 +122,13 @@ export function AdminView({ controller, onBack }: AdminViewProps) {
         ) : (
           <>
             <section className="admin-summary" aria-label="Application health">
+              <time
+                dateTime={snapshot.generatedAt}
+                aria-label="Snapshot generated at"
+                title={snapshot.generatedAt}
+              >
+                {formatCanonicalTime(snapshot.generatedAt)}
+              </time>
               <span>{formatDuration(snapshot.uptimeSeconds)} uptime</span>
               <span>{formatBytes(snapshot.memory.rss)} RSS</span>
               <span>{formatBytes(snapshot.memory.heapUsed)} heap</span>
@@ -368,6 +382,15 @@ function formatTime(value: string): string {
     dateStyle: 'short',
     timeStyle: 'short',
   });
+}
+
+function formatCanonicalTime(value: string): string {
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return 'Unavailable';
+  return parsed
+    .toISOString()
+    .replace('T', ' ')
+    .replace(/\.\d{3}Z$/, ' UTC');
 }
 
 function confirmationTitle(value: Confirmation | null): string {

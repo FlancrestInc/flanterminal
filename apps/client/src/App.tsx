@@ -80,6 +80,8 @@ export function App({
   const [view, setView] = useState<'terminal' | 'settings' | 'admin'>(
     'terminal',
   );
+  const adminTriggerRef = useRef<HTMLButtonElement>(null);
+  const restoreAdminTriggerFocusRef = useRef(false);
   const admin = useAdmin(suppliedAdminApi ?? defaultAdminApi, {
     active: view === 'admin',
     ...(onAuthenticationRequired === undefined
@@ -95,6 +97,12 @@ export function App({
   useEffect(() => {
     document.documentElement.dataset.theme = settingsResponse.settings.theme;
   }, [settingsResponse.settings.theme]);
+
+  useEffect(() => {
+    if (view !== 'terminal' || !restoreAdminTriggerFocusRef.current) return;
+    restoreAdminTriggerFocusRef.current = false;
+    adminTriggerRef.current?.focus();
+  }, [view]);
 
   const selected = tabs.tabs.find((tab) => tab.id === tabs.selectedId);
   const selectedIndex = selected
@@ -195,6 +203,7 @@ export function App({
         <AdminView
           controller={admin}
           onBack={() => {
+            restoreAdminTriggerFocusRef.current = true;
             setView('terminal');
             void tabs.refresh();
           }}
@@ -248,6 +257,7 @@ export function App({
           ) : null}
           <div className="top-bar-actions">
             <button
+              ref={adminTriggerRef}
               className="icon-button"
               type="button"
               title="Administration"
