@@ -6,6 +6,9 @@ local tmux session per tab. From any shell, run `ssh hostname` normally. Remote
 machines need only an SSH server; they do not need tmux, Zellij, an agent, or
 FlanTerminal software.
 
+The project is released under Apache-2.0. Treat access to a deployed instance
+as equivalent to shell access as the container's `webterm` user.
+
 ```mermaid
 flowchart LR
   Browser[Browser: React + xterm.js]
@@ -585,6 +588,26 @@ verifier covers password/settings/home persistence, session loss on recreation,
 tmux process loss, stale cleanup isolation, session limits, 20 simultaneous
 authenticated bridges, PTY cleanup, health, ownership, hardening, and redaction.
 
+### Repository layout
+
+- `apps/client`: React, Vite, xterm.js, workspace, settings, and administration
+  UI.
+- `apps/server`: Express, authentication, WebSockets, node-pty, tmux lifecycle,
+  persistence, cleanup, and metrics.
+- `packages/shared`: strict HTTP, WebSocket, tab, settings, and administration
+  contracts shared by the browser and server.
+- `e2e`: authenticated browser workflows and the offline Cloudflare Access
+  fixture client.
+- `scripts`: production artifact, Docker runtime, hardening, persistence, and
+  E2E verification.
+- `docker-compose*.yml`: local authentication, Cloudflare Access, example bind
+  mounts, and isolated test deployments.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes. Report
+security issues privately as described in [SECURITY.md](SECURITY.md); do not
+open public issues containing vulnerabilities, credentials, private keys, or
+deployment details.
+
 ## Backup and restore
 
 Stop the app so atomic metadata and home files are quiescent, then archive both
@@ -713,3 +736,9 @@ command auditing, and cross-host shell-history synchronization.
 Only one browser bridge controls a tab at a time. Terminal scrollback is local
 to each browser and is not restored after a reload. Active processes do not
 survive a container lifecycle event.
+
+## License
+
+FlanTerminal is licensed under the [Apache License 2.0](LICENSE). The bundled
+JetBrainsMono Nerd Font remains licensed separately under the SIL Open Font
+License documented in [LICENSES/README](LICENSES/README).

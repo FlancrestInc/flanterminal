@@ -2,6 +2,7 @@
   "name": "@flanterminal/server",
   "version": "0.0.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "APP_PUBLIC_URL=${APP_PUBLIC_URL:-http://localhost:5173} tsx watch src/index.ts",
