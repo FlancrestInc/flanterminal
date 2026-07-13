@@ -11,9 +11,11 @@
   },
   "dependencies": {
     "@flanterminal/shared": "*",
+    "bcrypt": "^6.0.0",
     "express": "5.2.1",
     "helmet": "8.2.0",
     "ipaddr.js": "2.4.0",
+    "jose": "^6.2.3",
     "node-pty": "1.1.0",
     "pino": "10.3.1",
     "proxy-addr": "2.0.7",
@@ -21,6 +23,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
     "@types/proxy-addr": "2.0.3",
     "tsx": "^4.23.0"
   }
