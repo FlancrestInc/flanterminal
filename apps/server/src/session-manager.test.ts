@@ -10,6 +10,7 @@ import {
 } from '@flanterminal/shared';
 
 import { BridgeRegistry } from './bridge-registry.js';
+import type { EligibilitySnapshot } from './cleanup-eligibility.js';
 import type { PtyFactory, PtyProcess } from './pty.js';
 import {
   InvalidConnectionError,
@@ -20,6 +21,7 @@ import {
   TabNotFoundError,
   TerminalBridgeFactory,
   type ManagedBridgeFactory,
+  type CleanupEligibilityReaderPort,
   type SessionRuntimeController,
   type SessionTabStore,
 } from './session-manager.js';
@@ -47,6 +49,115 @@ const runtimeSettings = Object.freeze({
 });
 
 describe('SessionManager Phase 2 lifecycle', () => {
+  it('terminates a still-stale session under its lifecycle lock and retains metadata', async () => {
+    const harness = createHarness();
+    const oldToken = harness.manager.authorize(TAB_A)!;
+    const captured = cleanupSnapshot(TAB_A);
+    harness.cleanup.read.mockResolvedValueOnce(captured);
+
+    await expect(
+      harness.manager.terminateIfStale(TAB_A, captured),
+    ).resolves.toBe('terminated');
+
+    expect(harness.store.has(TAB_A)).toBe(true);
+    expect(harness.store.records.get(TAB_A)?.desiredState).toBe('stopped');
+    expect(harness.tmux.kill).toHaveBeenCalledWith(TAB_A);
+    await expect(
+      harness.manager.connect(oldToken, fakeSocket(), { cols: 80, rows: 24 }),
+    ).rejects.toBeInstanceOf(StaleAttachError);
+  });
+
+  it('skips when lock-time eligibility changed or became ineligible', async () => {
+    const harness = createHarness();
+    const captured = cleanupSnapshot(TAB_A);
+    harness.cleanup.read
+      .mockResolvedValueOnce({
+        ...captured,
+        generation: Object.freeze({ ...captured.generation, activity: 1 }),
+      })
+      .mockResolvedValueOnce({
+        ...captured,
+        eligible: false,
+        reason: 'connected',
+      });
+
+    await expect(
+      harness.manager.terminateIfStale(TAB_A, captured),
+    ).resolves.toBe('skipped:changed');
+    await expect(
+      harness.manager.terminateIfStale(TAB_A, captured),
+    ).resolves.toBe('skipped:connected');
+    expect(harness.tmux.kill).not.toHaveBeenCalled();
+    expect(harness.store.records.get(TAB_A)?.desiredState).toBe('active');
+  });
+
+  it('fails closed on an incoherent lock-time eligibility response', async () => {
+    const harness = createHarness();
+    const captured = cleanupSnapshot(TAB_A);
+    harness.cleanup.read.mockResolvedValueOnce({
+      ...captured,
+      eligible: true,
+      reason: 'connected',
+    });
+
+    await expect(
+      harness.manager.terminateIfStale(TAB_A, captured),
+    ).resolves.toBe('skipped:dependency_error');
+    expect(harness.tmux.kill).not.toHaveBeenCalled();
+  });
+
+  it('serializes two cleanup requests so only the first can terminate', async () => {
+    const harness = createHarness();
+    const captured = cleanupSnapshot(TAB_A);
+    harness.cleanup.read.mockResolvedValueOnce(captured).mockResolvedValueOnce({
+      ...captured,
+      eligible: false,
+      reason: 'inactive',
+    });
+
+    const [first, second] = await Promise.all([
+      harness.manager.terminateIfStale(TAB_A, captured),
+      harness.manager.terminateIfStale(TAB_A, captured),
+    ]);
+
+    expect([first, second]).toEqual(['terminated', 'skipped:inactive']);
+    expect(harness.tmux.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets an in-progress connection win before cleanup performs its lock-time recheck', async () => {
+    const harness = createHarness();
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const replace = BridgeRegistry.prototype.replace.bind(harness.registry);
+    vi.spyOn(harness.registry, 'replace').mockImplementationOnce(
+      async (id, bridge) => {
+        entered.resolve();
+        await release.promise;
+        await replace(id, bridge);
+      },
+    );
+    const connecting = harness.manager.connect(
+      harness.manager.authorize(TAB_A)!,
+      fakeSocket(),
+      { cols: 80, rows: 24 },
+    );
+    await entered.promise;
+
+    const captured = cleanupSnapshot(TAB_A);
+    harness.cleanup.read.mockResolvedValueOnce({
+      ...captured,
+      eligible: false,
+      reason: 'bridged',
+    });
+    const cleanup = harness.manager.terminateIfStale(TAB_A, captured);
+    expect(harness.cleanup.read).not.toHaveBeenCalled();
+
+    release.resolve();
+    await connecting;
+    await expect(cleanup).resolves.toBe('skipped:bridged');
+    expect(harness.tmux.kill).not.toHaveBeenCalled();
+  });
+
   it('copies and freezes one runtime snapshot before lifecycle awaits', async () => {
     const harness = createHarness();
     harness.store.applyState(TAB_A, 'stopped');
@@ -1050,6 +1161,9 @@ function createHarness() {
   const runtimeSettingsProvider = {
     current: vi.fn((): SessionRuntimeSettings => runtimeSettings),
   };
+  const cleanup: CleanupEligibilityReaderPort = {
+    read: vi.fn(async (request) => cleanupSnapshot(request.id)),
+  };
   const manager = new SessionManager({
     store,
     activity,
@@ -1058,6 +1172,7 @@ function createHarness() {
     registry,
     bridgeFactory,
     runtimeSettings: runtimeSettingsProvider,
+    cleanupEligibility: cleanup,
   });
   return {
     manager,
@@ -1068,6 +1183,9 @@ function createHarness() {
     bridgeFactory,
     activity,
     runtimeSettings: runtimeSettingsProvider,
+    cleanup: cleanup as CleanupEligibilityReaderPort & {
+      read: ReturnType<typeof vi.fn<CleanupEligibilityReaderPort['read']>>;
+    },
   };
 }
 
@@ -1143,6 +1261,17 @@ function record(id: string, displayName: string): TabRecord {
     createdAt: '2026-07-11T00:00:00.000Z',
     lastActivityAt: '2026-07-11T00:00:00.000Z',
     desiredState: 'active',
+  });
+}
+
+function cleanupSnapshot(id: string): EligibilitySnapshot {
+  return Object.freeze({
+    id,
+    thresholdMs: 3_600_000,
+    cutoffMs: Date.parse('2026-07-13T11:00:00.000Z'),
+    eligible: true,
+    reason: null,
+    generation: Object.freeze({ structure: 0, activity: 0, sockets: 0 }),
   });
 }
 

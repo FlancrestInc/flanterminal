@@ -32,6 +32,11 @@ export type WebSocketAuthIndexOptions = Readonly<{
   maxSockets: number;
 }>;
 
+export type WebSocketCleanupSnapshot = Readonly<{
+  generation: number;
+  count: number;
+}>;
+
 type Registration = {
   authority: ApplicationSessionAuthority;
   terminalTabId: string;
@@ -51,6 +56,7 @@ export class WebSocketAuthIndex {
   readonly #tabCounts = new Map<string, number>();
   readonly #unsubscribe: () => void;
   #disposed = false;
+  #cleanupGeneration = 0;
 
   constructor(options: WebSocketAuthIndexOptions) {
     if (
@@ -120,6 +126,7 @@ export class WebSocketAuthIndex {
       terminalTabId,
       (this.#tabCounts.get(terminalTabId) ?? 0) + 1,
     );
+    this.#cleanupGeneration += 1;
     return true;
   }
 
@@ -140,6 +147,7 @@ export class WebSocketAuthIndex {
     const count = (this.#tabCounts.get(registration.terminalTabId) ?? 1) - 1;
     if (count === 0) this.#tabCounts.delete(registration.terminalTabId);
     else this.#tabCounts.set(registration.terminalTabId, count);
+    this.#cleanupGeneration += 1;
     disposeAll(registration.disposables);
   }
 
@@ -177,6 +185,13 @@ export class WebSocketAuthIndex {
 
   countForTab(terminalTabId: string): number {
     return this.#tabCounts.get(terminalTabId) ?? 0;
+  }
+
+  cleanupSnapshot(terminalTabId: string): WebSocketCleanupSnapshot {
+    return Object.freeze({
+      generation: this.#cleanupGeneration,
+      count: this.#tabCounts.get(terminalTabId) ?? 0,
+    });
   }
 
   dispose(): void {

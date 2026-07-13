@@ -15,6 +15,12 @@ import {
 } from '@flanterminal/shared';
 
 import type { BridgeRegistry } from './bridge-registry.js';
+import {
+  sameEligibilityGeneration,
+  type CleanupSkipReason,
+  type EligibilityRequest,
+  type EligibilitySnapshot,
+} from './cleanup-eligibility.js';
 import type { LifecycleLogger } from './logger.js';
 import type { PtyFactory, PtyProcess, TerminalDimensions } from './pty.js';
 import {
@@ -42,6 +48,13 @@ export interface ManagedBridgeFactory {
 export interface ActivityMarker {
   mark(id: string): void;
 }
+
+export interface CleanupEligibilityReaderPort {
+  read(request: EligibilityRequest): Promise<EligibilitySnapshot>;
+}
+
+export type CleanupTerminationResult =
+  'terminated' | `skipped:${CleanupSkipReason}`;
 
 export class TerminalBridgeFactory implements ManagedBridgeFactory {
   constructor(
@@ -91,6 +104,7 @@ export type SessionManagerOptions = Readonly<{
   store?: SessionTabStore;
   activity?: ActivityMarker;
   runtimeSettings?: SessionRuntimeSettingsProvider;
+  cleanupEligibility?: CleanupEligibilityReaderPort;
 }>;
 
 const ATTACH_TOKEN_BRAND = Symbol('AttachToken');
@@ -257,29 +271,36 @@ export class SessionManager {
   }
 
   terminate(id: string): Promise<TabView> {
-    return this.mutex.runExclusive(id, async () => {
-      const dependencies = this.requireLifecycleTab(id);
-      this.incrementGeneration(id);
-      try {
-        await dependencies.store.setDesiredState(id, 'stopped');
-      } catch {
-        throw new OperationFailedError();
-      }
-      this.mark(id);
+    return this.mutex.runExclusive(id, () => this.terminateLocked(id));
+  }
 
-      const failure = await this.stopRuntime(
-        id,
-        SESSION_STOPPED,
-        'session_stopped',
-        dependencies.runtime,
-      );
-      if (failure) {
-        throw new OperationFailedError(await this.viewBestEffort(id));
+  terminateIfStale(
+    id: string,
+    captured: EligibilitySnapshot,
+  ): Promise<CleanupTerminationResult> {
+    return this.mutex.runExclusive<CleanupTerminationResult>(id, async () => {
+      if (!isValidEligibilityCapture(id, captured)) return 'skipped:invalid';
+      if (!captured.eligible) return `skipped:${captured.reason ?? 'invalid'}`;
+      const reader = this.options.cleanupEligibility;
+      if (reader === undefined) return 'skipped:dependency_error';
+
+      let fresh: EligibilitySnapshot;
+      try {
+        fresh = await reader.read({
+          id,
+          thresholdMs: captured.thresholdMs,
+          cutoffMs: captured.cutoffMs,
+        });
+      } catch {
+        return 'skipped:dependency_error';
       }
-      return this.viewFromRecord(
-        this.requireCurrentRecord(id),
-        await this.probeHealth(id),
-      );
+      if (!isValidEligibilityCapture(id, fresh))
+        return 'skipped:dependency_error';
+      if (!fresh.eligible) return `skipped:${fresh.reason ?? 'invalid'}`;
+      if (!sameEligibilityGeneration(captured, fresh)) return 'skipped:changed';
+
+      await this.terminateLocked(id);
+      return 'terminated';
     });
   }
 
@@ -503,6 +524,31 @@ export class SessionManager {
     return failed;
   }
 
+  private async terminateLocked(id: string): Promise<TabView> {
+    const dependencies = this.requireLifecycleTab(id);
+    this.incrementGeneration(id);
+    try {
+      await dependencies.store.setDesiredState(id, 'stopped');
+    } catch {
+      throw new OperationFailedError();
+    }
+    this.mark(id);
+
+    const failure = await this.stopRuntime(
+      id,
+      SESSION_STOPPED,
+      'session_stopped',
+      dependencies.runtime,
+    );
+    if (failure) {
+      throw new OperationFailedError(await this.viewBestEffort(id));
+    }
+    return this.viewFromRecord(
+      this.requireCurrentRecord(id),
+      await this.probeHealth(id),
+    );
+  }
+
   private requirePhaseTwo(): {
     store: SessionTabStore;
     runtime: SessionRuntimeController;
@@ -656,6 +702,51 @@ function isValidRuntimeSettings(
     Number.isInteger(historyLimit) &&
     historyLimit >= 0 &&
     historyLimit <= MAX_RUNTIME_HISTORY_LIMIT
+  );
+}
+
+function isValidEligibilityCapture(
+  id: string,
+  snapshot: EligibilitySnapshot,
+): boolean {
+  return (
+    isSessionId(id) &&
+    snapshot !== null &&
+    typeof snapshot === 'object' &&
+    snapshot.id === id &&
+    Number.isSafeInteger(snapshot.thresholdMs) &&
+    snapshot.thresholdMs >= 0 &&
+    Number.isSafeInteger(snapshot.cutoffMs) &&
+    typeof snapshot.eligible === 'boolean' &&
+    validCleanupReason(snapshot.reason) &&
+    (snapshot.eligible ? snapshot.reason === null : snapshot.reason !== null) &&
+    snapshot.generation !== null &&
+    typeof snapshot.generation === 'object' &&
+    validGeneration(snapshot.generation.structure) &&
+    validGeneration(snapshot.generation.activity) &&
+    validGeneration(snapshot.generation.sockets)
+  );
+}
+
+function validGeneration(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function validCleanupReason(value: CleanupSkipReason | null): boolean {
+  return (
+    value === null ||
+    value === 'disabled' ||
+    value === 'invalid' ||
+    value === 'tab_absent' ||
+    value === 'inactive' ||
+    value === 'session_absent' ||
+    value === 'connected' ||
+    value === 'bridged' ||
+    value === 'activity_pending' ||
+    value === 'recent_activity' ||
+    value === 'invalid_timestamp' ||
+    value === 'dependency_error' ||
+    value === 'changed'
   );
 }
 

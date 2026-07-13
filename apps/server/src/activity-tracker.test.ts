@@ -10,6 +10,54 @@ const NOW = '2026-07-11T12:00:00.000Z';
 const LATER = '2026-07-11T12:00:05.000Z';
 
 describe('ActivityTracker', () => {
+  it('exposes immutable generations while activity is pending and in flight', async () => {
+    const scheduler = new FakeScheduler();
+    const write = deferred<void>();
+    const tracker = makeTracker({
+      scheduler,
+      flushActivity: () => write.promise,
+    });
+
+    const initial = tracker.cleanupSnapshot('first');
+    tracker.mark('first');
+    const pending = tracker.cleanupSnapshot('first');
+    scheduler.runNext();
+    await settle();
+    const inFlight = tracker.cleanupSnapshot('first');
+
+    expect(initial).toEqual({ generation: 0, pending: false });
+    expect(pending).toEqual({ generation: 1, pending: true });
+    expect(inFlight).toEqual({ generation: 2, pending: true });
+    expect(Object.isFrozen(inFlight)).toBe(true);
+
+    write.resolve();
+    await settle();
+    expect(tracker.cleanupSnapshot('first')).toEqual({
+      generation: 3,
+      pending: false,
+    });
+  });
+
+  it('advances cleanup visibility and remains pending after a failed flush', async () => {
+    const scheduler = new FakeScheduler();
+    const tracker = makeTracker({
+      scheduler,
+      flushActivity: async () => {
+        throw new Error('contained');
+      },
+    });
+
+    tracker.mark('first');
+    scheduler.runNext();
+    await settle();
+
+    expect(tracker.cleanupSnapshot('first')).toEqual({
+      generation: 3,
+      pending: true,
+    });
+    expect(scheduler.pendingCount).toBe(1);
+  });
+
   it('deduplicates IDs into one immutable snapshot on the default interval', async () => {
     const scheduler = new FakeScheduler();
     const calls: Array<{ ids: ReadonlySet<string>; now: string }> = [];
@@ -164,6 +212,25 @@ describe('ActivityTracker', () => {
     expect(scheduler.pendingCount).toBe(0);
     expect(scheduler.cancelledCount).toBe(1);
     expect(calls).toEqual([['first']]);
+  });
+
+  it('keeps final shutdown activity pending until persistence completes', async () => {
+    const write = deferred<void>();
+    const tracker = makeTracker({ flushActivity: () => write.promise });
+    tracker.mark('first');
+
+    const shutdown = tracker.shutdown();
+    expect(tracker.cleanupSnapshot('first')).toEqual({
+      generation: 2,
+      pending: true,
+    });
+
+    write.resolve();
+    await shutdown;
+    expect(tracker.cleanupSnapshot('first')).toEqual({
+      generation: 3,
+      pending: false,
+    });
   });
 
   it('waits for an in-flight write, then finally flushes later dirties', async () => {

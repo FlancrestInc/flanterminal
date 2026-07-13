@@ -18,6 +18,11 @@ export type ActivityTrackerOptions = Readonly<{
   intervalMs?: number;
 }>;
 
+export type ActivityCleanupSnapshot = Readonly<{
+  generation: number;
+  pending: boolean;
+}>;
+
 const defaultScheduler: ActivityScheduler = {
   setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
@@ -25,6 +30,7 @@ const defaultScheduler: ActivityScheduler = {
 
 export class ActivityTracker {
   private readonly dirtyIds = new Set<string>();
+  private readonly flushingIds = new Set<string>();
   private readonly scheduler: ActivityScheduler;
   private readonly now: () => string;
   private readonly intervalMs: number;
@@ -32,6 +38,7 @@ export class ActivityTracker {
   private inFlight: Promise<void> | undefined;
   private shutdownPromise: Promise<void> | undefined;
   private accepting = true;
+  private cleanupGeneration = 0;
 
   constructor(private readonly options: ActivityTrackerOptions) {
     this.scheduler = options.scheduler ?? defaultScheduler;
@@ -42,7 +49,15 @@ export class ActivityTracker {
   mark(tabId: string): void {
     if (!this.accepting) return;
     this.dirtyIds.add(tabId);
+    this.advanceCleanupGeneration();
     this.schedule();
+  }
+
+  cleanupSnapshot(tabId: string): ActivityCleanupSnapshot {
+    return Object.freeze({
+      generation: this.cleanupGeneration,
+      pending: this.dirtyIds.has(tabId) || this.flushingIds.has(tabId),
+    });
   }
 
   shutdown(): Promise<void> {
@@ -81,12 +96,16 @@ export class ActivityTracker {
     if (this.inFlight || this.dirtyIds.size === 0) return;
 
     const ids = this.takeDirtySnapshot();
+    for (const id of ids) this.flushingIds.add(id);
+    this.advanceCleanupGeneration();
     const operation: Promise<void> = Promise.resolve()
       .then(() => this.options.store.flushActivity(ids, this.now()))
       .catch(() => {
         for (const id of ids) this.dirtyIds.add(id);
       })
       .finally(() => {
+        for (const id of ids) this.flushingIds.delete(id);
+        this.advanceCleanupGeneration();
         if (this.inFlight !== operation) return;
         this.inFlight = undefined;
         this.schedule();
@@ -99,10 +118,15 @@ export class ActivityTracker {
     if (this.dirtyIds.size === 0) return;
 
     const ids = this.takeDirtySnapshot();
+    for (const id of ids) this.flushingIds.add(id);
+    this.advanceCleanupGeneration();
     try {
       await this.options.store.flushActivity(ids, this.now());
     } catch {
       throw new Error(SHUTDOWN_ERROR_MESSAGE);
+    } finally {
+      for (const id of ids) this.flushingIds.delete(id);
+      this.advanceCleanupGeneration();
     }
   }
 
@@ -116,5 +140,9 @@ export class ActivityTracker {
     if (this.timer === undefined) return;
     this.scheduler.clearTimeout(this.timer);
     this.timer = undefined;
+  }
+
+  private advanceCleanupGeneration(): void {
+    this.cleanupGeneration += 1;
   }
 }

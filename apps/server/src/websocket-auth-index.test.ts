@@ -20,6 +20,55 @@ const AUTH_B = Object.freeze({
 });
 
 describe('WebSocketAuthIndex', () => {
+  it('exposes immutable per-tab cleanup counts with transition generations', () => {
+    const auth = authSource();
+    const index = new WebSocketAuthIndex({
+      auth,
+      maxApplicationSessions: 2,
+      maxSockets: 3,
+    });
+    const socket = new FakeSocket();
+
+    const initial = index.cleanupSnapshot(TAB_A);
+    expect(index.registerIfActive(AUTH_A, TAB_A, socket)).toBe(true);
+    const connected = index.cleanupSnapshot(TAB_A);
+    expect(index.registerIfActive(AUTH_A, TAB_A, socket)).toBe(false);
+    expect(index.cleanupSnapshot(TAB_A)).toEqual(connected);
+
+    index.unregister(new FakeSocket());
+    expect(index.cleanupSnapshot(TAB_A)).toEqual(connected);
+    index.unregister(socket);
+    const disconnected = index.cleanupSnapshot(TAB_A);
+
+    expect(initial).toEqual({ generation: 0, count: 0 });
+    expect(connected).toEqual({ generation: 1, count: 1 });
+    expect(disconnected).toEqual({ generation: 2, count: 0 });
+    expect(Object.isFrozen(disconnected)).toBe(true);
+  });
+
+  it('does not decrement cleanup visibility when fail-closed disposal cannot close a socket', () => {
+    const auth = authSource();
+    const index = new WebSocketAuthIndex({
+      auth,
+      maxApplicationSessions: 2,
+      maxSockets: 3,
+    });
+    const socket = new FakeSocket();
+    socket.close.mockImplementation(() => {
+      throw new Error('contained');
+    });
+    socket.terminate.mockImplementation(() => {
+      throw new Error('contained');
+    });
+    index.registerIfActive(AUTH_A, TAB_A, socket);
+    const before = index.cleanupSnapshot(TAB_A);
+
+    index.dispose();
+
+    expect(index.cleanupSnapshot(TAB_A)).toEqual(before);
+    expect(before).toEqual({ generation: 1, count: 1 });
+  });
+
   it('registers active authorities atomically and counts only live sockets', () => {
     const auth = authSource();
     const index = new WebSocketAuthIndex({
@@ -83,6 +132,7 @@ describe('WebSocketAuthIndex', () => {
     const second = new FakeSocket();
     index.registerIfActive(AUTH_A, TAB_A, first);
     index.registerIfActive(AUTH_A, TAB_B, second);
+    const beforeRevocation = index.cleanupSnapshot(TAB_A).generation;
 
     auth.revoke(AUTH_A.applicationSessionId);
     auth.revoke(AUTH_A.applicationSessionId);
@@ -91,6 +141,10 @@ describe('WebSocketAuthIndex', () => {
     expect(second.close).toHaveBeenCalledOnce();
     expect(first.close).toHaveBeenCalledWith(4003, 'authentication_required');
     expect(index.connectedCount()).toBe(0);
+    expect(index.cleanupSnapshot(TAB_A)).toEqual({
+      generation: beforeRevocation + 2,
+      count: 0,
+    });
 
     auth.active = true;
     expect(index.registerIfActive(AUTH_A, TAB_A, new FakeSocket())).toBe(true);
