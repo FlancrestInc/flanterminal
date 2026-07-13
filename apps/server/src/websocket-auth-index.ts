@@ -46,6 +46,7 @@ type Registration = {
 
 const HARD_MAX_APPLICATION_SESSIONS = 256;
 const HARD_MAX_SOCKETS = 1_024;
+const MAX_CLEANUP_GENERATIONS = 64;
 
 export class WebSocketAuthIndex {
   readonly #auth: WebSocketAuthSource;
@@ -56,7 +57,8 @@ export class WebSocketAuthIndex {
   readonly #tabCounts = new Map<string, number>();
   readonly #unsubscribe: () => void;
   #disposed = false;
-  #cleanupGeneration = 0;
+  #cleanupEvictionGeneration = 0;
+  readonly #cleanupGenerations = new Map<string, number>();
 
   constructor(options: WebSocketAuthIndexOptions) {
     if (
@@ -126,7 +128,7 @@ export class WebSocketAuthIndex {
       terminalTabId,
       (this.#tabCounts.get(terminalTabId) ?? 0) + 1,
     );
-    this.#cleanupGeneration += 1;
+    this.#advanceCleanupGeneration(terminalTabId);
     return true;
   }
 
@@ -147,7 +149,7 @@ export class WebSocketAuthIndex {
     const count = (this.#tabCounts.get(registration.terminalTabId) ?? 1) - 1;
     if (count === 0) this.#tabCounts.delete(registration.terminalTabId);
     else this.#tabCounts.set(registration.terminalTabId, count);
-    this.#cleanupGeneration += 1;
+    this.#advanceCleanupGeneration(registration.terminalTabId);
     disposeAll(registration.disposables);
   }
 
@@ -189,9 +191,15 @@ export class WebSocketAuthIndex {
 
   cleanupSnapshot(terminalTabId: string): WebSocketCleanupSnapshot {
     return Object.freeze({
-      generation: this.#cleanupGeneration,
+      generation:
+        this.#cleanupGenerations.get(terminalTabId) ??
+        this.#cleanupEvictionGeneration,
       count: this.#tabCounts.get(terminalTabId) ?? 0,
     });
+  }
+
+  cleanupTrackingCount(): number {
+    return this.#cleanupGenerations.size;
   }
 
   dispose(): void {
@@ -213,6 +221,23 @@ export class WebSocketAuthIndex {
     } catch {
       return false;
     }
+  }
+
+  #advanceCleanupGeneration(terminalTabId: string): void {
+    const generation =
+      (this.#cleanupGenerations.get(terminalTabId) ??
+        this.#cleanupEvictionGeneration) + 1;
+    this.#cleanupGenerations.delete(terminalTabId);
+    this.#cleanupGenerations.set(terminalTabId, generation);
+    if (this.#cleanupGenerations.size <= MAX_CLEANUP_GENERATIONS) return;
+    const oldest = this.#cleanupGenerations.entries().next().value as
+      [string, number] | undefined;
+    if (oldest === undefined) return;
+    this.#cleanupGenerations.delete(oldest[0]);
+    this.#cleanupEvictionGeneration = Math.max(
+      this.#cleanupEvictionGeneration + 1,
+      oldest[1],
+    );
   }
 }
 

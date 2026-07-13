@@ -9,6 +9,7 @@ import {
 
 const TAB_A = '550e8400-e29b-41d4-a716-446655440000';
 const TAB_B = '123e4567-e89b-42d3-a456-426614174000';
+const TAB_C = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const START = Date.parse('2026-07-13T12:00:00.000Z');
 
 describe('StaleSessionCleaner', () => {
@@ -108,19 +109,74 @@ describe('StaleSessionCleaner', () => {
     );
   });
 
-  it('continues independent sessions after read and lifecycle failures', async () => {
-    const harness = cleanerHarness({ ids: [TAB_A, TAB_B] });
+  it('continues to a successful independent session after per-session failures', async () => {
+    const harness = cleanerHarness({ ids: [TAB_A, TAB_B, TAB_C] });
     harness.read
       .mockRejectedValueOnce(new Error('contained'))
       .mockResolvedValueOnce(eligibleSnapshot(TAB_B));
     harness.terminate.mockRejectedValueOnce(new Error('contained'));
 
     await expect(harness.cleaner.runNow()).resolves.toMatchObject({
-      examined: 2,
-      terminated: 0,
+      examined: 3,
+      terminated: 1,
       skipped: 0,
       failed: 2,
     });
+    expect(harness.terminate).toHaveBeenLastCalledWith(
+      TAB_C,
+      eligibleSnapshot(TAB_C),
+    );
+  });
+
+  it('contains initial scheduler failure and recovers after a manual run', async () => {
+    const scheduler = new FakeScheduler();
+    scheduler.failSetAttempts.add(1);
+
+    const harness = cleanerHarness({ scheduler });
+
+    expect(harness.cleaner.status()).toEqual({
+      enabled: true,
+      running: false,
+      lastRunAt: null,
+    });
+    expect(scheduler.pendingCount).toBe(0);
+    await expect(harness.cleaner.runNow()).resolves.toMatchObject({
+      terminated: 1,
+    });
+    expect(scheduler.pendingCount).toBe(1);
+  });
+
+  it('contains a detached reschedule failure and recovers on a later run', async () => {
+    const scheduler = new FakeScheduler();
+    scheduler.failSetAttempts.add(2);
+    const harness = cleanerHarness({ scheduler });
+
+    await harness.cleaner.runNow();
+    await settle();
+    expect(scheduler.pendingCount).toBe(0);
+    expect(harness.cleaner.status().running).toBe(false);
+
+    await harness.cleaner.runNow();
+    await settle();
+    expect(scheduler.pendingCount).toBe(1);
+  });
+
+  it('contains clear failure and shares idempotent shutdown without later work', async () => {
+    const scheduler = new FakeScheduler();
+    const harness = cleanerHarness({ scheduler });
+    scheduler.failClear = true;
+
+    const first = harness.cleaner.shutdown();
+    const second = harness.cleaner.shutdown();
+
+    expect(second).toBe(first);
+    await expect(first).resolves.toBeUndefined();
+    expect(harness.cleaner.status().running).toBe(false);
+    expect(scheduler.pendingCount).toBe(1);
+    scheduler.runNext();
+    await settle();
+    expect(harness.read).not.toHaveBeenCalled();
+    expect(scheduler.pendingCount).toBe(0);
   });
 
   it('cancels one timer and waits for in-flight cleanup without rescheduling', async () => {
@@ -141,6 +197,7 @@ function cleanerHarness({
   thresholdHours = 1,
   ids = [TAB_A],
   maxSessions = 20,
+  scheduler = new FakeScheduler(),
   terminate = vi.fn(
     async (): Promise<CleanupTerminationResult> => 'terminated',
   ),
@@ -149,8 +206,8 @@ function cleanerHarness({
   ids?: string[];
   maxSessions?: number;
   terminate?: ReturnType<typeof vi.fn<() => Promise<CleanupTerminationResult>>>;
+  scheduler?: FakeScheduler;
 } = {}) {
-  const scheduler = new FakeScheduler();
   const clock = { value: START };
   const settings = { staleSessionCleanupHours: thresholdHours };
   const read = vi.fn(async ({ id }: { id: string }) => eligibleSnapshot(id));
@@ -193,18 +250,26 @@ function tabRecord(id: string, position: number) {
 
 class FakeScheduler implements CleanupScheduler {
   readonly delays: number[] = [];
+  readonly failSetAttempts = new Set<number>();
   cancelledCount = 0;
+  failClear = false;
+  setAttempts = 0;
   private pending: Array<{ handle: object; callback: () => void }> = [];
   get pendingCount() {
     return this.pending.length;
   }
   setTimeout(callback: () => void, delayMs: number) {
+    this.setAttempts += 1;
+    if (this.failSetAttempts.has(this.setAttempts)) {
+      throw new Error('contained scheduler set failure');
+    }
     const handle = {};
     this.delays.push(delayMs);
     this.pending.push({ handle, callback });
     return handle;
   }
   clearTimeout(handle: object) {
+    if (this.failClear) throw new Error('contained scheduler clear failure');
     const index = this.pending.findIndex((timer) => timer.handle === handle);
     if (index < 0) return;
     this.pending.splice(index, 1);
@@ -215,6 +280,10 @@ class FakeScheduler implements CleanupScheduler {
     if (!timer) throw new Error('No pending timer');
     timer.callback();
   }
+}
+
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
 }
 
 function deferred<T>() {

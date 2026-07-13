@@ -7,7 +7,7 @@ const MAX_TABS = 20;
 const MAX_SOCKETS = 1_024;
 const MAX_THRESHOLD_MS = 8_760 * 60 * 60 * 1_000;
 const UTC_TIMESTAMP_PATTERN =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
 
 export type CleanupSkipReason =
   | 'disabled'
@@ -129,11 +129,8 @@ export class CleanupEligibilityReader {
     const timestampValue = after.lastActivityAt ?? after.createdAt;
     if (typeof timestampValue !== 'string')
       return result(request, false, 'invalid_timestamp', after);
-    const timestamp = Date.parse(timestampValue);
-    if (
-      !UTC_TIMESTAMP_PATTERN.test(timestampValue) ||
-      !Number.isFinite(timestamp)
-    )
+    const timestamp = parseUtcTimestamp(timestampValue);
+    if (timestamp === undefined)
       return result(request, false, 'invalid_timestamp', after);
     if (timestamp >= request.cutoffMs)
       return result(request, false, 'recent_activity', after);
@@ -208,6 +205,43 @@ function validRequest(request: EligibilityRequest): boolean {
 
 function validGeneration(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
+}
+
+function parseUtcTimestamp(value: string): number | undefined {
+  const match = UTC_TIMESTAMP_PATTERN.exec(value);
+  if (match === null) return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ?? '';
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth(year, month) ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59
+  ) {
+    return undefined;
+  }
+  const milliseconds = Number(`${fraction}000`.slice(0, 3));
+  const timestamp = new Date(0);
+  timestamp.setUTCFullYear(year, month - 1, day);
+  timestamp.setUTCHours(hour, minute, second, milliseconds);
+  const result = timestamp.getTime();
+  return Number.isFinite(result) ? result : undefined;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    return leap ? 29 : 28;
+  }
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
 }
 
 function sameState(left: SynchronousState, right: SynchronousState): boolean {

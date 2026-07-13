@@ -58,6 +58,36 @@ describe('ActivityTracker', () => {
     expect(scheduler.pendingCount).toBe(1);
   });
 
+  it('keeps cleanup generations isolated per tab through flush transitions', async () => {
+    const scheduler = new FakeScheduler();
+    const tracker = makeTracker({ scheduler });
+    const firstBefore = tracker.cleanupSnapshot('first');
+
+    tracker.mark('second');
+    const secondMarked = tracker.cleanupSnapshot('second');
+    expect(tracker.cleanupSnapshot('first')).toEqual(firstBefore);
+    scheduler.runNext();
+    await settle();
+
+    expect(tracker.cleanupSnapshot('first')).toEqual(firstBefore);
+    expect(tracker.cleanupSnapshot('second').generation).toBeGreaterThan(
+      secondMarked.generation,
+    );
+  });
+
+  it('bounds retained cleanup generations across unknown tab churn', async () => {
+    const scheduler = new FakeScheduler();
+    const tracker = makeTracker({ scheduler });
+
+    for (let index = 0; index < 500; index += 1) {
+      tracker.mark(`unknown-${index}`);
+    }
+    scheduler.runNext();
+    await settle();
+
+    expect(tracker.cleanupTrackingCount()).toBeLessThanOrEqual(64);
+  });
+
   it('deduplicates IDs into one immutable snapshot on the default interval', async () => {
     const scheduler = new FakeScheduler();
     const calls: Array<{ ids: ReadonlySet<string>; now: string }> = [];
@@ -346,6 +376,10 @@ describe('ActivityTracker', () => {
     await expect(tracker.shutdown()).rejects.not.toThrow('secret failure');
     expect(flushActivity).toHaveBeenCalledOnce();
     expect(scheduler.pendingCount).toBe(0);
+    expect(tracker.cleanupSnapshot('private-tab-id')).toEqual({
+      generation: 3,
+      pending: true,
+    });
   });
 });
 

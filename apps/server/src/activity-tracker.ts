@@ -1,4 +1,5 @@
 const DEFAULT_INTERVAL_MS = 5_000;
+const MAX_CLEANUP_GENERATIONS = 64;
 const SHUTDOWN_ERROR_MESSAGE =
   'Failed to persist terminal activity during shutdown';
 
@@ -38,7 +39,9 @@ export class ActivityTracker {
   private inFlight: Promise<void> | undefined;
   private shutdownPromise: Promise<void> | undefined;
   private accepting = true;
-  private cleanupGeneration = 0;
+  private cleanupClock = 0;
+  private cleanupEvictionGeneration = 0;
+  private readonly cleanupGenerations = new Map<string, number>();
 
   constructor(private readonly options: ActivityTrackerOptions) {
     this.scheduler = options.scheduler ?? defaultScheduler;
@@ -49,15 +52,20 @@ export class ActivityTracker {
   mark(tabId: string): void {
     if (!this.accepting) return;
     this.dirtyIds.add(tabId);
-    this.advanceCleanupGeneration();
+    this.advanceCleanupGeneration(tabId);
     this.schedule();
   }
 
   cleanupSnapshot(tabId: string): ActivityCleanupSnapshot {
     return Object.freeze({
-      generation: this.cleanupGeneration,
+      generation:
+        this.cleanupGenerations.get(tabId) ?? this.cleanupEvictionGeneration,
       pending: this.dirtyIds.has(tabId) || this.flushingIds.has(tabId),
     });
+  }
+
+  cleanupTrackingCount(): number {
+    return this.cleanupGenerations.size;
   }
 
   shutdown(): Promise<void> {
@@ -97,7 +105,7 @@ export class ActivityTracker {
 
     const ids = this.takeDirtySnapshot();
     for (const id of ids) this.flushingIds.add(id);
-    this.advanceCleanupGeneration();
+    this.advanceCleanupGenerations(ids);
     const operation: Promise<void> = Promise.resolve()
       .then(() => this.options.store.flushActivity(ids, this.now()))
       .catch(() => {
@@ -105,7 +113,7 @@ export class ActivityTracker {
       })
       .finally(() => {
         for (const id of ids) this.flushingIds.delete(id);
-        this.advanceCleanupGeneration();
+        this.advanceCleanupGenerations(ids);
         if (this.inFlight !== operation) return;
         this.inFlight = undefined;
         this.schedule();
@@ -119,14 +127,15 @@ export class ActivityTracker {
 
     const ids = this.takeDirtySnapshot();
     for (const id of ids) this.flushingIds.add(id);
-    this.advanceCleanupGeneration();
+    this.advanceCleanupGenerations(ids);
     try {
       await this.options.store.flushActivity(ids, this.now());
     } catch {
+      for (const id of ids) this.dirtyIds.add(id);
       throw new Error(SHUTDOWN_ERROR_MESSAGE);
     } finally {
       for (const id of ids) this.flushingIds.delete(id);
-      this.advanceCleanupGeneration();
+      this.advanceCleanupGenerations(ids);
     }
   }
 
@@ -142,7 +151,18 @@ export class ActivityTracker {
     this.timer = undefined;
   }
 
-  private advanceCleanupGeneration(): void {
-    this.cleanupGeneration += 1;
+  private advanceCleanupGenerations(ids: ReadonlySet<string>): void {
+    for (const id of ids) this.advanceCleanupGeneration(id);
+  }
+
+  private advanceCleanupGeneration(id: string): void {
+    this.cleanupClock += 1;
+    this.cleanupGenerations.delete(id);
+    this.cleanupGenerations.set(id, this.cleanupClock);
+    if (this.cleanupGenerations.size <= MAX_CLEANUP_GENERATIONS) return;
+    const oldest = this.cleanupGenerations.keys().next().value as
+      string | undefined;
+    if (oldest !== undefined) this.cleanupGenerations.delete(oldest);
+    this.cleanupEvictionGeneration = this.cleanupClock;
   }
 }

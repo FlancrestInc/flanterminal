@@ -119,13 +119,13 @@ export class StaleSessionCleaner {
   shutdown(): Promise<void> {
     if (this.shutdownPromise !== undefined) return this.shutdownPromise;
     this.shuttingDown = true;
-    this.cancelTimer();
     const current = this.inFlight;
     this.shutdownPromise =
       current?.then(
         () => undefined,
         () => undefined,
       ) ?? Promise.resolve();
+    this.cancelTimer();
     return this.shutdownPromise;
   }
 
@@ -220,16 +220,26 @@ export class StaleSessionCleaner {
 
   private schedule(): void {
     if (this.shuttingDown || this.timer !== undefined) return;
-    this.timer = this.scheduler.setTimeout(() => {
+    try {
+      this.timer = this.scheduler.setTimeout(() => {
+        this.timer = undefined;
+        if (this.shuttingDown) return;
+        void this.startRun(this.thresholdHours());
+      }, this.options.intervalMs);
+    } catch {
       this.timer = undefined;
-      void this.startRun(this.thresholdHours());
-    }, this.options.intervalMs);
+    }
   }
 
   private cancelTimer(): void {
     if (this.timer === undefined) return;
-    this.scheduler.clearTimeout(this.timer);
+    const timer = this.timer;
     this.timer = undefined;
+    try {
+      this.scheduler.clearTimeout(timer);
+    } catch {
+      // Local ownership is cleared even when the scheduler cannot cancel it.
+    }
   }
 
   private thresholdHours(): number {

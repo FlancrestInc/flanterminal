@@ -69,6 +69,46 @@ describe('WebSocketAuthIndex', () => {
     expect(before).toEqual({ generation: 1, count: 1 });
   });
 
+  it('keeps cleanup generations isolated per terminal tab', () => {
+    const auth = authSource();
+    const index = new WebSocketAuthIndex({
+      auth,
+      maxApplicationSessions: 2,
+      maxSockets: 3,
+    });
+    const tabAInitial = index.cleanupSnapshot(TAB_A);
+    const tabBSocket = new FakeSocket();
+
+    expect(index.registerIfActive(AUTH_A, TAB_B, tabBSocket)).toBe(true);
+    expect(index.cleanupSnapshot(TAB_A)).toEqual(tabAInitial);
+    index.unregister(tabBSocket);
+    expect(index.cleanupSnapshot(TAB_A)).toEqual(tabAInitial);
+
+    expect(index.registerIfActive(AUTH_A, TAB_A, new FakeSocket())).toBe(true);
+    expect(index.cleanupSnapshot(TAB_A).generation).toBeGreaterThan(
+      tabAInitial.generation,
+    );
+  });
+
+  it('bounds retained cleanup generations across terminal tab churn', () => {
+    const auth = authSource();
+    const index = new WebSocketAuthIndex({
+      auth,
+      maxApplicationSessions: 2,
+      maxSockets: 3,
+    });
+
+    for (let tab = 0; tab < 500; tab += 1) {
+      const socket = new FakeSocket();
+      expect(index.registerIfActive(AUTH_A, `unknown-${tab}`, socket)).toBe(
+        true,
+      );
+      index.unregister(socket);
+    }
+
+    expect(index.cleanupTrackingCount()).toBeLessThanOrEqual(64);
+  });
+
   it('registers active authorities atomically and counts only live sockets', () => {
     const auth = authSource();
     const index = new WebSocketAuthIndex({
@@ -142,7 +182,7 @@ describe('WebSocketAuthIndex', () => {
     expect(first.close).toHaveBeenCalledWith(4003, 'authentication_required');
     expect(index.connectedCount()).toBe(0);
     expect(index.cleanupSnapshot(TAB_A)).toEqual({
-      generation: beforeRevocation + 2,
+      generation: beforeRevocation + 1,
       count: 0,
     });
 

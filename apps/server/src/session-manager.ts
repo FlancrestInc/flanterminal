@@ -526,6 +526,23 @@ export class SessionManager {
 
   private async terminateLocked(id: string): Promise<TabView> {
     const dependencies = this.requireLifecycleTab(id);
+    const current = this.requireCurrentRecord(id);
+    if (current.desiredState === 'stopped') {
+      try {
+        if (
+          !(await dependencies.runtime.exists(id)) &&
+          this.options.registry.get(id) === undefined
+        ) {
+          return this.viewFromRecord(current, {
+            state: 'stopped',
+            attached: false,
+            bridgePid: null,
+          });
+        }
+      } catch {
+        // An indeterminate stopped runtime is retried through normal cleanup.
+      }
+    }
     this.incrementGeneration(id);
     try {
       await dependencies.store.setDesiredState(id, 'stopped');

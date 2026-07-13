@@ -158,6 +158,115 @@ describe('SessionManager Phase 2 lifecycle', () => {
     expect(harness.tmux.kill).not.toHaveBeenCalled();
   });
 
+  it('lets explicit terminate win before two waiting cleanup requests', async () => {
+    const harness = createHarness();
+    const killGate = deferred<void>();
+    vi.mocked(harness.tmux.kill).mockImplementationOnce(async (id) => {
+      harness.tmux.active.delete(id);
+      await killGate.promise;
+    });
+    const terminating = harness.manager.terminate(TAB_A);
+    await vi.waitFor(() => expect(harness.tmux.kill).toHaveBeenCalledOnce());
+    const captured = cleanupSnapshot(TAB_A);
+    harness.cleanup.read.mockResolvedValue({
+      ...captured,
+      eligible: false,
+      reason: 'inactive',
+    });
+
+    const firstCleanup = harness.manager.terminateIfStale(TAB_A, captured);
+    const secondCleanup = harness.manager.terminateIfStale(TAB_A, captured);
+    expect(harness.cleanup.read).not.toHaveBeenCalled();
+    killGate.resolve();
+
+    await terminating;
+    await expect(Promise.all([firstCleanup, secondCleanup])).resolves.toEqual([
+      'skipped:inactive',
+      'skipped:inactive',
+    ]);
+    expect(harness.tmux.kill).toHaveBeenCalledTimes(1);
+    expect(harness.store.records.get(TAB_B)?.desiredState).toBe('active');
+  });
+
+  it('lets recreate win before waiting cleanup and preserves the other tab', async () => {
+    const harness = createHarness();
+    harness.store.applyState(TAB_A, 'stopped');
+    harness.tmux.active.delete(TAB_A);
+    const prepareGate = deferred<AttachSpec>();
+    vi.mocked(harness.tmux.prepare).mockReturnValueOnce(prepareGate.promise);
+    const recreating = harness.manager.recreate(TAB_A);
+    await vi.waitFor(() => expect(harness.tmux.prepare).toHaveBeenCalledOnce());
+    const captured = cleanupSnapshot(TAB_A);
+    harness.cleanup.read.mockResolvedValueOnce({
+      ...captured,
+      generation: Object.freeze({ ...captured.generation, activity: 1 }),
+    });
+
+    const cleanup = harness.manager.terminateIfStale(TAB_A, captured);
+    expect(harness.cleanup.read).not.toHaveBeenCalled();
+    prepareGate.resolve(attachSpec);
+
+    await recreating;
+    await expect(cleanup).resolves.toBe('skipped:changed');
+    expect(harness.tmux.kill).not.toHaveBeenCalled();
+    expect(harness.store.records.get(TAB_A)?.desiredState).toBe('active');
+    expect(harness.store.records.get(TAB_B)?.desiredState).toBe('active');
+  });
+
+  it('lets restart win before waiting cleanup with one runtime kill', async () => {
+    const harness = createHarness();
+    const prepareGate = deferred<AttachSpec>();
+    vi.mocked(harness.tmux.prepare).mockReturnValueOnce(prepareGate.promise);
+    const restarting = harness.manager.restart(TAB_A);
+    await vi.waitFor(() => expect(harness.tmux.prepare).toHaveBeenCalledOnce());
+    const captured = cleanupSnapshot(TAB_A);
+    harness.cleanup.read.mockResolvedValueOnce({
+      ...captured,
+      generation: Object.freeze({ ...captured.generation, activity: 1 }),
+    });
+
+    const cleanup = harness.manager.terminateIfStale(TAB_A, captured);
+    expect(harness.cleanup.read).not.toHaveBeenCalled();
+    prepareGate.resolve(attachSpec);
+
+    await restarting;
+    await expect(cleanup).resolves.toBe('skipped:changed');
+    expect(harness.tmux.kill).toHaveBeenCalledTimes(1);
+    expect(harness.store.records.get(TAB_B)?.desiredState).toBe('active');
+  });
+
+  it('lets cleanup linearize before queued cleanup and explicit terminate', async () => {
+    const harness = createHarness();
+    const oldToken = harness.manager.authorize(TAB_A)!;
+    const captured = cleanupSnapshot(TAB_A);
+    const freshGate = deferred<EligibilitySnapshot>();
+    harness.cleanup.read
+      .mockReturnValueOnce(freshGate.promise)
+      .mockResolvedValueOnce({
+        ...captured,
+        eligible: false,
+        reason: 'inactive',
+      });
+    const firstCleanup = harness.manager.terminateIfStale(TAB_A, captured);
+    await vi.waitFor(() => expect(harness.cleanup.read).toHaveBeenCalledOnce());
+
+    const secondCleanup = harness.manager.terminateIfStale(TAB_A, captured);
+    const explicitTerminate = harness.manager.terminate(TAB_A);
+    freshGate.resolve(captured);
+
+    await expect(firstCleanup).resolves.toBe('terminated');
+    await expect(secondCleanup).resolves.toBe('skipped:inactive');
+    await expect(explicitTerminate).resolves.toMatchObject({
+      desiredState: 'stopped',
+    });
+    expect(harness.tmux.kill).toHaveBeenCalledTimes(1);
+    expect(harness.store.has(TAB_A)).toBe(true);
+    expect(harness.store.records.get(TAB_B)?.desiredState).toBe('active');
+    await expect(
+      harness.manager.connect(oldToken, fakeSocket(), { cols: 80, rows: 24 }),
+    ).rejects.toBeInstanceOf(StaleAttachError);
+  });
+
   it('copies and freezes one runtime snapshot before lifecycle awaits', async () => {
     const harness = createHarness();
     harness.store.applyState(TAB_A, 'stopped');

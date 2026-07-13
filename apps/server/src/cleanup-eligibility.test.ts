@@ -73,6 +73,14 @@ describe('CleanupEligibilityReader', () => {
     { createdAt: 'not-a-date', lastActivityAt: null },
     { lastActivityAt: 'not-a-date' },
     { lastActivityAt: '2026-07-10' },
+    { lastActivityAt: '2026-02-30T00:00:00.000Z' },
+    { lastActivityAt: '2025-02-29T00:00:00.000Z' },
+    { lastActivityAt: '2026-13-01T00:00:00.000Z' },
+    { lastActivityAt: '2026-01-01T24:00:00.000Z' },
+    { lastActivityAt: '2026-01-01T00:60:00.000Z' },
+    { lastActivityAt: '2026-01-01T00:00:60.000Z' },
+    { lastActivityAt: '2026-01-01T00:00:00.Z' },
+    { lastActivityAt: '2026-01-01T00:00:00.000Z\nignored' },
   ])('skips invalid timestamps', async (changes) => {
     const harness = eligibilityHarness(changes);
     await expect(
@@ -82,6 +90,22 @@ describe('CleanupEligibilityReader', () => {
         cutoffMs: CUTOFF,
       }),
     ).resolves.toMatchObject({ eligible: false, reason: 'invalid_timestamp' });
+  });
+
+  it.each([
+    '2024-02-29T00:00:00.000Z',
+    '2024-02-29T00:00:00.1Z',
+    '2024-02-29T00:00:00.123456Z',
+  ])('accepts valid UTC calendar timestamp %s', async (lastActivityAt) => {
+    const harness = eligibilityHarness({ lastActivityAt });
+
+    await expect(
+      harness.reader.read({
+        id: TAB,
+        thresholdMs: 3_600_000,
+        cutoffMs: CUTOFF,
+      }),
+    ).resolves.toMatchObject({ eligible: true, reason: null });
   });
 
   it('fails closed on dependency errors and asynchronous generation drift', async () => {
@@ -98,6 +122,49 @@ describe('CleanupEligibilityReader', () => {
     ).resolves.toMatchObject({ eligible: false, reason: 'dependency_error' });
     await expect(
       drifting.reader.read({
+        id: TAB,
+        thresholdMs: 3_600_000,
+        cutoffMs: CUTOFF,
+      }),
+    ).resolves.toMatchObject({ eligible: false, reason: 'changed' });
+  });
+
+  it.each([
+    [
+      'socket registration',
+      (harness: ReturnType<typeof eligibilityHarness>) => {
+        harness.socketState.generation += 1;
+        harness.socketState.count = 1;
+      },
+    ],
+    [
+      'activity mark',
+      (harness: ReturnType<typeof eligibilityHarness>) => {
+        harness.activityState.generation += 1;
+        harness.activityState.pending = true;
+      },
+    ],
+    [
+      'desired-state mutation',
+      (harness: ReturnType<typeof eligibilityHarness>) => {
+        harness.tab.desiredState = 'stopped';
+      },
+    ],
+    [
+      'bridge registration',
+      (harness: ReturnType<typeof eligibilityHarness>) => {
+        harness.bridgeState.present = true;
+      },
+    ],
+  ])('detects %s during the asynchronous tmux probe', async (_name, mutate) => {
+    const harness = eligibilityHarness();
+    harness.exists.mockImplementationOnce(async () => {
+      mutate(harness);
+      return true;
+    });
+
+    await expect(
+      harness.reader.read({
         id: TAB,
         thresholdMs: 3_600_000,
         cutoffMs: CUTOFF,
@@ -154,6 +221,7 @@ function eligibilityHarness(
     pending: changes.activityPending ?? false,
   };
   const socketState = { generation: 0, count: changes.socketCount ?? 0 };
+  const bridgeState = { present: changes.bridged ?? false };
   const tab = {
     id: TAB,
     displayName: 'Terminal',
@@ -174,13 +242,15 @@ function eligibilityHarness(
     },
     activity: { cleanupSnapshot: () => Object.freeze({ ...activityState }) },
     sockets: { cleanupSnapshot: () => Object.freeze({ ...socketState }) },
-    bridges: { get: () => (changes.bridged ? {} : undefined) },
+    bridges: { get: () => (bridgeState.present ? {} : undefined) },
     runtime: { exists },
   };
   return {
     reader: new CleanupEligibilityReader(options),
     activityState,
     socketState,
+    bridgeState,
+    tab,
     exists,
   };
 }
