@@ -17,6 +17,7 @@ export type LocalLoginAttempt = Readonly<{
 export type AuthBootstrapResult = Readonly<{
   bootstrap: AuthBootstrap;
   cookieValue?: string;
+  failure?: 'authentication_failed' | 'rate_limited';
 }>;
 export type AuthenticatedSession = Readonly<{
   id: string;

@@ -63,12 +63,28 @@ describe('AuthService', () => {
       absoluteDurationMs: 100,
       maxSessions: 1,
     });
-    await service.login({
+    const denied = await service.login({
       username: 'x',
       password: 'password-password',
       address: 'x',
     });
+    expect(denied.failure).toBe('rate_limited');
     expect(verify).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes credential rejection internally without changing the bootstrap', async () => {
+    const h = setup('local');
+    h.credentials.verify.mockResolvedValue(false);
+
+    const denied = await h.service.login(login());
+
+    expect(denied).toEqual({
+      bootstrap: { authenticated: false, mode: 'local' },
+    });
+    expect(denied.failure).toBe('authentication_failed');
+    expect(Object.keys(denied)).toEqual(['bootstrap']);
+    expect({ ...denied }).not.toHaveProperty('failure');
+    expect(JSON.stringify(denied)).not.toContain('failure');
   });
 
   it('denies a login burst immediately while one admitted verification is unresolved', async () => {
@@ -209,6 +225,7 @@ describe('AuthService', () => {
       address: '127.0.0.2',
     });
     expect(denied.bootstrap.authenticated).toBe(false);
+    expect(denied.failure).toBe('rate_limited');
     expect(consume).toHaveBeenCalledOnce();
     expect(verify).toHaveBeenCalledOnce();
 
@@ -702,6 +719,115 @@ describe('AuthService', () => {
     h.service.sweepExpired();
     h.service.sweepExpired();
     expect(revoked).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['local', undefined],
+    ['none', undefined],
+    ['cloudflare-access', 80],
+    ['trusted-header', undefined],
+  ] as const)(
+    'resumes a %s session by rotating only its CSRF authority',
+    async (mode, expiresAt) => {
+      const h = setup(mode);
+      const established =
+        mode === 'local'
+          ? await h.service.login(login())
+          : await h.service.bootstrap(
+              mode === 'none'
+                ? { type: 'none' }
+                : {
+                    type: 'upstream',
+                    identity: {
+                      mode,
+                      identityLabel: 'person',
+                      ...(expiresAt === undefined ? {} : { expiresAt }),
+                    },
+                  },
+            );
+      const prior = h.service.authenticateCookie(established.cookieValue)!;
+      const priorToken = established.bootstrap.authenticated
+        ? established.bootstrap.csrfToken
+        : undefined;
+      h.time.now = 10;
+
+      const resumed = h.service.resume(prior.id)!;
+
+      expect(resumed).not.toHaveProperty('cookieValue');
+      expect(resumed.bootstrap).toMatchObject({
+        authenticated: true,
+        mode,
+        identityLabel:
+          mode === 'none' ? 'anonymous' : mode === 'local' ? 'admin' : 'person',
+      });
+      expect(h.service.authenticateCookie(established.cookieValue)).toEqual(
+        prior,
+      );
+      expect(h.service.verifyCsrf(prior.id, priorToken)).toBe(false);
+      expect(
+        h.service.verifyCsrf(
+          prior.id,
+          resumed.bootstrap.authenticated
+            ? resumed.bootstrap.csrfToken
+            : undefined,
+        ),
+      ).toBe(true);
+      expect(Object.isFrozen(resumed)).toBe(true);
+      expect(Object.isFrozen(resumed.bootstrap)).toBe(true);
+    },
+  );
+
+  it('expires and revokes a stale session before resume', async () => {
+    const h = setup('none', { idleDurationMs: 5 });
+    const revoked = vi.fn();
+    h.service.onRevoked(revoked);
+    const established = await h.service.bootstrap({ type: 'none' });
+    const session = h.service.authenticateCookie(established.cookieValue)!;
+    h.time.now = 5;
+
+    expect(h.service.resume(session.id)).toBeUndefined();
+    expect(h.service.resume(session.id)).toBeUndefined();
+    expect(revoked).toHaveBeenCalledOnce();
+    expect(revoked).toHaveBeenCalledWith(session.id, 'idle');
+  });
+
+  it('keeps the prior CSRF authority when resume preparation fails', async () => {
+    let csrfCalls = 0;
+    class FailingCsrfService extends CsrfService {
+      override create() {
+        csrfCalls += 1;
+        if (csrfCalls === 2) throw new Error('csrf failure');
+        return super.create();
+      }
+    }
+    let byte = 1;
+    const csrf = new FailingCsrfService({
+      randomBytes: (size) => Buffer.alloc(size, byte++),
+    });
+    const service = new AuthService({
+      mode: 'none',
+      clock: () => 0,
+      randomBytes: (size) => Buffer.alloc(size, byte++),
+      credentialStore: { verify: vi.fn(), replacePassword: vi.fn() },
+      csrfService: csrf,
+      rateLimiter: { consume: vi.fn(() => true), resetAddress: vi.fn() },
+      idleDurationMs: 100,
+      absoluteDurationMs: 1_000,
+      maxSessions: 1,
+    });
+    const established = await service.bootstrap({ type: 'none' });
+    const session = service.authenticateCookie(established.cookieValue)!;
+    const token = established.bootstrap.authenticated
+      ? established.bootstrap.csrfToken
+      : undefined;
+
+    expect(() => service.resume(session.id)).toThrow(
+      'Authentication operation failed',
+    );
+    expect(service.authenticateCookie(established.cookieValue)).toEqual(
+      session,
+    );
+    expect(service.verifyCsrf(session.id, token)).toBe(true);
   });
 
   it('supports bounded independent revocation registrations and isolates async rejection', async () => {

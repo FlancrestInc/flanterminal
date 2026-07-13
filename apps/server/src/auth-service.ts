@@ -161,9 +161,10 @@ export class AuthService {
   login(input: LocalLoginAttempt): Promise<AuthBootstrapResult> {
     if (this.#mode !== 'local') return Promise.reject(new AuthServiceError());
     if (this.#pendingLogins >= this.#max)
-      return Promise.resolve(localLoginFailure());
+      return Promise.resolve(localLoginFailure('rate_limited'));
     const releaseEstablishment = this.#reserveEstablishment();
-    if (!releaseEstablishment) return Promise.resolve(localLoginFailure());
+    if (!releaseEstablishment)
+      return Promise.resolve(localLoginFailure('rate_limited'));
     let label: string;
     try {
       label = normalizeLabel(input.username);
@@ -181,7 +182,7 @@ export class AuthService {
     }
     if (!allowed) {
       releaseEstablishment();
-      return Promise.resolve(localLoginFailure());
+      return Promise.resolve(localLoginFailure('rate_limited'));
     }
     this.#pendingLogins += 1;
     const verification = verificationOutcomeBridge();
@@ -229,6 +230,32 @@ export class AuthService {
       return undefined;
     }
     return view(s);
+  }
+  resume(id: string): AuthBootstrapResult | undefined {
+    const s = this.#byId.get(id);
+    if (!s) return undefined;
+    const reason = this.#expiredReason(s);
+    if (reason) {
+      this.#revoke(s, reason);
+      return undefined;
+    }
+    try {
+      const issued = this.#csrf.create();
+      const bootstrap: AuthBootstrap = frozen({
+        authenticated: true,
+        mode: s.mode,
+        identityLabel: s.identityLabel,
+        csrfToken: issued.token,
+        ...(s.upstreamExpiresAt === undefined
+          ? {}
+          : { upstreamExpiresAt: new Date(s.upstreamExpiresAt).toISOString() }),
+      });
+      const result = frozen({ bootstrap });
+      s.csrf = issued.record;
+      return result;
+    } catch {
+      throw new AuthServiceError();
+    }
   }
   touch(id: string, activity: 'http' | 'terminal_input'): void {
     if (activity !== 'http' && activity !== 'terminal_input') return;
@@ -449,7 +476,7 @@ export class AuthService {
   ): Promise<AuthBootstrapResult> {
     const outcome = await verification;
     if (!outcome.ok) throw new AuthServiceError();
-    if (!outcome.valid) return localLoginFailure();
+    if (!outcome.valid) return localLoginFailure('authentication_failed');
     return this.#safeEstablish('local', label, undefined, () =>
       this.#limiter.resetAddress(address),
     );
@@ -589,10 +616,20 @@ function expiredReasonAt(s: Stored, now: number): RevocationReason | undefined {
   candidates.sort((a, b) => a[0] - b[0]);
   return now >= candidates[0]![0] ? candidates[0]![1] : undefined;
 }
-function localLoginFailure(): AuthBootstrapResult {
-  return frozen({
+function localLoginFailure(
+  failure: 'authentication_failed' | 'rate_limited',
+): AuthBootstrapResult {
+  const result: {
+    bootstrap: AuthBootstrap;
+    failure?: 'authentication_failed' | 'rate_limited';
+  } = {
     bootstrap: frozen({ authenticated: false, mode: 'local' }),
+  };
+  Object.defineProperty(result, 'failure', {
+    value: failure,
+    enumerable: false,
   });
+  return frozen(result);
 }
 function boundedAddress(value: string): string {
   return typeof value === 'string' && value.length <= 256 ? value : 'unknown';
