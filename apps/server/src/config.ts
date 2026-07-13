@@ -239,8 +239,14 @@ const mergedSchema = z
         message: 'missing Cloudflare settings',
       });
     }
-    if (config.AUTH_MODE === 'trusted-header' && config.TRUST_PROXY === false) {
-      context.addIssue({ code: 'custom', message: 'trusted proxy required' });
+    if (
+      config.AUTH_MODE === 'trusted-header' &&
+      !Array.isArray(config.TRUST_PROXY)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'explicit trusted proxy ranges required',
+      });
     }
     if (!config.ALLOWED_SHELLS.includes(config.DEFAULT_SHELL)) {
       context.addIssue({

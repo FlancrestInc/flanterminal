@@ -205,21 +205,31 @@ describe('loadConfig', () => {
     ).toBe('X_Auth-User');
   });
 
-  it('requires trusted proxy only for trusted-header mode', () => {
+  it('requires explicit proxy ranges for trusted-header mode', () => {
     expect(() => loadConfig({ AUTH_MODE: 'trusted-header' })).toThrow(
       'Invalid server configuration',
     );
-    expect(
+    expect(() =>
       loadConfig({
         AUTH_MODE: 'trusted-header',
         TRUST_PROXY: '2',
         TRUSTED_AUTH_HEADER: 'X-Forwarded-User',
       }),
+    ).toThrow('Invalid server configuration');
+    expect(
+      loadConfig({
+        AUTH_MODE: 'trusted-header',
+        TRUST_PROXY: '10.0.0.0/8',
+        TRUSTED_AUTH_HEADER: 'X-Forwarded-User',
+      }),
     ).toMatchObject({
       authMode: 'trusted-header',
-      trustProxy: 2,
+      trustProxy: ['10.0.0.0/8'],
       trustedAuthHeader: 'X-Forwarded-User',
     });
+    expect(
+      loadConfig({ AUTH_MODE: 'local', TRUST_PROXY: '2' }).trustProxy,
+    ).toBe(2);
     expect(
       loadConfig({ AUTH_MODE: 'none', TRUST_PROXY: 'false' }).trustProxy,
     ).toBe(false);
