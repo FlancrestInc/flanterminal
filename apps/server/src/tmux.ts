@@ -73,23 +73,6 @@ export class TmuxSessionPreparer implements SessionPreparer {
     if (settings === undefined) throw new Error('Invalid runtime settings');
     if (!(await this.exists(sessionId))) {
       const creation = await this.run([
-        'start-server',
-        ';',
-        'set-option',
-        '-g',
-        'exit-empty',
-        'off',
-        ';',
-        'set-option',
-        '-g',
-        'history-limit',
-        String(settings.historyLimit),
-        ';',
-        'set-option',
-        '-g',
-        'default-shell',
-        settings.shell,
-        ';',
         'new-session',
         '-d',
         '-s',
@@ -97,9 +80,16 @@ export class TmuxSessionPreparer implements SessionPreparer {
         settings.shell,
         ';',
         'set-option',
-        '-g',
-        'exit-empty',
-        'on',
+        '-t',
+        name,
+        'history-limit',
+        String(settings.historyLimit),
+        ';',
+        'set-option',
+        '-t',
+        name,
+        'default-shell',
+        settings.shell,
       ]);
       if (creation.exitCode !== 0) throw new Error('Tmux command failed');
     }

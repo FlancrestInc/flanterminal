@@ -77,16 +77,21 @@ describe('TmuxSessionPreparer', () => {
     );
   });
 
-  it('does not create an existing session', async () => {
+  it('does not create or mutate options for an existing session', async () => {
     const runner = runnerWith({ exitCode: 0, stdout: '', stderr: '' });
     const preparer = new TmuxSessionPreparer(config, runner);
 
     await preparer.prepare(SESSION_ID, settings);
 
     expect(runner.run).toHaveBeenCalledOnce();
+    expect(runner.run).toHaveBeenCalledWith('/usr/bin/tmux', [
+      'has-session',
+      '-t',
+      SESSION_NAME,
+    ]);
   });
 
-  it('creates a missing session with one safe argument array', async () => {
+  it('creates a missing session with only session-scoped options', async () => {
     const runner = runnerWith(
       { exitCode: 1, stdout: '', stderr: '' },
       { exitCode: 0, stdout: '', stderr: '' },
@@ -96,23 +101,6 @@ describe('TmuxSessionPreparer', () => {
     await preparer.prepare(SESSION_ID, settings);
 
     expect(runner.run).toHaveBeenNthCalledWith(2, '/usr/bin/tmux', [
-      'start-server',
-      ';',
-      'set-option',
-      '-g',
-      'exit-empty',
-      'off',
-      ';',
-      'set-option',
-      '-g',
-      'history-limit',
-      '20000',
-      ';',
-      'set-option',
-      '-g',
-      'default-shell',
-      '/bin/bash',
-      ';',
       'new-session',
       '-d',
       '-s',
@@ -120,10 +108,20 @@ describe('TmuxSessionPreparer', () => {
       '/bin/bash',
       ';',
       'set-option',
-      '-g',
-      'exit-empty',
-      'on',
+      '-t',
+      SESSION_NAME,
+      'history-limit',
+      '20000',
+      ';',
+      'set-option',
+      '-t',
+      SESSION_NAME,
+      'default-shell',
+      '/bin/bash',
     ]);
+    const creationArgs = vi.mocked(runner.run).mock.calls[1]?.[1];
+    expect(creationArgs).not.toContain('-g');
+    expect(creationArgs).not.toContain('exit-empty');
   });
 
   it('kills only the requested session and treats absence as success', async () => {
