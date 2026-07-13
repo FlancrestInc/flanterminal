@@ -163,6 +163,14 @@ export const apiErrorCodeSchema = z.enum([
   'invalid_session_state',
   'json_required',
   'operation_failed',
+  'authentication_required',
+  'authentication_failed',
+  'csrf_invalid',
+  'rate_limited',
+  'password_invalid',
+  'settings_invalid',
+  'durability_uncertain',
+  'cleanup_disabled',
 ]);
 
 export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;

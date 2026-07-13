@@ -4,8 +4,6 @@ import { parseClientConfig } from './client-config.js';
 
 const validConfig = {
   basePath: '/terminal/',
-  fontSize: 14,
-  scrollback: 10_000,
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 15,
 };
@@ -16,6 +14,7 @@ describe('parseClientConfig', () => {
       ...validConfig,
       basePath: '/terminal',
     });
+    expect(Object.isFrozen(parseClientConfig(validConfig))).toBe(true);
     expect(parseClientConfig({ ...validConfig, basePath: '/' }).basePath).toBe(
       '/',
     );
@@ -51,10 +50,6 @@ describe('parseClientConfig', () => {
   });
 
   it.each([
-    ['fontSize', 7],
-    ['fontSize', 33],
-    ['scrollback', -1],
-    ['scrollback', 100_001],
     ['resizeDebounceMs', 24],
     ['resizeDebounceMs', 1_001],
     ['reconnectMaxSeconds', 0],
@@ -65,14 +60,22 @@ describe('parseClientConfig', () => {
     ).toThrow();
   });
 
-  it('requires numeric settings to be integers', () => {
+  it('requires transport settings to be integers', () => {
     expect(() =>
-      parseClientConfig({ ...validConfig, fontSize: 14.5 }),
+      parseClientConfig({ ...validConfig, resizeDebounceMs: 100.5 }),
     ).toThrow();
   });
 
-  it.each(['defaultShell', 'homeDir', 'logLevel', 'unknown'])(
-    'rejects server-only or unknown key %s',
+  it.each([
+    'fontSize',
+    'scrollback',
+    'theme',
+    'defaultShell',
+    'homeDir',
+    'logLevel',
+    'unknown',
+  ])(
+    'rejects authenticated preference, server-only, or unknown key %s',
     (key) => {
       expect(() =>
         parseClientConfig({ ...validConfig, [key]: 'private' }),
