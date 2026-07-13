@@ -104,4 +104,24 @@ describe('authorizeUpgrade', () => {
       ),
     ).toEqual({ allowed: true, sessionId: SESSION_ID });
   });
+
+  it.each([
+    [
+      'duplicate Origin fields',
+      ['Origin', 'http://example.test', 'Origin', 'http://example.test'],
+    ],
+    ['oversized Origin', ['Origin', `http://${'a'.repeat(2_048)}.test`]],
+    ['odd raw header list', ['Origin']],
+  ])('rejects %s before inspecting the websocket path', (_case, rawHeaders) => {
+    expect(
+      authorizeUpgrade(
+        {
+          origin: 'http://example.test',
+          rawHeaders,
+          requestUrl: '/private-invalid-path',
+        },
+        { publicOrigin: 'http://example.test', basePath: '/terminal' },
+      ),
+    ).toEqual({ allowed: false, status: 403 });
+  });
 });

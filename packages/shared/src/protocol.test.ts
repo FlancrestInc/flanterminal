@@ -5,6 +5,8 @@ import { Buffer } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
 
 import {
+  AUTHENTICATION_REQUIRED,
+  AUTHENTICATION_REQUIRED_REASON,
   MAX_INPUT_BYTES,
   MAX_WS_PAYLOAD_BYTES,
   isSessionId,
@@ -18,6 +20,14 @@ const OTHER_SESSION_ID = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 const FIXED_SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 
 describe('terminal protocol', () => {
+  it('exports the stable bounded authentication close behavior', () => {
+    expect(AUTHENTICATION_REQUIRED).toBe(4003);
+    expect(AUTHENTICATION_REQUIRED_REASON).toBe('authentication_required');
+    expect(
+      Buffer.byteLength(AUTHENTICATION_REQUIRED_REASON),
+    ).toBeLessThanOrEqual(123);
+  });
+
   it('parses valid direction-specific messages', () => {
     const clientMessages: ClientMessage[] = [
       { v: 1, type: 'input', sessionId: FIXED_SESSION_ID, data: 'ls\n' },

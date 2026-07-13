@@ -1,13 +1,26 @@
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 
-import { PROTOCOL_VERSION, type TabRecord } from '@flanterminal/shared';
+import {
+  AUTHENTICATION_REQUIRED,
+  AUTHENTICATION_REQUIRED_REASON,
+  PROTOCOL_VERSION,
+  type TabRecord,
+} from '@flanterminal/shared';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BridgeRegistry } from './bridge-registry.js';
+import { createWebSocketUpgradeAuthenticator } from './auth-middleware.js';
+import type { AuthenticatedSession } from './auth-types.js';
 import type { PtyProcess } from './pty.js';
 import { SessionManager, TerminalBridgeFactory } from './session-manager.js';
+import { WebSocketAuthIndex } from './websocket-auth-index.js';
+import type { ApplicationSessionAuthority } from './websocket-auth-index.js';
+import type {
+  WebSocketUpgradeAuthenticator,
+  WebSocketUpgradeRequest,
+} from './auth-middleware.js';
 import {
   createTerminalWebSocketServer,
   type HeartbeatScheduler,
@@ -28,6 +41,176 @@ afterEach(async () => {
 });
 
 describe('terminal websocket server', () => {
+  it.each([
+    ['missing cookie', 'missing', 0],
+    ['expired cookie', 'expired', 1],
+    ['wrong-mode cookie', 'wrong-mode', 1],
+    ['invalid Cloudflare assertion', 'invalid-provider', 1],
+    ['mismatched refreshed identity', 'identity-mismatch', 2],
+  ] as const)(
+    'rejects %s before tab authorization or WebSocket acceptance',
+    async (_case, outcome, expectedCookieChecks) => {
+      const valid = authenticatedSession();
+      const authenticateAuthority = vi.fn<
+        () => ReturnType<typeof authenticatedSession> | undefined
+      >(() => valid);
+      if (outcome === 'expired')
+        authenticateAuthority.mockReturnValue(undefined);
+      if (outcome === 'wrong-mode')
+        authenticateAuthority.mockReturnValue(
+          authenticatedSession({ mode: 'local' }),
+        );
+      if (outcome === 'identity-mismatch')
+        authenticateAuthority
+          .mockReturnValueOnce(valid)
+          .mockReturnValueOnce(
+            authenticatedSession({ identityLabel: 'mallory' }),
+          );
+      const authService = upgradeAuthService({ authenticateAuthority });
+      const provider = {
+        authenticate: vi.fn(async () => {
+          if (outcome === 'invalid-provider') throw new Error('invalid jwt');
+          return {
+            mode: 'cloudflare-access' as const,
+            identityLabel: 'alice',
+            expiresAt: 5_000,
+          };
+        }),
+      };
+      const authenticator = createWebSocketUpgradeAuthenticator({
+        mode: 'cloudflare-access',
+        publicOrigin: 'http://app.test',
+        authService,
+        cloudflareAccessProvider: provider,
+      });
+      const index = new WebSocketAuthIndex({
+        auth: authenticator,
+        maxApplicationSessions: 4,
+        maxSockets: 8,
+      });
+      const authorize = vi.fn();
+      const connectSession = vi.fn();
+      const server = createServer();
+      const gateway = createTerminalWebSocketServer({
+        server,
+        publicOrigin: 'http://app.test',
+        basePath: '/',
+        sessionManager: { authorize, connect: connectSession },
+        registry: new BridgeRegistry(),
+        logger: logger(),
+        heartbeatIntervalMs: 30_000,
+        upgradeAuthenticator: authenticator,
+        authIndex: index,
+      });
+      const port = await listen(server);
+      track(server, gateway);
+
+      expect(
+        await rejectedStatus(
+          port,
+          `/ws/sessions/${SESSION_ID}`,
+          'http://app.test',
+          outcome === 'missing'
+            ? {}
+            : {
+                Cookie: `flanterminal_session=${'a'.repeat(43)}`,
+                'Cf-Access-Jwt-Assertion': 'private.jwt.assertion',
+              },
+        ),
+      ).toBe(401);
+      expect(authorize).not.toHaveBeenCalled();
+      expect(connectSession).not.toHaveBeenCalled();
+      expect(authenticateAuthority).toHaveBeenCalledTimes(expectedCookieChecks);
+      expect(index.connectedCount()).toBe(0);
+    },
+  );
+
+  it('reuses bounded cookie parsing and revalidates identity after async upstream auth', async () => {
+    const first = authenticatedSession({ identityLabel: 'alice' });
+    const refreshed = authenticatedSession({ identityLabel: 'mallory' });
+    const authenticateAuthority = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(refreshed);
+    const provider = {
+      authenticate: vi.fn(async () => ({
+        mode: 'cloudflare-access' as const,
+        identityLabel: 'alice',
+        expiresAt: 5_000,
+      })),
+    };
+    const authenticator = createWebSocketUpgradeAuthenticator({
+      mode: 'cloudflare-access',
+      publicOrigin: 'http://app.test',
+      authService: upgradeAuthService({ authenticateAuthority }),
+      cloudflareAccessProvider: provider,
+    });
+    const request = requestView([
+      'Origin',
+      'http://app.test',
+      'Cookie',
+      `flanterminal_session=${'a'.repeat(43)}`,
+      'Cf-Access-Jwt-Assertion',
+      'private.jwt.value',
+    ]);
+
+    await expect(authenticator.authenticate(request)).resolves.toBeUndefined();
+    expect(authenticateAuthority).toHaveBeenCalledTimes(2);
+    expect(provider.authenticate).toHaveBeenCalledOnce();
+
+    const duplicate = requestView([
+      'Cookie',
+      `flanterminal_session=${'a'.repeat(43)}; flanterminal_session=${'b'.repeat(43)}`,
+    ]);
+    await expect(
+      authenticator.authenticate(duplicate),
+    ).resolves.toBeUndefined();
+    expect(authenticateAuthority).toHaveBeenCalledTimes(2);
+
+    const oversized = requestView([
+      'Cookie',
+      `x=${'x'.repeat(9 * 1024)}; flanterminal_session=${'a'.repeat(43)}`,
+    ]);
+    await expect(
+      authenticator.authenticate(oversized),
+    ).resolves.toBeUndefined();
+    expect(authenticateAuthority).toHaveBeenCalledTimes(2);
+  });
+
+  it('contains invalid upstream provider results without logging assertions', async () => {
+    const assertion = 'private.jwt.assertion';
+    const log = logger();
+    const authenticator = createWebSocketUpgradeAuthenticator({
+      mode: 'cloudflare-access',
+      publicOrigin: 'http://app.test',
+      authService: upgradeAuthService(),
+      cloudflareAccessProvider: {
+        authenticate: vi.fn(async () => {
+          throw new Error(assertion);
+        }),
+      },
+      logger: log,
+    });
+
+    await expect(
+      authenticator.authenticate(
+        requestView([
+          'Cookie',
+          `flanterminal_session=${'a'.repeat(43)}`,
+          'Cf-Access-Jwt-Assertion',
+          assertion,
+        ]),
+      ),
+    ).resolves.toBeUndefined();
+    expect(
+      JSON.stringify([
+        log.info.mock.calls,
+        log.warn.mock.calls,
+        log.error.mock.calls,
+      ]),
+    ).not.toContain(assertion);
+  });
+
   it('bridges text input, resize, and PTY output over a real ws transport', async () => {
     const harness = await createHarness();
     const client = await connect(harness.url);
@@ -128,6 +311,7 @@ describe('terminal websocket server', () => {
   it('rejects origin and route upgrades before calling the session manager', async () => {
     const connectSession = vi.fn().mockRejectedValue(new Error('must not run'));
     const server = createServer();
+    const auth = authHarness();
     const gateway = createTerminalWebSocketServer({
       server,
       publicOrigin: 'http://app.test',
@@ -136,6 +320,7 @@ describe('terminal websocket server', () => {
       registry: new BridgeRegistry(),
       logger: logger(),
       heartbeatIntervalMs: 30_000,
+      ...auth.options,
     });
     const port = await listen(server);
     track(server, gateway);
@@ -155,6 +340,10 @@ describe('terminal websocket server', () => {
       ),
     ).toBe(404);
     expect(connectSession).not.toHaveBeenCalled();
+    expect(
+      auth.options.upgradeAuthenticator.authenticate,
+    ).not.toHaveBeenCalled();
+    expect(auth.index.connectedCount()).toBe(0);
   });
 
   it('rejects unknown and stopped sessions before upgrading or connecting', async () => {
@@ -169,6 +358,7 @@ describe('terminal websocket server', () => {
       registry: new BridgeRegistry(),
       logger: logger(),
       heartbeatIntervalMs: 30_000,
+      ...authHarness().options,
     });
     const port = await listen(server);
     track(server, gateway);
@@ -198,6 +388,7 @@ describe('terminal websocket server', () => {
       registry: new BridgeRegistry(),
       logger: logger(),
       heartbeatIntervalMs: 30_000,
+      ...authHarness().options,
     });
     const port = await listen(server);
     track(server, gateway);
@@ -232,6 +423,7 @@ describe('terminal websocket server', () => {
       registry,
       logger: logger(),
       heartbeatIntervalMs: 30_000,
+      ...authHarness().options,
     });
     const port = await listen(server);
     track(server, gateway);
@@ -325,6 +517,259 @@ describe('terminal websocket server', () => {
     expect(code).toBe(1008);
     expect(harness.pty.write).not.toHaveBeenCalled();
   });
+
+  it('rejects revocation after authentication and before handleUpgrade', async () => {
+    const auth = authHarness();
+    const authorize = vi.fn(() => {
+      auth.revoke();
+      return Object.freeze({ sessionId: SESSION_ID, generation: 1 }) as never;
+    });
+    const connectSession = vi.fn();
+    const server = createServer();
+    const gateway = createTerminalWebSocketServer({
+      server,
+      publicOrigin: 'http://app.test',
+      basePath: '/',
+      sessionManager: { authorize, connect: connectSession },
+      registry: new BridgeRegistry(),
+      logger: logger(),
+      heartbeatIntervalMs: 30_000,
+      ...auth.options,
+    });
+    const port = await listen(server);
+    track(server, gateway);
+
+    expect(
+      await rejectedStatus(
+        port,
+        `/ws/sessions/${SESSION_ID}`,
+        'http://app.test',
+      ),
+    ).toBe(401);
+    expect(authorize).toHaveBeenCalledOnce();
+    expect(connectSession).not.toHaveBeenCalled();
+    expect(auth.index.connectedCount()).toBe(0);
+  });
+
+  it('closes 4003 when revoked after socket creation and before index insertion', async () => {
+    const auth = authHarness();
+    const register = vi
+      .spyOn(auth.index, 'registerIfActive')
+      .mockImplementation(() => {
+        auth.revoke();
+        return false;
+      });
+    const connectSession = vi.fn();
+    const server = createServer();
+    const gateway = createTerminalWebSocketServer({
+      server,
+      publicOrigin: 'http://app.test',
+      basePath: '/',
+      sessionManager: {
+        authorize: vi.fn(
+          () => ({ sessionId: SESSION_ID, generation: 1 }) as never,
+        ),
+        connect: connectSession,
+      },
+      registry: new BridgeRegistry(),
+      logger: logger(),
+      heartbeatIntervalMs: 30_000,
+      ...auth.options,
+    });
+    const port = await listen(server);
+    track(server, gateway);
+    const client = await connect(
+      `ws://127.0.0.1:${port}/ws/sessions/${SESSION_ID}`,
+    );
+
+    const [code, reason] = (await once(client, 'close')) as [number, Buffer];
+    expect(code).toBe(AUTHENTICATION_REQUIRED);
+    expect(reason.toString()).toBe(AUTHENTICATION_REQUIRED_REASON);
+    expect(register).toHaveBeenCalledOnce();
+    expect(connectSession).not.toHaveBeenCalled();
+    expect(auth.index.connectedCount()).toBe(0);
+  });
+
+  it('closes a late bridge owner and removes it when revoked during pending connect', async () => {
+    const pending = deferred<void>();
+    const auth = authHarness();
+    const registry = new BridgeRegistry();
+    const owner = { pid: 11, close: vi.fn(async () => undefined) };
+    const remove = vi.spyOn(registry, 'remove');
+    const connectSession = vi.fn(async () => {
+      await pending.promise;
+      await registry.replace(SESSION_ID, owner);
+      return owner;
+    });
+    const server = createServer();
+    const gateway = createTerminalWebSocketServer({
+      server,
+      publicOrigin: 'http://app.test',
+      basePath: '/',
+      sessionManager: {
+        authorize: vi.fn(
+          () => ({ sessionId: SESSION_ID, generation: 1 }) as never,
+        ),
+        connect: connectSession,
+      },
+      registry,
+      logger: logger(),
+      heartbeatIntervalMs: 30_000,
+      ...auth.options,
+    });
+    const port = await listen(server);
+    track(server, gateway);
+    const client = await connect(
+      `ws://127.0.0.1:${port}/ws/sessions/${SESSION_ID}`,
+    );
+    await vi.waitFor(() => expect(connectSession).toHaveBeenCalledOnce());
+
+    auth.revoke();
+    const closed = once(client, 'close');
+    pending.resolve();
+    const [code] = (await closed) as [number, Buffer];
+
+    expect(code).toBe(AUTHENTICATION_REQUIRED);
+    await vi.waitFor(() => expect(owner.close).toHaveBeenCalledOnce());
+    expect(owner.close).toHaveBeenCalledWith(
+      AUTHENTICATION_REQUIRED,
+      AUTHENTICATION_REQUIRED_REASON,
+    );
+    expect(remove).toHaveBeenCalledOnce();
+    expect(registry.get(SESSION_ID)).toBeUndefined();
+    expect(auth.index.connectedCount()).toBe(0);
+  });
+
+  it('cleans a late owner once when socket close races pending connect', async () => {
+    const pending = deferred<void>();
+    const auth = authHarness();
+    const registry = new BridgeRegistry();
+    const owner = { pid: 12, close: vi.fn(async () => undefined) };
+    const remove = vi.spyOn(registry, 'remove');
+    const connectSession = vi.fn(async () => {
+      await pending.promise;
+      await registry.replace(SESSION_ID, owner);
+      return owner;
+    });
+    const server = createServer();
+    const gateway = createTerminalWebSocketServer({
+      server,
+      publicOrigin: 'http://app.test',
+      basePath: '/',
+      sessionManager: {
+        authorize: vi.fn(
+          () => ({ sessionId: SESSION_ID, generation: 1 }) as never,
+        ),
+        connect: connectSession,
+      },
+      registry,
+      logger: logger(),
+      heartbeatIntervalMs: 30_000,
+      ...auth.options,
+    });
+    const port = await listen(server);
+    track(server, gateway);
+    const client = await connect(
+      `ws://127.0.0.1:${port}/ws/sessions/${SESSION_ID}`,
+    );
+    await vi.waitFor(() => expect(connectSession).toHaveBeenCalledOnce());
+
+    client.close();
+    await once(client, 'close');
+    pending.resolve();
+
+    await vi.waitFor(() => expect(owner.close).toHaveBeenCalledOnce());
+    expect(owner.close).toHaveBeenCalledWith(1001, 'socket_closed');
+    expect(remove).toHaveBeenCalledOnce();
+    expect(registry.get(SESSION_ID)).toBeUndefined();
+    expect(auth.index.connectedCount()).toBe(0);
+  });
+
+  it('closes and cleans a late owner once when socket error races pending connect', async () => {
+    const pending = deferred<void>();
+    const auth = authHarness();
+    const registry = new BridgeRegistry();
+    const owner = { pid: 13, close: vi.fn(async () => undefined) };
+    const remove = vi.spyOn(registry, 'remove');
+    let connectedPort: unknown;
+    const connectSession = vi.fn(async (...args: unknown[]) => {
+      connectedPort = args[1];
+      await pending.promise;
+      await registry.replace(SESSION_ID, owner);
+      return owner;
+    });
+    const server = createServer();
+    const gateway = createTerminalWebSocketServer({
+      server,
+      publicOrigin: 'http://app.test',
+      basePath: '/',
+      sessionManager: {
+        authorize: vi.fn(
+          () => ({ sessionId: SESSION_ID, generation: 1 }) as never,
+        ),
+        connect: connectSession,
+      },
+      registry,
+      logger: logger(),
+      heartbeatIntervalMs: 30_000,
+      ...auth.options,
+    });
+    const port = await listen(server);
+    track(server, gateway);
+    const client = await connect(
+      `ws://127.0.0.1:${port}/ws/sessions/${SESSION_ID}`,
+    );
+    await vi.waitFor(() => expect(connectedPort).toBeDefined());
+    const internalSocket = (connectedPort as { socket: WebSocket }).socket;
+    const closed = once(client, 'close');
+
+    internalSocket.emit('error', new Error('private socket failure'));
+    pending.resolve();
+    const [code] = (await closed) as [number, Buffer];
+
+    expect(code).toBe(1011);
+    await vi.waitFor(() => expect(owner.close).toHaveBeenCalledOnce());
+    expect(owner.close).toHaveBeenCalledWith(1001, 'socket_closed');
+    expect(remove).toHaveBeenCalledOnce();
+    expect(registry.get(SESSION_ID)).toBeUndefined();
+    expect(auth.index.connectedCount()).toBe(0);
+    expect(internalSocket.listenerCount('pong')).toBe(0);
+    expect(internalSocket.listenerCount('error')).toBe(0);
+  });
+
+  it('sweeps authentication expiry on heartbeat and disposes index exactly once', async () => {
+    const scheduler = fakeScheduler();
+    const auth = authHarness();
+    const sweep = vi.spyOn(auth.index, 'sweepExpired');
+    const dispose = vi.spyOn(auth.index, 'dispose');
+    const server = createServer();
+    const gateway = createTerminalWebSocketServer({
+      server,
+      publicOrigin: 'http://app.test',
+      basePath: '/',
+      sessionManager: {
+        authorize: vi.fn(
+          () => ({ sessionId: SESSION_ID, generation: 1 }) as never,
+        ),
+        connect: vi.fn().mockResolvedValue({ close: vi.fn() }),
+      },
+      registry: new BridgeRegistry(),
+      logger: logger(),
+      heartbeatIntervalMs: 30_000,
+      scheduler,
+      ...auth.options,
+    });
+    await listen(server);
+    track(server, gateway);
+
+    scheduler.tick();
+    expect(sweep).toHaveBeenCalledOnce();
+    await gateway.close();
+    await gateway.close();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(auth.unsubscribe).toHaveBeenCalledOnce();
+    expect(gateway.connectedCount()).toBe(0);
+  });
 });
 
 async function createHarness(
@@ -397,6 +842,7 @@ async function createHarness(
     registry,
     logger: log,
     heartbeatIntervalMs: 30_000,
+    ...authHarness().options,
     ...(options.scheduler === undefined
       ? {}
       : { scheduler: options.scheduler }),
@@ -423,6 +869,116 @@ async function createHarness(
 
 function logger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+}
+
+function authorityCapture() {
+  return Object.freeze({
+    applicationSessionId: 'application-session-id',
+    generation: 7,
+    expiresAt: 10_000,
+  });
+}
+
+function authHarness(
+  overrides: {
+    authenticate?: (
+      request: WebSocketUpgradeRequest,
+    ) => Promise<ApplicationSessionAuthority | undefined>;
+    touchInput?: (authority: ApplicationSessionAuthority) => boolean;
+  } = {},
+) {
+  const authority = authorityCapture();
+  let active = true;
+  let revoked: ((id: string) => void) | undefined;
+  const unsubscribe = vi.fn();
+  const isActive = vi.fn(
+    (capture: typeof authority) =>
+      active &&
+      capture.applicationSessionId === authority.applicationSessionId &&
+      capture.generation === authority.generation,
+  );
+  const touchInput =
+    overrides.touchInput ??
+    vi.fn((capture: typeof authority): boolean => isActive(capture));
+  const authenticator: WebSocketUpgradeAuthenticator = {
+    authenticate: overrides.authenticate ?? vi.fn(async () => authority),
+    isActive,
+    touchInput,
+    sweepExpired: vi.fn(),
+    onRevoked: vi.fn((listener: (id: string) => void) => {
+      revoked = listener;
+      return unsubscribe;
+    }),
+  };
+  const index = new WebSocketAuthIndex({
+    auth: authenticator,
+    maxApplicationSessions: 8,
+    maxSockets: 16,
+  });
+  return {
+    options: { upgradeAuthenticator: authenticator, authIndex: index },
+    index,
+    unsubscribe,
+    revoke() {
+      active = false;
+      revoked?.(authority.applicationSessionId);
+    },
+  };
+}
+
+function authenticatedSession(overrides: Partial<AuthenticatedSession> = {}) {
+  return Object.freeze({
+    id: 'application-session-id',
+    mode: 'cloudflare-access' as const,
+    identityLabel: 'alice',
+    createdAt: 0,
+    lastSeen: 0,
+    idleExpiresAt: 4_000,
+    absoluteExpiresAt: 10_000,
+    upstreamExpiresAt: 5_000,
+    generation: 7,
+    ...overrides,
+  });
+}
+
+function upgradeAuthService(overrides: Record<string, unknown> = {}) {
+  const current = authenticatedSession();
+  return {
+    authenticateCookie: vi.fn(() => current),
+    authenticateAuthority: vi.fn(() => current),
+    isActiveAuthority: vi.fn(() => true),
+    touchAuthority: vi.fn(() => true),
+    verifyCsrf: vi.fn(() => true),
+    touch: vi.fn(),
+    sweepExpired: vi.fn(),
+    onRevoked: vi.fn(() => vi.fn()),
+    ...overrides,
+  };
+}
+
+function requestView(rawHeaders: string[]) {
+  const headers: Record<string, string> = {};
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    headers[rawHeaders[index]!.toLowerCase()] = rawHeaders[index + 1]!;
+  }
+  return {
+    rawHeaders,
+    headers,
+    headersDistinct: Object.fromEntries(
+      Object.entries(headers).map(([name, value]) => [name, [value]]),
+    ),
+    socket: { remoteAddress: '127.0.0.1' as string | undefined },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function fakeScheduler() {
@@ -483,8 +1039,12 @@ async function rejectedStatus(
   port: number,
   path: string,
   origin: string,
+  headers: Record<string, string> = {},
 ): Promise<number> {
-  const client = new WebSocket(`ws://127.0.0.1:${port}${path}`, { origin });
+  const client = new WebSocket(`ws://127.0.0.1:${port}${path}`, {
+    origin,
+    headers,
+  });
   return new Promise((resolve, reject) => {
     client.once('unexpected-response', (_request, response) => {
       response.resume();

@@ -54,6 +54,9 @@ export class TerminalBridgeFactory implements ManagedBridgeFactory {
       ...(this.activity === undefined
         ? {}
         : { onActivity: (id: string) => this.activity?.mark(id) }),
+      ...(options.socket.authenticatedInput === undefined
+        ? {}
+        : { authenticatedInput: options.socket.authenticatedInput }),
     });
   }
 }

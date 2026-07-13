@@ -1,6 +1,8 @@
 import { Buffer } from 'node:buffer';
 
 import {
+  AUTHENTICATION_REQUIRED,
+  AUTHENTICATION_REQUIRED_REASON,
   PROTOCOL_VERSION,
   isSessionId,
   parseClientMessage,
@@ -22,11 +24,16 @@ export interface SocketPort {
   onMessage(listener: (data: unknown, isBinary: boolean) => void): Disposable;
   onClose(listener: () => void): Disposable;
   onError(listener: () => void): Disposable;
+  readonly authenticatedInput?: AuthenticatedInputPort;
 }
 
 export interface BridgeOwner {
   readonly pid?: number | null;
   close(code?: number, reason?: string): Promise<void>;
+}
+
+export interface AuthenticatedInputPort {
+  authenticate(): boolean;
 }
 
 export type TerminalBridgeOptions = Readonly<{
@@ -36,6 +43,7 @@ export type TerminalBridgeOptions = Readonly<{
   logger: LifecycleLogger;
   maxBufferedBytes: number;
   onActivity?: (sessionId: string) => void;
+  authenticatedInput?: AuthenticatedInputPort;
 }>;
 
 export class TerminalBridge implements BridgeOwner {
@@ -164,12 +172,28 @@ export class TerminalBridge implements BridgeOwner {
       return;
     }
     if (parsed.data.type === 'input') {
+      if (!this.authenticateInput()) return;
       this.markActivity();
       this.write(parsed.data.data);
     } else {
       this.markActivity();
       this.resize(parsed.data.cols, parsed.data.rows);
     }
+  }
+
+  private authenticateInput(): boolean {
+    try {
+      if (this.options.authenticatedInput?.authenticate() !== false)
+        return true;
+    } catch {
+      // Authentication failures are deliberately indistinguishable from revocation.
+    }
+    this.shutdown(
+      AUTHENTICATION_REQUIRED,
+      AUTHENTICATION_REQUIRED_REASON,
+      true,
+    );
+    return false;
   }
 
   private handleOutput(data: string): void {

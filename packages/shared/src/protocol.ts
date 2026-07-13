@@ -2,6 +2,11 @@ import { z } from 'zod';
 
 import { tabIdSchema } from './tabs.js';
 
+export {
+  AUTHENTICATION_REQUIRED,
+  AUTHENTICATION_REQUIRED_REASON,
+} from './tabs.js';
+
 export const PROTOCOL_VERSION = 1 as const;
 export const MAX_WS_PAYLOAD_BYTES = 65_536;
 export const MAX_INPUT_BYTES = 16_384;

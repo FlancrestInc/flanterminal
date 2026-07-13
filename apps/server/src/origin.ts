@@ -7,6 +7,7 @@ export type UpgradeAuthorizationOptions = Readonly<{
 
 export type UpgradeRequest = Readonly<{
   origin: string | undefined;
+  rawHeaders?: readonly string[];
   requestUrl: string | undefined;
 }>;
 
@@ -26,7 +27,15 @@ export function authorizeUpgrade(
   request: UpgradeRequest,
   options: UpgradeAuthorizationOptions,
 ): UpgradeAuthorization {
-  if (!isExactOrigin(request.origin, options.publicOrigin)) {
+  const origin =
+    request.rawHeaders === undefined
+      ? request.origin
+      : exactRawOrigin(request.rawHeaders);
+  if (
+    origin === undefined ||
+    origin !== request.origin ||
+    !isExactOrigin(origin, options.publicOrigin)
+  ) {
     return { allowed: false, status: 403 };
   }
   const prefix = options.basePath === '/' ? '' : options.basePath;
@@ -45,6 +54,23 @@ export function authorizeUpgrade(
     return { allowed: false, status: 404 };
   }
   return { allowed: true, sessionId };
+}
+
+function exactRawOrigin(rawHeaders: readonly string[]): string | undefined {
+  if (rawHeaders.length % 2 !== 0 || rawHeaders.length > 128) return undefined;
+  let totalBytes = 0;
+  const origins: string[] = [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index];
+    const value = rawHeaders[index + 1];
+    if (typeof name !== 'string' || typeof value !== 'string') return undefined;
+    totalBytes += Buffer.byteLength(name) + Buffer.byteLength(value);
+    if (totalBytes > 16 * 1024) return undefined;
+    if (name.toLowerCase() !== 'origin') continue;
+    if (Buffer.byteLength(value) > 2_048) return undefined;
+    origins.push(value);
+  }
+  return origins.length === 1 ? origins[0] : undefined;
 }
 
 function isExactOrigin(

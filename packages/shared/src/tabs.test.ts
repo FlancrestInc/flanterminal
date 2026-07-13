@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  AUTHENTICATION_REQUIRED,
+  AUTHENTICATION_REQUIRED_REASON,
   BRIDGE_RESTART,
   SESSION_REPLACED,
   SESSION_RESTARTING,
@@ -34,6 +36,17 @@ const record: TabRecord = {
 };
 
 describe('tab identity', () => {
+  it('keeps authentication and terminal lifecycle close codes distinct', () => {
+    expect([
+      SESSION_REPLACED,
+      AUTHENTICATION_REQUIRED,
+      BRIDGE_RESTART,
+      SESSION_STOPPED,
+      SESSION_RESTARTING,
+    ]).toEqual([4001, 4003, 4010, 4011, 4012]);
+    expect(AUTHENTICATION_REQUIRED_REASON).toBe('authentication_required');
+  });
+
   it.each([
     TAB_ID,
     SECOND_TAB_ID,

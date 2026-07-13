@@ -29,5 +29,7 @@ export type AuthenticatedSession = Readonly<{
   absoluteExpiresAt: number;
   upstreamExpiresAt?: number;
 }>;
+export type AuthenticatedSessionAuthority = AuthenticatedSession &
+  Readonly<{ generation: number }>;
 export type RevocationReason =
   'capacity' | 'idle' | 'absolute' | 'upstream' | 'logout' | 'password_changed';

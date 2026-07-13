@@ -7,6 +7,8 @@ const TAB_ID_PATTERN =
 
 export const TAB_DOCUMENT_FORMAT_VERSION = 1 as const;
 export const SESSION_REPLACED = 4001;
+export const AUTHENTICATION_REQUIRED = 4003;
+export const AUTHENTICATION_REQUIRED_REASON = 'authentication_required';
 export const BRIDGE_RESTART = 4010;
 export const SESSION_STOPPED = 4011;
 export const SESSION_RESTARTING = 4012;

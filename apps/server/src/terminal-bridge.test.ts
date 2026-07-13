@@ -13,6 +13,114 @@ const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const OTHER_SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
 
 describe('TerminalBridge', () => {
+  it('authenticates accepted same-session input immediately before PTY write', () => {
+    const socket = new FakeSocket();
+    const pty = new FakePty();
+    const authenticateInput = vi.fn(() => true);
+    createBridge(socket, pty, undefined, 1024, undefined, authenticateInput);
+
+    socket.emitMessage(
+      JSON.stringify({
+        v: 1,
+        type: 'input',
+        sessionId: SESSION_ID,
+        data: 'private input',
+      }),
+    );
+
+    expect(authenticateInput).toHaveBeenCalledOnce();
+    expect(authenticateInput.mock.invocationCallOrder[0]).toBeLessThan(
+      pty.write.mock.invocationCallOrder[0]!,
+    );
+    expect(pty.write).toHaveBeenCalledWith('private input');
+  });
+
+  it.each(['revoked', 'failure'] as const)(
+    'blocks input and closes 4003 when input authentication reports %s',
+    (outcome) => {
+      const socket = new FakeSocket();
+      const pty = new FakePty();
+      const logger = new CapturingLogger();
+      const secret = 'credential-or-terminal-secret';
+      const authenticateInput = vi.fn(() => {
+        if (outcome === 'failure') throw new Error(secret);
+        return false;
+      });
+      createBridge(socket, pty, logger, 1024, undefined, authenticateInput);
+
+      socket.emitMessage(
+        JSON.stringify({
+          v: 1,
+          type: 'input',
+          sessionId: SESSION_ID,
+          data: secret,
+        }),
+      );
+
+      expect(pty.write).not.toHaveBeenCalled();
+      expect(socket.close).toHaveBeenCalledWith(
+        4003,
+        'authentication_required',
+      );
+      expect(JSON.stringify(logger.records)).not.toContain(secret);
+    },
+  );
+
+  it('does not authenticate resize, output, malformed, or mismatched frames', () => {
+    const authenticateInput = vi.fn(() => true);
+    const resizeSocket = new FakeSocket();
+    const resizePty = new FakePty();
+    createBridge(
+      resizeSocket,
+      resizePty,
+      undefined,
+      1024,
+      undefined,
+      authenticateInput,
+    );
+    resizeSocket.emitMessage(
+      JSON.stringify({
+        v: 1,
+        type: 'resize',
+        sessionId: SESSION_ID,
+        cols: 80,
+        rows: 24,
+      }),
+    );
+    resizePty.emitData('private output');
+
+    const malformedSocket = new FakeSocket();
+    createBridge(
+      malformedSocket,
+      new FakePty(),
+      undefined,
+      1024,
+      undefined,
+      authenticateInput,
+    );
+    malformedSocket.emitMessage('{private');
+
+    const mismatchedSocket = new FakeSocket();
+    createBridge(
+      mismatchedSocket,
+      new FakePty(),
+      undefined,
+      1024,
+      undefined,
+      authenticateInput,
+    );
+    mismatchedSocket.emitMessage(
+      JSON.stringify({
+        v: 1,
+        type: 'input',
+        sessionId: OTHER_SESSION_ID,
+        data: 'private',
+      }),
+    );
+
+    expect(authenticateInput).not.toHaveBeenCalled();
+  });
+
   it('forwards input, output, and resize without logging terminal data', () => {
     const socket = new FakeSocket();
     const pty = new FakePty();
@@ -402,6 +510,7 @@ function createBridge(
   logger: LifecycleLogger = new CapturingLogger(),
   maxBufferedBytes = 1024,
   onActivity?: (sessionId: string) => void,
+  authenticateInput?: () => boolean,
 ) {
   return new TerminalBridge({
     sessionId: SESSION_ID,
@@ -410,6 +519,9 @@ function createBridge(
     logger,
     maxBufferedBytes,
     ...(onActivity === undefined ? {} : { onActivity }),
+    ...(authenticateInput === undefined
+      ? {}
+      : { authenticatedInput: { authenticate: authenticateInput } }),
   });
 }
 

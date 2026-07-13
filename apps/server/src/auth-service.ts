@@ -6,6 +6,7 @@ import { CsrfService, type CsrfRecord } from './csrf-service.js';
 import {
   type AuthBootstrapResult,
   type AuthenticatedSession,
+  type AuthenticatedSessionAuthority,
   type AuthMode,
   type LocalLoginAttempt,
   type RevocationReason,
@@ -23,6 +24,7 @@ type Limiter = {
 };
 type Stored = {
   id: string;
+  generation: number;
   mode: AuthMode;
   identityLabel: string;
   createdAt: number;
@@ -93,6 +95,7 @@ export class AuthService {
   #pendingEstablishments = 0;
   #pendingLogins = 0;
   #passwordChangeActive = false;
+  #generation = 0;
   constructor(o: AuthServiceOptions) {
     if (
       !Number.isFinite(o.idleDurationMs) ||
@@ -230,6 +233,48 @@ export class AuthService {
       return undefined;
     }
     return view(s);
+  }
+  authenticateAuthority(
+    rawCookie: string | undefined,
+  ): AuthenticatedSessionAuthority | undefined {
+    if (typeof rawCookie !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(rawCookie))
+      return undefined;
+    const s = this.#byDigest.get(hash(rawCookie));
+    if (!s) return undefined;
+    const reason = this.#expiredReason(s);
+    if (reason) {
+      this.#revoke(s, reason);
+      return undefined;
+    }
+    return authorityView(s);
+  }
+  isActiveAuthority(id: string, generation: number): boolean {
+    const s = this.#byId.get(id);
+    if (!s || s.generation !== generation) return false;
+    const reason = this.#expiredReason(s);
+    if (reason) {
+      this.#revoke(s, reason);
+      return false;
+    }
+    return true;
+  }
+  touchAuthority(
+    id: string,
+    generation: number,
+    activity: 'terminal_input',
+  ): boolean {
+    if (activity !== 'terminal_input') return false;
+    const s = this.#byId.get(id);
+    if (!s || s.generation !== generation) return false;
+    const reason = this.#expiredReason(s);
+    if (reason) {
+      this.#revoke(s, reason);
+      return false;
+    }
+    const now = this.#now();
+    s.lastSeen = now;
+    s.idleExpiresAt = Math.min(s.absoluteExpiresAt, now + this.#idle);
+    return this.#byId.get(id) === s && s.generation === generation;
   }
   resume(id: string): AuthBootstrapResult | undefined {
     const s = this.#byId.get(id);
@@ -380,6 +425,7 @@ export class AuthService {
     const issued = this.#csrf.create();
     const s: Stored = {
       id,
+      generation: this.#nextGeneration(),
       mode,
       identityLabel: normalizeLabel(label),
       createdAt: now,
@@ -523,6 +569,11 @@ export class AuthService {
     if (!(bytes instanceof Uint8Array) || bytes.byteLength !== size)
       throw new AuthServiceError();
     return Buffer.from(bytes).toString('base64url');
+  }
+  #nextGeneration(): number {
+    this.#generation += 1;
+    if (!Number.isSafeInteger(this.#generation)) throw new AuthServiceError();
+    return this.#generation;
   }
   #now(): number {
     const n = this.#clock();
@@ -671,4 +722,7 @@ function view(s: Stored): AuthenticatedSession {
       ? {}
       : { upstreamExpiresAt: s.upstreamExpiresAt }),
   });
+}
+function authorityView(s: Stored): AuthenticatedSessionAuthority {
+  return frozen({ ...view(s), generation: s.generation });
 }

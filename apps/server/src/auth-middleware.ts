@@ -1,7 +1,9 @@
+import type { IncomingMessage } from 'node:http';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 import type {
   AuthenticatedSession,
+  AuthenticatedSessionAuthority,
   AuthMode,
   UpstreamAuthentication,
   UpstreamIdentity,
@@ -12,6 +14,10 @@ import type {
 } from './cloudflare-access.js';
 import type { LifecycleMetadata } from './logger.js';
 import type { TrustedHeaderRequestView } from './trusted-header-auth.js';
+import type {
+  ApplicationSessionAuthority,
+  WebSocketAuthSource,
+} from './websocket-auth-index.js';
 
 export const SESSION_COOKIE_NAME = 'flanterminal_session';
 export const CSRF_HEADER_NAME = 'x-csrf-token';
@@ -37,6 +43,40 @@ export interface AuthMiddlewareService {
   verifyCsrf(id: string, supplied: string | undefined): boolean;
   touch(id: string, activity: 'http' | 'terminal_input'): void;
 }
+
+export interface WebSocketAuthService extends AuthMiddlewareService {
+  authenticateAuthority(
+    rawCookie: string | undefined,
+  ): AuthenticatedSessionAuthority | undefined;
+  isActiveAuthority(id: string, generation: number): boolean;
+  touchAuthority(
+    id: string,
+    generation: number,
+    activity: 'terminal_input',
+  ): boolean;
+  sweepExpired(): void;
+  onRevoked(listener: (applicationSessionId: string) => void): () => void;
+}
+
+export interface WebSocketUpgradeAuthenticator extends WebSocketAuthSource {
+  authenticate(
+    request: WebSocketUpgradeRequest,
+  ): Promise<ApplicationSessionAuthority | undefined>;
+  touchInput(authority: ApplicationSessionAuthority): boolean;
+}
+
+export type WebSocketUpgradeRequest = Readonly<{
+  rawHeaders: string[];
+  headers: IncomingMessage['headers'];
+  socket: Readonly<{ remoteAddress: string | undefined }>;
+  headersDistinct?: Readonly<Record<string, readonly string[] | undefined>>;
+}>;
+
+export type WebSocketUpgradeAuthenticatorOptions = Omit<
+  AuthMiddlewareOptions,
+  'authService'
+> &
+  Readonly<{ authService: WebSocketAuthService }>;
 
 export interface AuthEventLogger {
   warn(event: string, metadata?: LifecycleMetadata): void;
@@ -241,6 +281,85 @@ export async function resolveAuthentication(
   });
 }
 
+export function createWebSocketUpgradeAuthenticator(
+  options: WebSocketUpgradeAuthenticatorOptions,
+): WebSocketUpgradeAuthenticator {
+  return Object.freeze({
+    async authenticate(request: WebSocketUpgradeRequest) {
+      try {
+        return await resolveUpgradeAuthentication(options, request);
+      } catch {
+        return undefined;
+      }
+    },
+    isActive(authority: ApplicationSessionAuthority) {
+      return safeAuthorityCheck(options.authService, authority);
+    },
+    touchInput(authority: ApplicationSessionAuthority) {
+      try {
+        return options.authService.touchAuthority(
+          authority.applicationSessionId,
+          authority.generation,
+          'terminal_input',
+        );
+      } catch {
+        return false;
+      }
+    },
+    sweepExpired() {
+      options.authService.sweepExpired();
+    },
+    onRevoked(listener: (applicationSessionId: string) => void) {
+      return options.authService.onRevoked(listener);
+    },
+  });
+}
+
+async function resolveUpgradeAuthentication(
+  options: WebSocketUpgradeAuthenticatorOptions,
+  request: WebSocketUpgradeRequest,
+): Promise<ApplicationSessionAuthority | undefined> {
+  const cookie = readSessionCookie(request);
+  if (cookie === undefined) return undefined;
+  const first = options.authService.authenticateAuthority(cookie);
+  if (first === undefined || first.mode !== options.mode) return undefined;
+  const upstreamIdentity = await currentUpstreamIdentity(options, request);
+  if (!identityMatches(first, upstreamIdentity)) return undefined;
+  const current = options.authService.authenticateAuthority(cookie);
+  if (
+    current === undefined ||
+    current.generation !== first.generation ||
+    !sameAuthority(first, current) ||
+    !identityMatches(current, upstreamIdentity)
+  )
+    return undefined;
+  const expiresAt = Math.min(
+    current.idleExpiresAt,
+    current.absoluteExpiresAt,
+    current.upstreamExpiresAt ?? Number.POSITIVE_INFINITY,
+  );
+  if (!Number.isFinite(expiresAt)) return undefined;
+  return Object.freeze({
+    applicationSessionId: current.id,
+    generation: current.generation,
+    expiresAt,
+  });
+}
+
+function safeAuthorityCheck(
+  service: WebSocketAuthService,
+  authority: ApplicationSessionAuthority,
+): boolean {
+  try {
+    return service.isActiveAuthority(
+      authority.applicationSessionId,
+      authority.generation,
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function upstreamAuthentication(
   options: AuthMiddlewareOptions,
   request: Request,
@@ -256,7 +375,7 @@ export async function upstreamAuthentication(
 
 async function currentUpstreamIdentity(
   options: AuthMiddlewareOptions,
-  request: Request,
+  request: Request | WebSocketUpgradeRequest,
 ): Promise<UpstreamIdentity | undefined> {
   if (options.mode === 'local' || options.mode === 'none') return undefined;
   if (options.mode === 'cloudflare-access') {
@@ -269,9 +388,25 @@ async function currentUpstreamIdentity(
   return await options.trustedHeaderProvider.authenticate({
     remoteAddress: request.socket.remoteAddress,
     headers: request.headers as UpstreamHeaderView,
-    headersDistinct: request.headersDistinct,
+    headersDistinct: distinctHeaders(request),
     rawHeaders: request.rawHeaders,
   });
+}
+
+function distinctHeaders(
+  request: Request | WebSocketUpgradeRequest,
+): Readonly<Record<string, readonly string[] | undefined>> {
+  const expressDistinct = Reflect.get(request, 'headersDistinct') as
+    Readonly<Record<string, readonly string[] | undefined>> | undefined;
+  if (expressDistinct !== undefined) return expressDistinct;
+  const distinct: Record<string, string[]> = {};
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    const name = request.rawHeaders[index]?.toLowerCase();
+    const value = request.rawHeaders[index + 1];
+    if (name === undefined || value === undefined) continue;
+    (distinct[name] ??= []).push(value);
+  }
+  return distinct;
 }
 
 function identityMatches(
@@ -298,7 +433,9 @@ function sameAuthority(
   );
 }
 
-function readSessionCookie(request: Request): string | undefined {
+function readSessionCookie(
+  request: Pick<IncomingMessage, 'rawHeaders'>,
+): string | undefined {
   const { rawHeaders } = request;
   if (
     !Array.isArray(rawHeaders) ||

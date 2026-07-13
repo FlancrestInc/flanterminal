@@ -646,6 +646,41 @@ describe('AuthService', () => {
     expect(h.service.authenticateCookie(result.cookieValue)).toBeUndefined();
   });
 
+  it('captures immutable websocket authority and rejects stale authority touches', async () => {
+    const h = setup('none', { idleDurationMs: 10, absoluteDurationMs: 25 });
+    const result = await h.service.bootstrap({ type: 'none' });
+    const authority = h.service.authenticateAuthority(result.cookieValue)!;
+
+    expect(Object.isFrozen(authority)).toBe(true);
+    expect(authority.generation).toBeGreaterThan(0);
+    expect(
+      h.service.isActiveAuthority(authority.id, authority.generation),
+    ).toBe(true);
+    h.time.now = 5;
+    expect(
+      h.service.touchAuthority(
+        authority.id,
+        authority.generation,
+        'terminal_input',
+      ),
+    ).toBe(true);
+    expect(
+      h.service.authenticateCookie(result.cookieValue)?.idleExpiresAt,
+    ).toBe(15);
+
+    h.service.logout(authority.id);
+    expect(
+      h.service.isActiveAuthority(authority.id, authority.generation),
+    ).toBe(false);
+    expect(
+      h.service.touchAuthority(
+        authority.id,
+        authority.generation,
+        'terminal_input',
+      ),
+    ).toBe(false);
+  });
+
   it('expires at the upstream bound and refreshes only matching identity upstream expiry', async () => {
     const h = setup('trusted-header', {
       idleDurationMs: 100,
