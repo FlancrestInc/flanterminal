@@ -183,7 +183,17 @@ describe('useAuth', () => {
 
   it.each([
     localSession,
+    {
+      ...localSession,
+      upstreamExpiresAt: '2026-07-13T18:04:00.000Z',
+    },
     { ...localSession, mode: 'none' as const, csrfToken: 'csrf-none' },
+    {
+      ...localSession,
+      mode: 'none' as const,
+      csrfToken: 'csrf-none',
+      upstreamExpiresAt: '2026-07-13T18:04:00.000Z',
+    },
   ])(
     'does not schedule identity refresh for the authenticated %s mode',
     async (state) => {

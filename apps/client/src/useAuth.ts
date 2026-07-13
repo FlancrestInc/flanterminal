@@ -395,12 +395,18 @@ function isConsistentRefresh(
 function refreshDelay(
   bootstrap: Extract<AuthBootstrap, { authenticated: true }>,
 ): number | undefined {
+  if (
+    bootstrap.mode !== 'cloudflare-access' &&
+    bootstrap.mode !== 'trusted-header'
+  )
+    return undefined;
   if (bootstrap.upstreamExpiresAt !== undefined) {
     return Math.max(
       0,
       Date.parse(bootstrap.upstreamExpiresAt) - Date.now() - REFRESH_LEAD_MS,
     );
   }
-  if (bootstrap.mode === 'trusted-header') return TRUSTED_HEADER_REFRESH_MS;
-  return undefined;
+  return bootstrap.mode === 'trusted-header'
+    ? TRUSTED_HEADER_REFRESH_MS
+    : undefined;
 }
