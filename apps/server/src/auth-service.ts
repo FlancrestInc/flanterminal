@@ -146,8 +146,12 @@ export class AuthService {
         bootstrap: frozen({ authenticated: false, mode: 'local' }),
       });
     try {
+      const established = this.#safeEstablish(
+        'local',
+        normalizeLabel(input.username),
+      );
       this.#limiter.resetAddress(input.address);
-      return this.#safeEstablish('local', normalizeLabel(input.username));
+      return established;
     } catch {
       throw new AuthServiceError();
     }
@@ -197,9 +201,12 @@ export class AuthService {
     } catch {
       return undefined;
     }
+    if (u.mode !== s.mode || u.identityLabel !== s.identityLabel)
+      return undefined;
+    if (s.mode === 'trusted-header' && u.expiresAt === undefined) {
+      return s.upstreamExpiresAt === undefined ? view(s) : undefined;
+    }
     if (
-      u.mode !== s.mode ||
-      u.identityLabel !== s.identityLabel ||
       u.expiresAt === undefined ||
       u.expiresAt <= this.#now() ||
       (s.upstreamExpiresAt !== undefined && u.expiresAt <= s.upstreamExpiresAt)
@@ -243,6 +250,13 @@ export class AuthService {
           throw new AuthServiceError();
         }
         if (!valid) return false;
+        const currentSession = this.#byId.get(id);
+        if (currentSession !== s) return false;
+        const recheckExpiry = this.#expiredReason(s);
+        if (recheckExpiry) {
+          this.#revoke(s, recheckExpiry);
+          return false;
+        }
         let replaced: ReplaceResult;
         try {
           replaced = await this.#credentials.replacePassword(replacement);
@@ -296,16 +310,6 @@ export class AuthService {
     label: string,
     upstreamExpiresAt?: number,
   ): AuthBootstrapResult {
-    this.sweepExpired();
-    if (this.#byId.size >= this.#max) {
-      const oldest = [...this.#byId.values()].sort(
-        (a, b) =>
-          a.lastSeen - b.lastSeen ||
-          a.createdAt - b.createdAt ||
-          a.id.localeCompare(b.id),
-      )[0]!;
-      this.#revoke(oldest, 'capacity');
-    }
     const now = this.#now();
     let cookie = '';
     let digest = '';
@@ -335,8 +339,6 @@ export class AuthService {
       digest,
       ...(upstreamExpiresAt === undefined ? {} : { upstreamExpiresAt }),
     };
-    this.#byDigest.set(s.digest, s);
-    this.#byId.set(id, s);
     const bootstrap: AuthBootstrap = frozen({
       authenticated: true,
       mode,
@@ -346,7 +348,22 @@ export class AuthService {
         ? {}
         : { upstreamExpiresAt: new Date(upstreamExpiresAt).toISOString() }),
     });
-    return frozen({ bootstrap, cookieValue: cookie });
+    view(s);
+    const result = frozen({ bootstrap, cookieValue: cookie });
+
+    this.sweepExpired();
+    if (this.#byId.size >= this.#max) {
+      const oldest = [...this.#byId.values()].sort(
+        (a, b) =>
+          a.lastSeen - b.lastSeen ||
+          a.createdAt - b.createdAt ||
+          a.id.localeCompare(b.id),
+      )[0]!;
+      this.#revoke(oldest, 'capacity');
+    }
+    this.#byDigest.set(s.digest, s);
+    this.#byId.set(id, s);
+    return result;
   }
   #safeEstablish(
     mode: AuthMode,

@@ -182,6 +182,28 @@ describe('AuthService', () => {
     expect(h.service.authenticateCookie(result.cookieValue)).toBeUndefined();
   });
 
+  it('refreshes an expiry-less trusted identity without moving application bounds', async () => {
+    const h = setup('trusted-header');
+    const result = await h.service.bootstrap({
+      type: 'upstream',
+      identity: { mode: 'trusted-header', identityLabel: 'person' },
+    });
+    const prior = h.service.authenticateCookie(result.cookieValue)!;
+    const refreshed = h.service.refresh(prior.id, {
+      mode: 'trusted-header',
+      identityLabel: 'person',
+    });
+    expect(refreshed).toEqual(prior);
+    expect(refreshed).not.toHaveProperty('upstreamExpiresAt');
+    expect(
+      h.service.refresh(prior.id, {
+        mode: 'cloudflare-access',
+        identityLabel: 'person',
+        expiresAt: 50,
+      }),
+    ).toBeUndefined();
+  });
+
   it('binds CSRF per session and makes logout and sweep idempotent', async () => {
     const h = setup('none', { idleDurationMs: 5 });
     const revoked = vi.fn();
@@ -256,6 +278,8 @@ describe('AuthService', () => {
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false);
     h.credentials.replacePassword.mockResolvedValue({ state: 'committed' });
+    const revoked = vi.fn();
+    h.service.onRevoked(revoked);
     const first = h.service.changePassword(
       id,
       'old-password-value',
@@ -269,6 +293,104 @@ describe('AuthService', () => {
     await expect(first).resolves.toBe(true);
     await expect(second).resolves.toBe(false);
     expect(h.credentials.replacePassword).toHaveBeenCalledOnce();
+    expect(revoked).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['logout', 'expiry', 'capacity'] as const)(
+    'does not replace a password when %s revokes the caller during verification',
+    async (race) => {
+      const h = setup('local', {
+        maxSessions: 1,
+        idleDurationMs: 5,
+      });
+      const gate = deferred<boolean>();
+      const revoked = vi.fn();
+      h.service.onRevoked(revoked);
+      h.credentials.verify.mockResolvedValueOnce(true);
+      const loginResult = await h.service.login(login());
+      const session = h.service.authenticateCookie(loginResult.cookieValue)!;
+      h.credentials.verify.mockReturnValueOnce(gate.promise);
+      const change = h.service.changePassword(
+        session.id,
+        'current-password',
+        'replacement-password',
+      );
+      await Promise.resolve();
+      if (race === 'logout') h.service.logout(session.id);
+      if (race === 'expiry') {
+        h.time.now = 5;
+        h.service.sweepExpired();
+      }
+      if (race === 'capacity') await h.service.login(login());
+      gate.resolve(true);
+      await expect(change).resolves.toBe(false);
+      expect(h.credentials.replacePassword).not.toHaveBeenCalled();
+      expect(revoked).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('preserves the capacity victim and rate reset when establishment randomness fails', async () => {
+    let calls = 0;
+    const resetAddress = vi.fn();
+    const service = new AuthService({
+      mode: 'local',
+      clock: () => 0,
+      randomBytes: (size) => {
+        calls += 1;
+        if (calls > 2) throw new Error('random failure');
+        return Buffer.alloc(size, calls);
+      },
+      credentialStore: {
+        verify: vi.fn(async () => true),
+        replacePassword: vi.fn(),
+      },
+      csrfService: new CsrfService(),
+      rateLimiter: { consume: () => true, resetAddress },
+      idleDurationMs: 100,
+      absoluteDurationMs: 1000,
+      maxSessions: 1,
+    });
+    const first = await service.login(login());
+    const victim = service.authenticateCookie(first.cookieValue)!;
+    await expect(service.login(login())).rejects.toThrow(
+      'Authentication operation failed',
+    );
+    expect(service.authenticateCookie(first.cookieValue)?.id).toBe(victim.id);
+    expect(resetAddress).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the capacity victim and rate reset when CSRF construction fails', async () => {
+    let csrfCalls = 0;
+    class FailingCsrfService extends CsrfService {
+      override create() {
+        csrfCalls += 1;
+        if (csrfCalls === 2) throw new Error('csrf failure');
+        return super.create();
+      }
+    }
+    let byte = 1;
+    const resetAddress = vi.fn();
+    const service = new AuthService({
+      mode: 'local',
+      clock: () => 0,
+      randomBytes: (size) => Buffer.alloc(size, byte++),
+      credentialStore: {
+        verify: vi.fn(async () => true),
+        replacePassword: vi.fn(),
+      },
+      csrfService: new FailingCsrfService(),
+      rateLimiter: { consume: () => true, resetAddress },
+      idleDurationMs: 100,
+      absoluteDurationMs: 1000,
+      maxSessions: 1,
+    });
+    const first = await service.login(login());
+    const victim = service.authenticateCookie(first.cookieValue)!;
+    await expect(service.login(login())).rejects.toThrow(
+      'Authentication operation failed',
+    );
+    expect(service.authenticateCookie(first.cookieValue)?.id).toBe(victim.id);
+    expect(resetAddress).toHaveBeenCalledTimes(1);
   });
 
   it('contains credential operational failures behind the generic error', async () => {
@@ -321,4 +443,12 @@ function setup(
       : { maxObservers: overrides.maxObservers }),
   });
   return { service, credentials, limiter, time };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
 }
