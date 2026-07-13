@@ -8,6 +8,9 @@ import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import { AuthApiError, type AuthApi } from './auth-api.js';
 
 const REFRESH_LEAD_MS = 60_000;
+// Revalidate before the server's five-minute minimum application idle bound.
+const MINIMUM_APPLICATION_IDLE_MS = 5 * 60_000;
+const TRUSTED_HEADER_REFRESH_MS = MINIMUM_APPLICATION_IDLE_MS - REFRESH_LEAD_MS;
 const ACCESS_ERROR = 'Access could not be verified.';
 const SIGN_IN_ERROR = 'Sign-in failed.';
 const RATE_LIMIT_ERROR = 'Too many attempts. Try again later.';
@@ -166,10 +169,9 @@ export function useAuth(
   }, [bootstrapSession, cancelRefresh]);
 
   useEffect(() => {
-    if (!bootstrap?.authenticated || bootstrap.upstreamExpiresAt === undefined)
-      return;
-    const expiresAt = Date.parse(bootstrap.upstreamExpiresAt);
-    const delay = Math.max(0, expiresAt - Date.now() - REFRESH_LEAD_MS);
+    if (!bootstrap?.authenticated) return;
+    const delay = refreshDelay(bootstrap);
+    if (delay === undefined) return;
     refreshTimerRef.current = setTimeout(() => {
       refreshTimerRef.current = null;
       const operation = replaceOperation();
@@ -324,7 +326,12 @@ export function useAuth(
         if (isAbortError(reason)) throw reason;
         throw new AuthApiError();
       }
-      if (response.status === 401) authenticationRequired();
+      if (
+        response.status === 401 &&
+        privateRef.current === privateController &&
+        !privateController.signal.aborted
+      )
+        authenticationRequired();
       return response;
     },
     [authenticationRequired, fetchImpl],
@@ -383,4 +390,17 @@ function isConsistentRefresh(
     next.upstreamExpiresAt !== undefined &&
     Date.parse(next.upstreamExpiresAt) > Date.parse(previous.upstreamExpiresAt)
   );
+}
+
+function refreshDelay(
+  bootstrap: Extract<AuthBootstrap, { authenticated: true }>,
+): number | undefined {
+  if (bootstrap.upstreamExpiresAt !== undefined) {
+    return Math.max(
+      0,
+      Date.parse(bootstrap.upstreamExpiresAt) - Date.now() - REFRESH_LEAD_MS,
+    );
+  }
+  if (bootstrap.mode === 'trusted-header') return TRUSTED_HEADER_REFRESH_MS;
+  return undefined;
 }

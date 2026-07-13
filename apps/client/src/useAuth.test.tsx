@@ -21,6 +21,13 @@ const upstreamSession: AuthBootstrap = {
   csrfToken: 'csrf-upstream',
   upstreamExpiresAt: '2026-07-13T18:02:00.000Z',
 };
+const trustedSession: AuthBootstrap = {
+  authenticated: true,
+  mode: 'trusted-header',
+  identityLabel: 'trusted-operator',
+  csrfToken: 'csrf-trusted',
+};
+const TRUSTED_REFRESH_MS = 4 * 60_000;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -150,6 +157,62 @@ describe('useAuth', () => {
     expect(vi.getTimerCount()).toBe(1);
   });
 
+  it('refreshes an expiry-less trusted header identity before the minimum idle bound', async () => {
+    const next: AuthBootstrap = {
+      ...trustedSession,
+      csrfToken: 'csrf-trusted-next',
+    };
+    const api = fakeApi(trustedSession);
+    vi.mocked(api.refresh).mockResolvedValue(next);
+    const { result } = renderHook(() => useAuth(api));
+    await flushAuth();
+
+    expect(result.current.status).toBe('authenticated');
+    expect(vi.getTimerCount()).toBe(1);
+    await act(async () => vi.advanceTimersByTimeAsync(TRUSTED_REFRESH_MS - 1));
+    expect(api.refresh).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+
+    expect(api.refresh).toHaveBeenCalledWith(
+      'csrf-trusted',
+      expect.any(AbortSignal),
+    );
+    expect(result.current.bootstrap).toEqual(next);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it.each([
+    localSession,
+    { ...localSession, mode: 'none' as const, csrfToken: 'csrf-none' },
+  ])(
+    'does not schedule identity refresh for the authenticated %s mode',
+    async (state) => {
+      const currentApi = fakeApi(state);
+      const { result } = renderHook(() => useAuth(currentApi));
+      await flushAuth();
+
+      expect(result.current.status).toBe('authenticated');
+      expect(vi.getTimerCount()).toBe(0);
+      await act(async () => vi.advanceTimersByTimeAsync(TRUSTED_REFRESH_MS));
+      expect(currentApi.refresh).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails closed when expiry-less trusted header identity refresh fails', async () => {
+    const api = fakeApi(trustedSession);
+    vi.mocked(api.refresh).mockRejectedValue(
+      new AuthApiError('authentication_failed', 401),
+    );
+    const { result } = renderHook(() => useAuth(api));
+    await flushAuth();
+
+    await act(async () => vi.advanceTimersByTimeAsync(TRUSTED_REFRESH_MS));
+
+    expect(result.current.status).toBe('access-error');
+    expect(result.current.bootstrap).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('fails closed when upstream refresh loses identity and clears its timer', async () => {
     const api = fakeApi(upstreamSession);
     vi.mocked(api.refresh).mockRejectedValue(
@@ -235,6 +298,77 @@ describe('useAuth', () => {
     expect(result.current.status).toBe('unauthenticated');
     expect(result.current.error).toBeNull();
     expect(result.current.bootstrap).toBeNull();
+  });
+
+  it('ignores an old epoch 401 after successful reauthentication', async () => {
+    const oldRequest = deferred<Response>();
+    let oldSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        oldSignal = init?.signal ?? undefined;
+        return await oldRequest.promise;
+      },
+    );
+    const replacement: AuthBootstrap = {
+      ...localSession,
+      csrfToken: 'csrf-replacement',
+    };
+    const currentApi = fakeApi(localSession);
+    vi.mocked(currentApi.login).mockResolvedValue(replacement);
+    const { result } = renderHook(() => useAuth(currentApi, { fetchImpl }));
+    await flushAuth();
+    let pending!: Promise<Response>;
+    act(() => {
+      pending = result.current.privateFetch('/old-private-request');
+    });
+
+    act(() => result.current.authenticationRequired());
+    expect(oldSignal?.aborted).toBe(true);
+    await act(async () => {
+      await result.current.login('operator', 'replacement-password');
+    });
+    expect(result.current.bootstrap).toEqual(replacement);
+
+    oldRequest.resolve(
+      Response.json({ error: 'authentication_required' }, { status: 401 }),
+    );
+    await act(async () => void (await pending));
+
+    expect(result.current.status).toBe('authenticated');
+    expect(result.current.bootstrap).toEqual(replacement);
+  });
+
+  it('does not mutate a replacement auth epoch for late success or rejection', async () => {
+    const oldSuccess = deferred<Response>();
+    const oldFailure = deferred<Response>();
+    const fetchImpl = vi
+      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
+      .mockImplementationOnce(async () => await oldSuccess.promise)
+      .mockImplementationOnce(async () => await oldFailure.promise);
+    const replacement: AuthBootstrap = {
+      ...localSession,
+      csrfToken: 'csrf-replacement',
+    };
+    const currentApi = fakeApi(localSession);
+    vi.mocked(currentApi.login).mockResolvedValue(replacement);
+    const { result } = renderHook(() => useAuth(currentApi, { fetchImpl }));
+    await flushAuth();
+    const success = result.current.privateFetch('/old-success');
+    const failure = result.current.privateFetch('/old-failure');
+
+    act(() => result.current.authenticationRequired());
+    await act(async () => {
+      await result.current.login('operator', 'replacement-password');
+    });
+    oldSuccess.resolve(new Response(null, { status: 204 }));
+    oldFailure.reject(new Error('old private failure'));
+    await act(async () => {
+      await expect(success).resolves.toMatchObject({ status: 204 });
+      await expect(failure).rejects.toBeInstanceOf(AuthApiError);
+    });
+
+    expect(result.current.status).toBe('authenticated');
+    expect(result.current.bootstrap).toEqual(replacement);
   });
 
   it('injects CSRF only into private mutations and composes caller cancellation', async () => {
