@@ -10,6 +10,7 @@ import {
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const OTHER_SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
 const SESSION_NAME = 'webterm-tab-550e8400e29b41d4a716446655440000';
+const BUILD_SESSION_NAME = 'webterm-build-123e4567e89b42d3a456426614174000';
 
 const config = {
   executable: '/usr/bin/tmux',
@@ -79,7 +80,11 @@ describe('TmuxSessionPreparer', () => {
 
   it('does not create or mutate options for an existing session', async () => {
     const runner = runnerWith({ exitCode: 0, stdout: '', stderr: '' });
-    const preparer = new TmuxSessionPreparer(config, runner);
+    const preparer = new TmuxSessionPreparer(
+      config,
+      runner,
+      () => OTHER_SESSION_ID,
+    );
 
     await preparer.prepare(SESSION_ID, settings);
 
@@ -96,7 +101,11 @@ describe('TmuxSessionPreparer', () => {
       { exitCode: 1, stdout: '', stderr: '' },
       { exitCode: 0, stdout: '', stderr: '' },
     );
-    const preparer = new TmuxSessionPreparer(config, runner);
+    const preparer = new TmuxSessionPreparer(
+      config,
+      runner,
+      () => OTHER_SESSION_ID,
+    );
 
     await preparer.prepare(SESSION_ID, settings);
 
@@ -104,36 +113,41 @@ describe('TmuxSessionPreparer', () => {
       'new-session',
       '-d',
       '-s',
-      SESSION_NAME,
+      BUILD_SESSION_NAME,
       '/usr/bin/sleep',
       '2147483647',
       ';',
       'set-option',
       '-t',
-      SESSION_NAME,
+      BUILD_SESSION_NAME,
       'history-limit',
       '20000',
       ';',
       'set-option',
       '-t',
-      SESSION_NAME,
+      BUILD_SESSION_NAME,
       'default-shell',
       '/bin/bash',
       ';',
       'set-option',
       '-t',
-      SESSION_NAME,
+      BUILD_SESSION_NAME,
       'default-command',
       '',
       ';',
       'split-window',
       '-d',
       '-t',
-      `${SESSION_NAME}:`,
+      `${BUILD_SESSION_NAME}:`,
       ';',
       'kill-pane',
       '-t',
-      `${SESSION_NAME}:`,
+      `${BUILD_SESSION_NAME}:`,
+      ';',
+      'rename-session',
+      '-t',
+      BUILD_SESSION_NAME,
+      SESSION_NAME,
     ]);
     const creationArgs = vi.mocked(runner.run).mock.calls[1]?.[1];
     expect(creationArgs).not.toContain('-g');
@@ -148,17 +162,30 @@ describe('TmuxSessionPreparer', () => {
     expect(realPaneIndex).toBeLessThan(
       creationArgs?.indexOf('kill-pane') ?? -1,
     );
+    expect(creationArgs?.slice(-4)).toEqual([
+      'rename-session',
+      '-t',
+      BUILD_SESSION_NAME,
+      SESSION_NAME,
+    ]);
+    expect(
+      creationArgs?.filter((argument) => argument === SESSION_NAME),
+    ).toEqual([SESSION_NAME]);
   });
 
   it.each([0, 1, 2])(
-    'cleans a partially created session without exposing cleanup exit %s',
+    'cleans only the build session after a final rename collision with cleanup exit %s',
     async (cleanupExitCode) => {
       const runner = runnerWith(
         { exitCode: 1, stdout: '', stderr: '' },
         { exitCode: 2, stdout: 'private', stderr: 'private' },
         { exitCode: cleanupExitCode, stdout: 'private', stderr: 'private' },
       );
-      const preparer = new TmuxSessionPreparer(config, runner);
+      const preparer = new TmuxSessionPreparer(
+        config,
+        runner,
+        () => OTHER_SESSION_ID,
+      );
 
       await expect(preparer.prepare(SESSION_ID, settings)).rejects.toThrow(
         /^Tmux command failed$/,
@@ -167,10 +194,69 @@ describe('TmuxSessionPreparer', () => {
       expect(runner.run).toHaveBeenNthCalledWith(3, '/usr/bin/tmux', [
         'kill-session',
         '-t',
+        BUILD_SESSION_NAME,
+      ]);
+      expect(runner.run).not.toHaveBeenCalledWith('/usr/bin/tmux', [
+        'kill-session',
+        '-t',
         SESSION_NAME,
       ]);
     },
   );
+
+  it('cleans only the build session when creation throws', async () => {
+    const runner: CommandRunner = {
+      run: vi
+        .fn<CommandRunner['run']>()
+        .mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: '' })
+        .mockRejectedValueOnce(new Error('private creation failure'))
+        .mockResolvedValueOnce({ exitCode: 1, stdout: 'private', stderr: '' }),
+    };
+    const preparer = new TmuxSessionPreparer(
+      config,
+      runner,
+      () => OTHER_SESSION_ID,
+    );
+
+    await expect(preparer.prepare(SESSION_ID, settings)).rejects.toThrow(
+      /^Tmux command failed$/,
+    );
+    expect(runner.run).toHaveBeenNthCalledWith(3, '/usr/bin/tmux', [
+      'kill-session',
+      '-t',
+      BUILD_SESSION_NAME,
+    ]);
+    expect(runner.run).not.toHaveBeenCalledWith('/usr/bin/tmux', [
+      'kill-session',
+      '-t',
+      SESSION_NAME,
+    ]);
+  });
+
+  it.each(['../unsafe', 'not-a-uuid', OTHER_SESSION_ID.toUpperCase()])(
+    'rejects invalid build id %s before commands',
+    async (buildId) => {
+      const runner = runnerWith();
+      const preparer = new TmuxSessionPreparer(config, runner, () => buildId);
+
+      await expect(preparer.prepare(SESSION_ID, settings)).rejects.toThrow(
+        'Invalid session',
+      );
+      expect(runner.run).not.toHaveBeenCalled();
+    },
+  );
+
+  it('bounds a throwing build id source before commands', async () => {
+    const runner = runnerWith();
+    const preparer = new TmuxSessionPreparer(config, runner, () => {
+      throw new Error('private random source failure');
+    });
+
+    await expect(preparer.prepare(SESSION_ID, settings)).rejects.toThrow(
+      /^Invalid session$/,
+    );
+    expect(runner.run).not.toHaveBeenCalled();
+  });
 
   it('kills only the requested session and treats absence as success', async () => {
     const runner = runnerWith({ exitCode: 1, stdout: '', stderr: '' });
@@ -206,6 +292,7 @@ describe('TmuxSessionPreparer', () => {
   it('lists only exact canonical application session names', async () => {
     const stdout = [
       SESSION_NAME,
+      BUILD_SESSION_NAME,
       'unrelated',
       'webterm-tab-123e4567e89b42d3a456426614174000',
       'webterm-tab-123E4567E89B42D3A456426614174000',

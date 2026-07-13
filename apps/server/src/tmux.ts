@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID as nodeRandomUUID } from 'node:crypto';
 
 import { isSessionId } from '@flanterminal/shared';
 
@@ -61,10 +62,22 @@ export function tmuxSessionName(sessionId: string): string {
   return `webterm-tab-${sessionId.replaceAll('-', '')}`;
 }
 
+function tmuxBuildSessionName(randomUUID: () => string): string {
+  let buildId: unknown;
+  try {
+    buildId = randomUUID();
+  } catch {
+    throw new Error('Invalid session');
+  }
+  if (!isSessionId(buildId)) throw new Error('Invalid session');
+  return `webterm-build-${buildId.replaceAll('-', '')}`;
+}
+
 export class TmuxSessionPreparer implements SessionPreparer {
   constructor(
     private readonly config: TmuxConfig,
     private readonly runner: CommandRunner,
+    private readonly randomUUID: () => string = nodeRandomUUID,
   ) {}
 
   async prepare(
@@ -72,33 +85,34 @@ export class TmuxSessionPreparer implements SessionPreparer {
     settings?: SessionRuntimeSettings,
   ): Promise<AttachSpec> {
     const name = tmuxSessionName(sessionId);
-    const windowTarget = `${name}:`;
     if (settings === undefined) throw new Error('Invalid runtime settings');
+    const buildName = tmuxBuildSessionName(this.randomUUID);
+    const windowTarget = `${buildName}:`;
     if (!(await this.exists(sessionId))) {
       try {
         const creation = await this.run([
           'new-session',
           '-d',
           '-s',
-          name,
+          buildName,
           BOOTSTRAP_EXECUTABLE,
           BOOTSTRAP_DURATION_SECONDS,
           ';',
           'set-option',
           '-t',
-          name,
+          buildName,
           'history-limit',
           String(settings.historyLimit),
           ';',
           'set-option',
           '-t',
-          name,
+          buildName,
           'default-shell',
           settings.shell,
           ';',
           'set-option',
           '-t',
-          name,
+          buildName,
           'default-command',
           '',
           ';',
@@ -110,11 +124,16 @@ export class TmuxSessionPreparer implements SessionPreparer {
           'kill-pane',
           '-t',
           windowTarget,
+          ';',
+          'rename-session',
+          '-t',
+          buildName,
+          name,
         ]);
         if (creation.exitCode !== 0) throw new Error();
       } catch {
         try {
-          await this.kill(sessionId);
+          await this.killNamedSession(buildName);
         } catch {
           // Preserve the bounded creation failure after best-effort cleanup.
         }
@@ -137,11 +156,11 @@ export class TmuxSessionPreparer implements SessionPreparer {
   }
 
   async kill(sessionId: string): Promise<void> {
-    const result = await this.run([
-      'kill-session',
-      '-t',
-      tmuxSessionName(sessionId),
-    ]);
+    await this.killNamedSession(tmuxSessionName(sessionId));
+  }
+
+  private async killNamedSession(name: string): Promise<void> {
+    const result = await this.run(['kill-session', '-t', name]);
     if (result.exitCode !== 0 && result.exitCode !== 1) {
       throw new Error('Tmux command failed');
     }
