@@ -326,14 +326,18 @@ describe('SettingsStore lifecycle and observers', () => {
     const first = (settings: WorkspaceSettings) => {
       calls.push(`first:${settings.theme}`);
       unsubscribeSecond();
-      store.subscribe(() => calls.push('late'));
+      store.subscribe(() => {
+        calls.push('late');
+      });
     };
     store.subscribe(first);
     unsubscribeSecond = store.subscribe((settings) => {
       calls.push(`second:${settings.theme}`);
       throw new Error('listener secret');
     });
-    store.subscribe((settings) => calls.push(`third:${settings.theme}`));
+    store.subscribe((settings) => {
+      calls.push(`third:${settings.theme}`);
+    });
     file.replaceResults.push(
       { state: 'not_committed' },
       { state: 'committed' },
@@ -356,6 +360,55 @@ describe('SettingsStore lifecycle and observers', () => {
     await store.replace({ ...defaults, theme: 'light' });
 
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('treats repeated registration of one function as independent subscriptions', async () => {
+    const { store, file } = await initializedStore();
+    const listener = vi.fn();
+    const unsubscribeFirst = store.subscribe(listener);
+    const unsubscribeSecond = store.subscribe(listener);
+    unsubscribeFirst();
+    unsubscribeFirst();
+    file.replaceResults.push({ state: 'committed' }, { state: 'committed' });
+
+    await store.replace({ ...defaults, theme: 'light' });
+    unsubscribeSecond();
+    await store.replace(defaults);
+
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts repeated registration of one function toward the listener cap', async () => {
+    const { store } = await initializedStore();
+    const listener = () => undefined;
+    Array.from({ length: 64 }, () => store.subscribe(listener));
+
+    expect(() => store.subscribe(listener)).toThrow(SettingsStoreError);
+  });
+
+  it('handles an asynchronously rejecting listener without affecting observers or state', async () => {
+    const { store, file } = await initializedStore();
+    const rejection = deferred<void>();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    const otherListener = vi.fn();
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      store.subscribe(() => rejection.promise);
+      store.subscribe(otherListener);
+      file.replaceResults.push({ state: 'committed' });
+
+      await store.replace({ ...defaults, theme: 'light' });
+      rejection.reject(new Error('async listener secret'));
+      await flushAsyncRejections();
+
+      expect(unhandled).toEqual([]);
+      expect(otherListener).toHaveBeenCalledOnce();
+      expect(store.snapshot().theme).toBe('light');
+      expect(store.durabilityReady()).toBe(true);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('caps listeners conservatively and permits a new one after unsubscribe', async () => {
@@ -394,6 +447,28 @@ describe('SettingsStore lifecycle and observers', () => {
     expect(events.every(Object.isFrozen)).toBe(true);
     expect(JSON.stringify(events)).not.toContain('/data');
     expect(JSON.stringify(events)).not.toContain('theme');
+  });
+
+  it('handles an asynchronously rejecting durability callback', async () => {
+    const rejection = deferred<void>();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    const file = new ScriptedSecureJsonFile();
+    file.readResults.push(undefined);
+    file.replaceResults.push({ state: 'committed_durability_uncertain' });
+    const store = createStore(file, defaults, () => rejection.promise);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await store.initialize();
+      rejection.reject(new Error('async durability secret'));
+      await flushAsyncRejections();
+
+      expect(unhandled).toEqual([]);
+      expect(store.snapshot()).toEqual(defaults);
+      expect(store.durabilityReady()).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('uses generic errors without paths, values, or raw causes', async () => {
@@ -487,16 +562,24 @@ class ScriptedSecureJsonFile implements SecureJsonFile {
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
 } {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((accept, decline) => {
     resolve = accept;
+    reject = decline;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function tick(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function flushAsyncRejections(): Promise<void> {
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 async function captureError(promise: Promise<unknown>): Promise<unknown> {

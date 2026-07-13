@@ -20,13 +20,19 @@ const DURABILITY_EVENT = Object.freeze({
 });
 
 export type SettingsStoreDurabilityEvent = typeof DURABILITY_EVENT;
+export type SettingsStoreListener = (
+  settings: WorkspaceSettings,
+) => void | Promise<void>;
+export type SettingsStoreDurabilityListener = (
+  event: SettingsStoreDurabilityEvent,
+) => void | Promise<void>;
 
 export type SettingsStoreOptions = Readonly<{
   dataDir: string;
   defaults: WorkspaceSettings;
   constraints: WorkspaceSettingsConstraints;
   secureFile: SecureJsonFile;
-  onDurabilityEvent?: (event: SettingsStoreDurabilityEvent) => void;
+  onDurabilityEvent?: SettingsStoreDurabilityListener;
 }>;
 
 export class SettingsStoreError extends Error {
@@ -42,8 +48,10 @@ export class SettingsStore {
   private readonly constraints: WorkspaceSettingsConstraints;
   private readonly secureFile: SecureJsonFile;
   private readonly onDurabilityEvent:
-    ((event: SettingsStoreDurabilityEvent) => void) | undefined;
-  private readonly listeners = new Set<(settings: WorkspaceSettings) => void>();
+    SettingsStoreDurabilityListener | undefined;
+  private readonly listeners = new Set<
+    Readonly<{ listener: SettingsStoreListener }>
+  >();
   private operationTail: Promise<void> = Promise.resolve();
   private current: WorkspaceSettings | undefined;
   private ready = false;
@@ -151,19 +159,20 @@ export class SettingsStore {
     });
   }
 
-  subscribe(listener: (settings: WorkspaceSettings) => void): () => void {
+  subscribe(listener: SettingsStoreListener): () => void {
     if (
       typeof listener !== 'function' ||
       this.listeners.size >= MAX_LISTENERS
     ) {
       throw new SettingsStoreError();
     }
-    this.listeners.add(listener);
+    const registration = Object.freeze({ listener });
+    this.listeners.add(registration);
     let subscribed = true;
     return () => {
       if (!subscribed) return;
       subscribed = false;
-      this.listeners.delete(listener);
+      this.listeners.delete(registration);
     };
   }
 
@@ -182,21 +191,26 @@ export class SettingsStore {
   }
 
   private notify(settings: WorkspaceSettings): void {
-    for (const listener of [...this.listeners]) {
-      try {
-        listener(settings);
-      } catch {
-        // Observers cannot affect the authoritative commit state.
-      }
+    for (const registration of [...this.listeners]) {
+      containObserverResult(() => registration.listener(settings));
     }
   }
 
   private emitDurabilityEvent(): void {
-    try {
-      this.onDurabilityEvent?.(DURABILITY_EVENT);
-    } catch {
-      // Telemetry cannot affect the authoritative commit state.
+    if (this.onDurabilityEvent) {
+      containObserverResult(() => this.onDurabilityEvent?.(DURABILITY_EVENT));
     }
+  }
+}
+
+function containObserverResult(
+  invoke: () => void | Promise<void> | undefined,
+): void {
+  try {
+    const result = invoke();
+    if (result) void Promise.resolve(result).catch(() => undefined);
+  } catch {
+    // Observers cannot affect the authoritative commit state.
   }
 }
 
