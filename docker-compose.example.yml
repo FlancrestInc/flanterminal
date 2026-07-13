@@ -12,3 +12,7 @@ services:
       - ./data/home:/home/webterm
 
 volumes: {}
+
+secrets:
+  local_auth_password:
+    file: ${LOCAL_AUTH_PASSWORD_FILE_HOST:-./secrets/local_auth_password}

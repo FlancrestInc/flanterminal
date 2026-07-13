@@ -53,7 +53,9 @@ RUN apt-get update \
     install -d -o webterm -g webterm -m 0755 /home/webterm/scripts; \
     install -d -o webterm -g webterm -m 0700 /app/data; \
     touch /home/webterm/.bash_history; \
-    chown webterm:webterm /home/webterm/.bash_history
+    chown webterm:webterm /home/webterm/.bash_history; \
+    chmod 0600 /home/webterm/.bash_history; \
+    chmod 0750 /home/webterm/scripts
 
 WORKDIR /app
 COPY --from=production-dependencies /build/node_modules ./node_modules
@@ -65,13 +67,22 @@ COPY --from=build /build/apps/client/dist apps/client/dist
 COPY --from=build /build/packages/shared/package.json packages/shared/package.json
 COPY --from=build /build/packages/shared/dist packages/shared/dist
 
+RUN node --input-type=module -e "await import('bcrypt'); await import('jose')" \
+  && test -n "$(find apps/client/dist/assets -type f -name 'JetBrainsMonoNerdFont-Regular-*.ttf' -print -quit)" \
+  && test -n "$(find apps/client/dist/assets -type f -name 'terminal-bell-*.wav' -print -quit)" \
+  && chmod -R a-w /app \
+  && chown webterm:webterm /app/data \
+  && chmod 0700 /app/data
+
 ENV HOME=/home/webterm \
     USER=webterm \
     LOGNAME=webterm \
-    TERM=xterm-256color
+    TERM=xterm-256color \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 USER webterm
 EXPOSE ${APP_PORT}
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=6 \
-  CMD node -e "fetch('http://127.0.0.1:' + (process.env.APP_PORT || '3000') + '/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD node -e "const b=process.env.APP_BASE_PATH==='/'?'':(process.env.APP_BASE_PATH||'');fetch('http://127.0.0.1:'+(process.env.APP_PORT||'3000')+b+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "apps/server/dist/index.js"]

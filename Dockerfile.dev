@@ -25,7 +25,9 @@ RUN apt-get update \
     install -d -o webterm -g webterm -m 0755 /home/webterm/scripts; \
     install -d -o webterm -g webterm -m 0700 /app/data; \
     touch /home/webterm/.bash_history; \
-    chown webterm:webterm /home/webterm/.bash_history
+    chown webterm:webterm /home/webterm/.bash_history; \
+    chmod 0600 /home/webterm/.bash_history; \
+    chmod 0750 /home/webterm/scripts
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/client/package.json apps/client/package.json
@@ -33,7 +35,12 @@ COPY apps/server/package.json apps/server/package.json
 COPY packages/shared/package.json packages/shared/package.json
 RUN npm ci
 COPY --chown=webterm:webterm . .
-ENV HOME=/home/webterm USER=webterm LOGNAME=webterm TERM=xterm-256color
+ENV HOME=/home/webterm \
+    USER=webterm \
+    LOGNAME=webterm \
+    TERM=xterm-256color \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 USER webterm
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["npm", "run", "dev"]

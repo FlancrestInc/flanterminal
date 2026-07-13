@@ -11,6 +11,16 @@ test-results
 .env.*
 !.env.example
 data/home
+data/app
+secrets
+**/secrets
+.ssh
+**/.ssh
+id_rsa
+id_ecdsa
+id_ed25519
+*.pem
+*.key
 keys
 logs
 *.log

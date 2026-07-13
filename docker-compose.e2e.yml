@@ -12,10 +12,19 @@ services:
       APP_BASE_PATH: ${E2E_APP_BASE_PATH:-/}
       APP_PUBLIC_URL: http://localhost:3000
       AUTH_MODE: none
+      AUTH_IDLE_MINUTES: 60
+      AUTH_ABSOLUTE_HOURS: 24
+      AUTH_SESSION_MAX_COUNT: 32
       DEFAULT_SHELL: /bin/bash
+      ALLOWED_SHELLS: /bin/bash
       DEFAULT_FONT_SIZE: 14
+      MAX_FONT_SIZE: 32
       XTERM_SCROLLBACK: 10000
+      MAX_XTERM_SCROLLBACK: 100000
       TMUX_HISTORY_LIMIT: 20000
+      MAX_TMUX_HISTORY_LIMIT: 1000000
+      MAX_STALE_SESSION_CLEANUP_HOURS: 8760
+      SESSION_CLEANUP_INTERVAL_MINUTES: 15
       WS_HEARTBEAT_SECONDS: 5
       WS_MAX_BUFFER_BYTES: 1048576
       RESIZE_DEBOUNCE_MS: 50
@@ -25,6 +34,7 @@ services:
       HOME_DIR: /home/webterm
       DATA_DIR: /app/data
       SESSION_MAX_COUNT: 20
+      TRUST_PROXY: 'false'
     volumes:
       - e2e-app:/app/data
       - e2e-home:/home/webterm
@@ -42,7 +52,7 @@ services:
           CMD,
           node,
           -e,
-          "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "const b=process.env.APP_BASE_PATH==='/'?'':process.env.APP_BASE_PATH;fetch('http://127.0.0.1:3000'+b+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 3s
       timeout: 2s

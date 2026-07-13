@@ -10,6 +10,13 @@ secret=PHASE2_SECRET_NOT_IN_LOGS
 hold_pid=
 hold_log=
 hold_stop=/tmp/.flanterminal-verify-stop
+bootstrap_secret=
+empty_secret=
+invalid_secret=
+local_config=
+cloudflare_config=
+negative_containers=
+negative_volumes=
 
 case $# in
   0) check=all ;;
@@ -36,6 +43,17 @@ cleanup() {
     wait "$hold_pid" >/dev/null 2>&1 || true
   fi
   [ -z "$hold_log" ] || rm -f "$hold_log"
+  [ -z "$bootstrap_secret" ] || rm -f "$bootstrap_secret"
+  [ -z "$empty_secret" ] || rm -f "$empty_secret"
+  [ -z "$invalid_secret" ] || rm -f "$invalid_secret"
+  [ -z "$local_config" ] || rm -f "$local_config"
+  [ -z "$cloudflare_config" ] || rm -f "$cloudflare_config"
+  for negative_container in $negative_containers; do
+    docker rm -f "$negative_container" >/dev/null 2>&1 || true
+  done
+  for negative_volume in $negative_volumes; do
+    docker volume rm -f "$negative_volume" >/dev/null 2>&1 || true
+  done
   dc exec -T app rm -f "$hold_stop" >/dev/null 2>&1 || true
   dc down -v --remove-orphans >/dev/null 2>&1 || true
 }
@@ -44,6 +62,144 @@ trap cleanup EXIT INT TERM
 fail() {
   printf 'container verification failed: %s\n' "$1" >&2
   exit 1
+}
+
+require_file_pattern() {
+  file=$1
+  pattern=$2
+  message=$3
+  rg -q -- "$pattern" "$file" || fail "$message"
+}
+
+reject_file_pattern() {
+  file=$1
+  pattern=$2
+  message=$3
+  rg -qi -- "$pattern" "$file" && fail "$message"
+  return 0
+}
+
+verify_static_hardening() {
+  [ -f docker-compose.cloudflare.yml ] || fail 'Cloudflare Compose file is unavailable'
+  require_file_pattern Dockerfile '^FROM node:[^ ]+-bookworm-slim AS dependencies$' 'production build is not based on Debian slim'
+  require_file_pattern Dockerfile '^FROM node:[^ ]+-bookworm-slim AS runtime$' 'production runtime is not based on Debian slim'
+  require_file_pattern Dockerfile 'npm prune --omit=dev' 'production dependencies are not pruned'
+  require_file_pattern Dockerfile 'USER webterm' 'production runtime is not non-root'
+  require_file_pattern Dockerfile 'bcrypt' 'bcrypt native runtime verification is unavailable'
+  require_file_pattern Dockerfile 'jose' 'jose runtime verification is unavailable'
+  require_file_pattern Dockerfile 'JetBrainsMonoNerdFont-Regular' 'bundled font verification is unavailable'
+  require_file_pattern Dockerfile 'terminal-bell' 'bundled bell verification is unavailable'
+  require_file_pattern Dockerfile 'HEALTHCHECK' 'image health check is unavailable'
+  for dockerfile in Dockerfile Dockerfile.dev Dockerfile.e2e; do
+    reject_file_pattern "$dockerfile" '^[[:space:]]*(ARG|ENV)[[:space:]].*(PASSWORD|SECRET)' "password or secret metadata is present in $dockerfile"
+    reject_file_pattern "$dockerfile" '^[[:space:]]*COPY.*(secret|private.?key|id_(rsa|ecdsa|ed25519))' "secret material may be copied by $dockerfile"
+  done
+  require_file_pattern .dockerignore '^secrets(?:/|$)' 'host secret directory is not excluded from build context'
+  require_file_pattern .gitignore '^secrets/$' 'host secret directory is not excluded from version control'
+
+  require_file_pattern docker-compose.yml 'AUTH_MODE:.*local' 'default Compose does not enable local authentication'
+  require_file_pattern docker-compose.yml 'LOCAL_AUTH_PASSWORD_FILE:.*\/run\/secrets\/local_auth_password' 'default Compose does not mount the local password at the fixed runtime path'
+  require_file_pattern docker-compose.yml '^secrets:' 'default Compose has no top-level secret declaration'
+  require_file_pattern docker-compose.yml 'source: local_auth_password' 'default Compose has no local password secret source'
+  require_file_pattern docker-compose.yml 'HOST_BIND_ADDRESS:-127\.0\.0\.1' 'default host bind address is not loopback'
+  reject_file_pattern docker-compose.yml 'node_modules' 'default Compose persists node_modules'
+  reject_file_pattern docker-compose.yml 'docker\.sock|privileged:[[:space:]]*true' 'default Compose grants Docker or privileged access'
+
+  reject_file_pattern docker-compose.cloudflare.yml 'LOCAL_AUTH_PASSWORD|local_auth_password|^[[:space:]]*secrets:' 'Cloudflare Compose depends on a local password secret'
+  require_file_pattern docker-compose.cloudflare.yml 'AUTH_MODE:.*cloudflare-access' 'Cloudflare Compose does not enable Cloudflare Access'
+  require_file_pattern docker-compose.cloudflare.yml 'CLOUDFLARE_TEAM_DOMAIN' 'Cloudflare team domain is unavailable'
+  require_file_pattern docker-compose.cloudflare.yml 'CLOUDFLARE_ACCESS_AUD' 'Cloudflare Access audience is unavailable'
+  require_file_pattern docker-compose.cloudflare.yml 'TRUST_PROXY:' 'Cloudflare trusted proxy configuration is unavailable'
+  require_file_pattern docker-compose.cloudflare.yml 'HOST_BIND_ADDRESS:-127\.0\.0\.1' 'Cloudflare host bind address does not default to loopback'
+  reject_file_pattern docker-compose.cloudflare.yml 'TRUSTED_AUTH_HEADER' 'Cloudflare Compose enables generic trusted-header behavior'
+  reject_file_pattern docker-compose.cloudflare.yml 'node_modules' 'Cloudflare Compose persists node_modules'
+  reject_file_pattern docker-compose.cloudflare.yml 'docker\.sock|privileged:[[:space:]]*true' 'Cloudflare Compose grants Docker or privileged access'
+}
+
+verify_compose_models() {
+  local_config=$(mktemp)
+  cloudflare_config=$(mktemp)
+  docker compose -f docker-compose.yml config --format json >"$local_config"
+  LOCAL_AUTH_PASSWORD_FILE_HOST=/definitely/missing \
+    docker compose -f docker-compose.cloudflare.yml config --format json >"$cloudflare_config"
+  rg -qi 'local_auth_password|LOCAL_AUTH_PASSWORD|"secrets"' "$cloudflare_config" &&
+    fail 'Cloudflare resolved configuration contains a local secret dependency'
+  node - "$local_config" "$cloudflare_config" <<'NODE'
+const fs = require('node:fs');
+const [localPath, cloudflarePath] = process.argv.slice(2);
+const local = JSON.parse(fs.readFileSync(localPath, 'utf8'));
+const cloudflare = JSON.parse(fs.readFileSync(cloudflarePath, 'utf8'));
+const hardeningKeys = [
+  'build', 'cap_drop', 'healthcheck', 'mem_limit', 'pids_limit', 'ports',
+  'read_only', 'restart', 'security_opt', 'tmpfs', 'volumes',
+];
+for (const key of hardeningKeys) {
+  if (JSON.stringify(local.services.app[key]) !== JSON.stringify(cloudflare.services.app[key])) {
+    throw new Error(`Compose hardening differs for ${key}`);
+  }
+}
+const expectedMounts = ['/app/data', '/home/webterm'];
+for (const service of [local.services.app, cloudflare.services.app]) {
+  const mounts = service.volumes.map(({ target }) => target).sort();
+  if (JSON.stringify(mounts) !== JSON.stringify(expectedMounts)) {
+    throw new Error(`Unexpected writable volumes: ${mounts.join(', ')}`);
+  }
+  if (service.cap_add !== undefined || service.privileged === true) {
+    throw new Error('Compose adds privileges');
+  }
+}
+if (local.services.app.environment.AUTH_MODE !== 'local') throw new Error('Local auth is not enabled');
+if (cloudflare.services.app.environment.AUTH_MODE !== 'cloudflare-access') throw new Error('Cloudflare auth is not enabled');
+if (cloudflare.services.app.environment.TRUST_PROXY !== 'false') throw new Error('Cloudflare generic trust is enabled');
+if (local.services.app.ports[0].host_ip !== '127.0.0.1' || cloudflare.services.app.ports[0].host_ip !== '127.0.0.1') {
+  throw new Error('Compose default publish address is not loopback');
+}
+NODE
+}
+
+verify_failed_local_bootstrap() {
+  case_name=$1
+  secret_file=${2-}
+  secret_value=${3-}
+  negative_container="${project}_negative_${case_name}"
+  negative_data="${project}_negative_data_${case_name}"
+  negative_home="${project}_negative_home_${case_name}"
+  negative_containers="$negative_containers $negative_container"
+  negative_volumes="$negative_volumes $negative_data $negative_home"
+  secret_mount=
+  if [ -n "$secret_file" ]; then
+    secret_mount="--mount type=bind,src=$secret_file,dst=/run/secrets/local_auth_password,readonly"
+  fi
+  # shellcheck disable=SC2086
+  docker run -d --name "$negative_container" \
+    --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
+    --tmpfs /run:rw,noexec,nosuid,nodev,size=1m,mode=0755,uid=1000,gid=1000 \
+    --mount "type=volume,src=$negative_data,dst=/app/data" \
+    --mount "type=volume,src=$negative_home,dst=/home/webterm" \
+    $secret_mount \
+    -e AUTH_MODE=local \
+    -e LOCAL_AUTH_PASSWORD_FILE=/run/secrets/local_auth_password \
+    "$image" >/dev/null
+  attempt=0
+  while [ "$(docker inspect -f '{{.State.Running}}' "$negative_container")" = true ]; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 100 ] || fail "$case_name local bootstrap did not exit"
+    sleep 0.1
+  done
+  [ "$(docker inspect -f '{{.State.ExitCode}}' "$negative_container")" -ne 0 ] ||
+    fail "$case_name local bootstrap exited successfully"
+  container_logs=$(docker logs "$negative_container" 2>&1)
+  printf '%s' "$container_logs" | rg -q 'server_started' &&
+    fail "$case_name local bootstrap listened before failing"
+  if [ -n "$secret_value" ]; then
+    printf '%s' "$container_logs" | rg -F -q -- "$secret_value" &&
+      fail "$case_name local bootstrap exposed the password in logs"
+  fi
+  docker rm "$negative_container" >/dev/null
+  negative_containers=$(printf '%s' "$negative_containers" | sed "s/ $negative_container//")
+  docker volume rm "$negative_data" "$negative_home" >/dev/null
+  negative_volumes=$(printf '%s' "$negative_volumes" | sed "s/ $negative_data//; s/ $negative_home//")
 }
 
 api() {
@@ -163,11 +319,18 @@ wait_for_bridge_count() {
 printf 'checking: hardening\n'
 [ -f Dockerfile ] || fail 'Dockerfile is unavailable'
 rg -q "JetBrainsMonoNerdFont-Regular.ttf" apps/client/src/theme.css || fail 'bundled font unavailable'
+verify_static_hardening
+bootstrap_secret=$(mktemp)
+printf '%s\n' 'phase3-container-test-only' >"$bootstrap_secret"
+chmod 0600 "$bootstrap_secret"
+export LOCAL_AUTH_PASSWORD_FILE_HOST=$bootstrap_secret
+verify_compose_models
 dc down -v --remove-orphans >/dev/null 2>&1 || true
 dc config --quiet
 dc up -d --build --wait
 container=$(dc ps -q app)
 [ -n "$container" ] || fail 'app container is unavailable'
+image=$(docker inspect -f '{{.Image}}' "$container")
 [ "$(docker inspect -f '{{.Config.User}}' "$container")" = webterm ] || fail 'server user is not webterm'
 [ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$container")" = true ] || fail 'root filesystem is writable'
 [ "$(docker inspect -f '{{.HostConfig.Privileged}}' "$container")" = false ] || fail 'container is privileged'
@@ -180,7 +343,58 @@ docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$container
 mounts=$(docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$container")
 printf '%s\n' "$mounts" | rg -q '^/app/data$' || fail 'application data volume is unavailable'
 printf '%s\n' "$mounts" | rg -q '^/home/webterm$' || fail 'home volume is unavailable'
-dc exec -T app sh -c '! test -w /app && test -w /app/data && test -w "$HOME" && [ "$(stat -c %u /app/data)" = "$(id -u)" ]'
+printf '%s\n' "$mounts" | rg -q '^/run/secrets/local_auth_password$' || fail 'local password secret is unavailable'
+unexpected_mounts=$(printf '%s\n' "$mounts" | rg -v '^(/app/data|/home/webterm|/run/secrets/local_auth_password)$' || true)
+[ -z "$unexpected_mounts" ] || fail 'unexpected persistent or secret mounts are present'
+dc exec -T app sh -c '
+  ! test -w /app &&
+  ! test -w /app/apps/server/dist/index.js &&
+  ! test -w /app/apps/client/dist/index.html &&
+  test -w /app/data && test -w "$HOME" &&
+  [ "$(stat -c %u /app/data)" = "$(id -u)" ] &&
+  [ "$(stat -c %a /app/data)" = 700 ] &&
+  [ "$(stat -c %u "$HOME")" = "$(id -u)" ] &&
+  [ "$(stat -c %a "$HOME/.ssh")" = 700 ] &&
+  [ "$(stat -c %a "$HOME/.bash_history")" = 600 ] &&
+  [ "$(stat -c %a /app/data/auth.json)" = 600 ] &&
+  [ "$(stat -c %a /app/data/settings.json)" = 600 ] &&
+  [ -r /run/secrets/local_auth_password ] &&
+  [ "$(stat -c %a /run/secrets/local_auth_password)" = 600 ] &&
+  node --input-type=module -e "await import(\"bcrypt\"); await import(\"jose\")" &&
+  test -n "$(find /app/apps/client/dist/assets -name "JetBrainsMonoNerdFont-Regular-*.ttf" -print -quit)" &&
+  test -n "$(find /app/apps/client/dist/assets -name "terminal-bell-*.wav" -print -quit)"
+'
+
+image_environment=$(docker image inspect -f '{{json .Config.Env}}' "$image")
+printf '%s' "$image_environment" | rg -qi 'PASSWORD|SECRET|phase3-container-test-only|\$2[aby]\$' && fail 'secret metadata is present in image configuration'
+image_history=$(docker image history --no-trunc --format '{{.CreatedBy}}' "$image")
+printf '%s' "$image_history" | rg -qi 'PASSWORD|SECRET|phase3-container-test-only|\$2[aby]\$|PRIVATE KEY' && fail 'secret material is present in image history'
+docker run --rm --entrypoint sh "$image" -c '
+  ! find /app /home/webterm -xdev -type f \( -name "id_rsa" -o -name "id_ecdsa" -o -name "id_ed25519" -o -name "*.pem" -o -name "*.key" \) -print -quit | grep -q . &&
+  ! grep -R -a -E "phase3-container-test-only|^-----BEGIN (OPENSSH |RSA |EC )?PRIVATE KEY-----" /app /home/webterm 2>/dev/null
+' || fail 'secret or private-key material is present in final image filesystem'
+
+exposure_marker=PHASE3_HTTP_PRIVATE_MARKER
+dc exec -T app sh -c "printf '%s' '$exposure_marker' > /app/data/http-private; printf '%s' '$exposure_marker' > \"\$HOME/.ssh/id_ed25519\""
+dc exec -T app node --input-type=module - "$exposure_marker" <<'NODE'
+const marker = process.argv[2];
+const base = `http://127.0.0.1:${process.env.APP_PORT}`;
+for (const path of ['/app/data/http-private', '/data/http-private', '/home/webterm/.ssh/id_ed25519', '/.ssh/id_ed25519']) {
+  const response = await fetch(base + path);
+  if ((await response.text()).includes(marker)) process.exit(1);
+}
+NODE
+
+empty_secret=$(mktemp)
+invalid_secret=$(mktemp)
+chmod 0600 "$empty_secret" "$invalid_secret"
+printf '%s\n' short >"$invalid_secret"
+verify_failed_local_bootstrap missing
+verify_failed_local_bootstrap empty "$empty_secret"
+verify_failed_local_bootstrap invalid "$invalid_secret" short
+rm -f "$empty_secret" "$invalid_secret"
+empty_secret=
+invalid_secret=
 printf 'hardening checks passed\n'
 [ "$check" = all ] || exit 0
 
