@@ -1,3 +1,8 @@
+import {
+  createServer,
+  request as createHttpRequest,
+  type IncomingHttpHeaders,
+} from 'node:http';
 import { inspect } from 'node:util';
 import { describe, expect, it } from 'vitest';
 
@@ -163,6 +168,7 @@ describe('TrustedHeaderAuthProvider', () => {
     const result = provider.authenticate({
       ...base,
       headers: { ...base.headers, 'x-FoRwArDeD-uSeR': 'cafe\u0301' },
+      headersDistinct: { 'x-forwarded-user': ['cafe\u0301'] },
     });
 
     expect(result).toEqual({
@@ -176,9 +182,12 @@ describe('TrustedHeaderAuthProvider', () => {
     undefined,
     '',
     ['person', 'other'],
+    'person,other',
     'a'.repeat(129),
     '\u0000person',
     'per\u200bson',
+    'per\u2028son',
+    'per\u2029son',
     '\ud800',
   ])('rejects absent, duplicate, or unsafe identity %j', (identity) => {
     expectProviderError(() => setup().authenticate(request({ identity })));
@@ -196,6 +205,110 @@ describe('TrustedHeaderAuthProvider', () => {
         },
       }),
     );
+  });
+
+  it('requires one original identity field line from preserved headers', () => {
+    const base = request();
+    expectProviderError(() =>
+      setup().authenticate({
+        remoteAddress: base.remoteAddress,
+        headers: base.headers,
+      }),
+    );
+    expect(
+      setup().authenticate({
+        ...base,
+        headers: { ...base.headers, 'x-auth-user': ['one'] },
+        headersDistinct: { 'x-auth-user': ['one'] },
+      }),
+    ).toMatchObject({ identityLabel: 'one' });
+    expect(
+      setup().authenticate({
+        ...base,
+        headersDistinct: undefined,
+        rawHeaders: ['X-Auth-User', 'person@example.test'],
+      }),
+    ).toMatchObject({ identityLabel: 'person@example.test' });
+    expectProviderError(() =>
+      setup().authenticate({
+        ...base,
+        headers: { ...base.headers, 'x-auth-user': 'first, second' },
+        headersDistinct: undefined,
+        rawHeaders: ['X-Auth-User', 'first', 'x-auth-user', 'second'],
+      }),
+    );
+    expectProviderError(() =>
+      setup().authenticate({
+        ...base,
+        headers: { ...base.headers, 'x-auth-user': 'first, second' },
+        headersDistinct: { 'x-auth-user': ['first', 'second'] },
+      }),
+    );
+    expectProviderError(() =>
+      setup().authenticate({
+        ...base,
+        headers: { ...base.headers, 'x-auth-user': 'first, second' },
+        headersDistinct: { 'x-auth-user': ['first', 'second'] },
+        rawHeaders: ['X-Auth-User', 'first', 'x-auth-user', 'second'],
+      }),
+    );
+  });
+
+  it('rejects duplicate identity lines preserved by the Node HTTP parser', async () => {
+    const provider = setup({ trustProxy: ['127.0.0.1/32'] });
+    const observed: Array<
+      Readonly<{
+        merged: string | string[] | undefined;
+        distinct: readonly string[] | undefined;
+        rawIdentityValues: readonly string[];
+      }>
+    > = [];
+    const server = createServer((incoming, response) => {
+      observed.push({
+        merged: incoming.headers['x-auth-user'],
+        distinct: incoming.headersDistinct['x-auth-user'],
+        rawIdentityValues: rawHeaderValues(incoming.rawHeaders, 'x-auth-user'),
+      });
+      try {
+        provider.authenticate({
+          remoteAddress: incoming.socket.remoteAddress,
+          headers: incoming.headers,
+          headersDistinct: incoming.headersDistinct,
+          rawHeaders: incoming.rawHeaders,
+        });
+        response.writeHead(204).end();
+      } catch {
+        response.writeHead(401).end();
+      }
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+
+    try {
+      const address = server.address();
+      if (address === null || typeof address === 'string') throw new Error();
+      await expect(sendIdentityRequest(address.port, 'one')).resolves.toBe(204);
+      await expect(
+        sendIdentityRequest(address.port, ['first', 'second']),
+      ).resolves.toBe(401);
+      expect(observed).toEqual([
+        {
+          merged: 'one',
+          distinct: ['one'],
+          rawIdentityValues: ['one'],
+        },
+        {
+          merged: 'first, second',
+          distinct: ['first', 'second'],
+          rawIdentityValues: ['first', 'second'],
+        },
+      ]);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
   });
 
   it('returns generic errors without reflecting headers or private state', () => {
@@ -236,6 +349,10 @@ function request(
     identity?: string | readonly string[] | undefined;
   }> = {},
 ): TrustedHeaderRequest {
+  const identity =
+    options.identity === undefined && !Object.hasOwn(options, 'identity')
+      ? 'person@example.test'
+      : options.identity;
   return {
     remoteAddress: options.remoteAddress ?? '10.0.0.2',
     headers: {
@@ -255,12 +372,52 @@ function request(
         !Object.hasOwn(options, 'xForwardedHost')
           ? 'terminal.example.test'
           : options.xForwardedHost,
+      'x-auth-user': identity,
+    },
+    headersDistinct: {
       'x-auth-user':
-        options.identity === undefined && !Object.hasOwn(options, 'identity')
-          ? 'person@example.test'
-          : options.identity,
+        identity === undefined
+          ? undefined
+          : typeof identity === 'string'
+            ? [identity]
+            : identity,
     },
   };
+}
+
+function sendIdentityRequest(
+  port: number,
+  identity: string | readonly string[],
+): Promise<number | undefined> {
+  return new Promise((resolve, reject) => {
+    const headers: IncomingHttpHeaders = {
+      host: 'internal:3000',
+      'x-forwarded-for': '198.51.100.1',
+      'x-forwarded-proto': 'https',
+      'x-forwarded-host': 'terminal.example.test',
+      'X-Auth-User': [
+        ...(typeof identity === 'string' ? [identity] : identity),
+      ],
+    };
+    const outgoing = createHttpRequest(
+      { host: '127.0.0.1', port, method: 'GET', headers },
+      (incoming) => {
+        incoming.resume();
+        incoming.once('end', () => resolve(incoming.statusCode));
+      },
+    );
+    outgoing.once('error', reject);
+    outgoing.end();
+  });
+}
+
+function rawHeaderValues(rawHeaders: readonly string[], wanted: string) {
+  const values: string[] = [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (rawHeaders[index]?.toLowerCase() === wanted)
+      values.push(rawHeaders[index + 1]!);
+  }
+  return values;
 }
 
 function expectProviderError(operation: () => unknown) {

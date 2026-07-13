@@ -171,6 +171,35 @@ describe('loadConfig', () => {
       cloudflareTeamDomain: 'https://team.cloudflareaccess.com',
       cloudflareAccessAud: 'audience_123',
     });
+
+    for (const teamDomain of [
+      'https://localhost',
+      'https://127.0.0.1',
+      'https://10.0.0.1',
+      'https://[::1]',
+      'https://example.com',
+      'https://cloudflareaccess.com',
+      'https://a.b.cloudflareaccess.com',
+      'https://team.cloudflareaccess.com.evil.test',
+      'https://-team.cloudflareaccess.com',
+      'https://team-.cloudflareaccess.com',
+      `https://${'a'.repeat(64)}.cloudflareaccess.com`,
+    ]) {
+      expect(() =>
+        loadConfig({
+          AUTH_MODE: 'cloudflare-access',
+          CLOUDFLARE_TEAM_DOMAIN: teamDomain,
+          CLOUDFLARE_ACCESS_AUD: 'audience',
+        }),
+      ).toThrow('Invalid server configuration');
+    }
+    expect(
+      loadConfig({
+        AUTH_MODE: 'cloudflare-access',
+        CLOUDFLARE_TEAM_DOMAIN: 'https://my-team.cloudflareaccess.com',
+        CLOUDFLARE_ACCESS_AUD: 'audience',
+      }).cloudflareTeamDomain,
+    ).toBe('https://my-team.cloudflareaccess.com');
   });
 
   it('bounds safe usernames and Cloudflare audience tokens', () => {

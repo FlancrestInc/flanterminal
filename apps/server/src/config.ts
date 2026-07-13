@@ -23,6 +23,7 @@ const forbiddenCharacterPattern = /[\p{Cc}\p{Cs}\p{Zl}\p{Zp}\p{Cf}]/u;
 const httpTokenPattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const safeTokenPattern = /^[A-Za-z0-9_-]+$/;
 const usernamePattern = /^[A-Za-z0-9._@-]+$/;
+const cloudflareTeamLabelPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const logLevels = [
   'trace',
   'debug',
@@ -74,7 +75,30 @@ const safeAbsolutePathSchema = z
   );
 
 const publicUrlSchema = originSchema(['http:', 'https:']);
-const cloudflareDomainSchema = originSchema(['https:']);
+const cloudflareDomainSchema = z.string().transform((value, context) => {
+  try {
+    const url = new URL(value);
+    const labels = url.hostname.split('.');
+    if (
+      url.protocol !== 'https:' ||
+      url.pathname !== '/' ||
+      url.search !== '' ||
+      url.hash !== '' ||
+      url.username !== '' ||
+      url.password !== '' ||
+      url.port !== '' ||
+      labels.length !== 3 ||
+      !cloudflareTeamLabelPattern.test(labels[0]!) ||
+      labels[1] !== 'cloudflareaccess' ||
+      labels[2] !== 'com'
+    )
+      throw new Error();
+    return url.origin;
+  } catch {
+    context.addIssue({ code: 'custom', message: 'invalid team origin' });
+    return z.NEVER;
+  }
+});
 
 function originSchema(protocols: readonly string[]) {
   return z.string().transform((value, context) => {

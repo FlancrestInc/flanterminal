@@ -13,19 +13,26 @@ import { type UpstreamIdentity } from './auth-types.js';
 
 const MAX_HEADER_FIELDS = 128;
 const MAX_HEADER_NAME_BYTES = 256;
+const MAX_PRESERVED_HEADER_BYTES = 64 * 1024;
+const MAX_RAW_HEADER_ITEMS = MAX_HEADER_FIELDS * 2;
+const MAX_DISTINCT_HEADER_VALUES = 256;
 const MAX_FORWARDED_FOR_BYTES = 4_096;
 const MAX_FORWARDED_HOPS = 16;
 const MAX_ADDRESS_BYTES = 128;
 const MAX_IDENTITY_BYTES = 128;
 const MAX_TRUST_RANGES = 64;
 const headerNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-const unsafeIdentityPattern = /[\p{Cc}\p{Cf}\p{Cs}]/u;
+const unsafeIdentityPattern = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 const utf8 = new TextEncoder();
 
-export type TrustedHeaderRequest = Readonly<{
+export type TrustedHeaderRequestView = Readonly<{
   remoteAddress: string | undefined;
   headers: UpstreamHeaderView;
+  headersDistinct?:
+    Readonly<Record<string, readonly string[] | undefined>> | undefined;
+  rawHeaders?: readonly string[] | undefined;
 }>;
+export type TrustedHeaderRequest = TrustedHeaderRequestView;
 
 export type TrustedHeaderAuthProviderOptions = Readonly<{
   trustProxy: false | number | readonly string[];
@@ -33,7 +40,7 @@ export type TrustedHeaderAuthProviderOptions = Readonly<{
   publicOrigin: string;
 }>;
 
-export class TrustedHeaderAuthProvider implements UpstreamIdentityProvider<TrustedHeaderRequest> {
+export class TrustedHeaderAuthProvider implements UpstreamIdentityProvider<TrustedHeaderRequestView> {
   readonly #trust: (address: string, index: number) => boolean;
   readonly #identityHeader: string;
   readonly #publicOrigin: string;
@@ -65,7 +72,7 @@ export class TrustedHeaderAuthProvider implements UpstreamIdentityProvider<Trust
     }
   }
 
-  authenticate(request: TrustedHeaderRequest): UpstreamIdentity {
+  authenticate(request: TrustedHeaderRequestView): UpstreamIdentity {
     try {
       const remoteAddress = validateAddress(request.remoteAddress);
       if (!this.#trust(remoteAddress, 0)) throw new Error();
@@ -107,8 +114,8 @@ export class TrustedHeaderAuthProvider implements UpstreamIdentityProvider<Trust
         );
       }
 
-      const rawIdentity = requiredStringHeader(
-        request.headers,
+      const rawIdentity = originalIdentityHeader(
+        request,
         names,
         this.#identityHeader,
       );
@@ -128,17 +135,114 @@ export class TrustedHeaderAuthProvider implements UpstreamIdentityProvider<Trust
   }
 }
 
+function originalIdentityHeader(
+  request: TrustedHeaderRequestView,
+  names: readonly string[],
+  wanted: string,
+): string {
+  const merged = matchingHeaderValue(request.headers, names, wanted);
+  const mergedValue = oneHeaderValue(merged);
+  if (mergedValue.includes(',')) throw new Error();
+
+  const preserved: string[] = [];
+  if (request.headersDistinct !== undefined)
+    preserved.push(identityFromDistinct(request.headersDistinct, wanted));
+  if (request.rawHeaders !== undefined)
+    preserved.push(identityFromRaw(request.rawHeaders, wanted));
+  if (
+    preserved.length === 0 ||
+    preserved.some((value) => value !== mergedValue)
+  )
+    throw new Error();
+  return mergedValue;
+}
+
+function oneHeaderValue(value: UpstreamHeaderValue): string {
+  if (typeof value === 'string') return value;
+  if (
+    !Array.isArray(value) ||
+    value.length !== 1 ||
+    typeof value[0] !== 'string'
+  )
+    throw new Error();
+  return value[0];
+}
+
+function identityFromDistinct(
+  distinct: Readonly<Record<string, readonly string[] | undefined>>,
+  wanted: string,
+): string {
+  if (
+    typeof distinct !== 'object' ||
+    distinct === null ||
+    Array.isArray(distinct)
+  )
+    throw new Error();
+  const names = Object.keys(distinct);
+  if (names.length > MAX_HEADER_FIELDS) throw new Error();
+  let valueCount = 0;
+  let byteCount = 0;
+  for (const name of names) {
+    validateHeaderName(name);
+    const values = distinct[name];
+    if (!Array.isArray(values)) throw new Error();
+    valueCount += values.length;
+    if (valueCount > MAX_DISTINCT_HEADER_VALUES) throw new Error();
+    for (const value of values) {
+      if (typeof value !== 'string') throw new Error();
+      byteCount += utf8.encode(value).byteLength;
+      if (byteCount > MAX_PRESERVED_HEADER_BYTES) throw new Error();
+    }
+  }
+  const matches = names.filter((name) => name.toLowerCase() === wanted);
+  if (matches.length !== 1) throw new Error();
+  const values = distinct[matches[0]!];
+  if (!Array.isArray(values) || values.length !== 1) throw new Error();
+  return values[0]!;
+}
+
+function identityFromRaw(
+  rawHeaders: readonly string[],
+  wanted: string,
+): string {
+  if (
+    !Array.isArray(rawHeaders) ||
+    rawHeaders.length === 0 ||
+    rawHeaders.length > MAX_RAW_HEADER_ITEMS ||
+    rawHeaders.length % 2 !== 0
+  )
+    throw new Error();
+  let byteCount = 0;
+  const matches: string[] = [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index];
+    const value = rawHeaders[index + 1];
+    if (typeof name !== 'string' || typeof value !== 'string')
+      throw new Error();
+    validateHeaderName(name);
+    byteCount += utf8.encode(name).byteLength + utf8.encode(value).byteLength;
+    if (byteCount > MAX_PRESERVED_HEADER_BYTES) throw new Error();
+    if (name.toLowerCase() === wanted) matches.push(value);
+  }
+  if (matches.length !== 1) throw new Error();
+  return matches[0]!;
+}
+
+function validateHeaderName(name: string) {
+  if (
+    utf8.encode(name).byteLength > MAX_HEADER_NAME_BYTES ||
+    !headerNamePattern.test(name)
+  )
+    throw new Error();
+}
+
 function headerNames(headers: UpstreamHeaderView): readonly string[] {
   if (typeof headers !== 'object' || headers === null || Array.isArray(headers))
     throw new Error();
   const names = Object.keys(headers);
   if (names.length > MAX_HEADER_FIELDS) throw new Error();
   for (const name of names) {
-    if (
-      utf8.encode(name).byteLength > MAX_HEADER_NAME_BYTES ||
-      !headerNamePattern.test(name)
-    )
-      throw new Error();
+    validateHeaderName(name);
   }
   return names;
 }
@@ -161,16 +265,6 @@ function optionalStringHeader(
   const value = matchingHeaderValue(headers, names, wanted);
   if (value === undefined) return undefined;
   if (typeof value !== 'string') throw new Error();
-  return value;
-}
-
-function requiredStringHeader(
-  headers: UpstreamHeaderView,
-  names: readonly string[],
-  wanted: string,
-): string {
-  const value = optionalStringHeader(headers, names, wanted);
-  if (value === undefined) throw new Error();
   return value;
 }
 

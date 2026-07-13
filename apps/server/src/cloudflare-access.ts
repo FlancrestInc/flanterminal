@@ -23,8 +23,9 @@ const DEFAULT_JWKS_COOLDOWN_MS = 30_000;
 const DEFAULT_JWKS_CACHE_MAX_AGE_MS = 10 * 60_000;
 const compactJwtPattern = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const audiencePattern = /^[A-Za-z0-9_-]{1,256}$/;
-const unsafeIdentityPattern = /[\p{Cc}\p{Cf}\p{Cs}]/u;
+const unsafeIdentityPattern = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+const cloudflareTeamLabelPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const utf8 = new TextEncoder();
 
 export type UpstreamHeaderValue = string | readonly string[] | undefined;
@@ -222,11 +223,23 @@ function validateHttpsOrigin(value: string): string {
   if (
     url.protocol !== 'https:' ||
     value !== url.origin ||
+    url.port !== '' ||
     url.username !== '' ||
-    url.password !== ''
+    url.password !== '' ||
+    !isCloudflareTeamHostname(url.hostname)
   )
     throw new Error();
   return url.origin;
+}
+
+function isCloudflareTeamHostname(hostname: string): boolean {
+  const labels = hostname.split('.');
+  return (
+    labels.length === 3 &&
+    cloudflareTeamLabelPattern.test(labels[0]!) &&
+    labels[1] === 'cloudflareaccess' &&
+    labels[2] === 'com'
+  );
 }
 
 function boundedInteger(value: number, minimum: number, maximum: number) {

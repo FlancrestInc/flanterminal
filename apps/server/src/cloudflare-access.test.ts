@@ -165,31 +165,51 @@ describe('CloudflareAccessProvider', () => {
     await expectProviderError(absent.authenticate(assertion('a.b.c')));
   });
 
-  it.each(['', 'a'.repeat(129), '\u0000person', 'per\u200bson', '\ud800'])(
-    'rejects unsafe identity claim %j',
-    async (sub) => {
-      const provider = setup({
-        verifier: verifierFor({ exp: NOW / 1000 + 60, sub }),
-      });
-      await expectProviderError(provider.authenticate(assertion('a.b.c')));
-    },
-  );
+  it.each([
+    '',
+    'a'.repeat(129),
+    '\u0000person',
+    'per\u200bson',
+    'per\u2028son',
+    'per\u2029son',
+    '\ud800',
+  ])('rejects unsafe identity claim %j', async (sub) => {
+    const provider = setup({
+      verifier: verifierFor({ exp: NOW / 1000 + 60, sub }),
+    });
+    await expectProviderError(provider.authenticate(assertion('a.b.c')));
+  });
 
   it('bounds remote JWKS timeout and reports only a generic failure', async () => {
-    const token = 'secret.assertion.value';
+    const key = await signingKey('rsa', 'timeout-key');
+    const token = await sign(key, {
+      iss: TEAM,
+      aud: AUDIENCE,
+      exp: NOW / 1000 + 60,
+    });
+    let aborted = false;
     const fetch: FetchImplementation = vi.fn(
       async (_url, options) =>
         await new Promise<Response>((_resolve, reject) => {
-          options.signal.addEventListener('abort', () => {
-            reject(new Error(`timed out while fetching ${token}`));
-          });
+          options.signal.addEventListener(
+            'abort',
+            () => {
+              aborted = true;
+              reject(new Error(`timed out while fetching ${token}`));
+            },
+            { once: true },
+          );
         }),
     );
     const provider = setup({ fetch, jwksTimeoutMs: 20 });
+    const startedAt = performance.now();
 
     const error = await provider
       .authenticate(assertion(token))
       .catch((caught: unknown) => caught);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(aborted).toBe(true);
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
     expect(error).toEqual(new UpstreamProviderError());
     expect(String(error)).not.toContain(token);
     expect(inspect(error)).not.toContain(token);
@@ -222,6 +242,24 @@ describe('CloudflareAccessProvider', () => {
     expect(() => setup({ teamOrigin: `${TEAM}/path` })).toThrow(
       new UpstreamProviderError(),
     );
+    for (const teamOrigin of [
+      'https://localhost',
+      'https://127.0.0.1',
+      'https://10.0.0.1',
+      'https://[::1]',
+      'https://example.com',
+      'https://cloudflareaccess.com',
+      'https://a.b.cloudflareaccess.com',
+      'https://team.cloudflareaccess.com.evil.test',
+      'https://-team.cloudflareaccess.com',
+      'https://team-.cloudflareaccess.com',
+      `https://${'a'.repeat(64)}.cloudflareaccess.com`,
+    ]) {
+      expect(() => setup({ teamOrigin })).toThrow(new UpstreamProviderError());
+    }
+    expect(() =>
+      setup({ teamOrigin: 'https://my-team.cloudflareaccess.com' }),
+    ).not.toThrow();
     expect(() => setup({ audience: '' })).toThrow(new UpstreamProviderError());
     expect(() => setup({ clockToleranceSeconds: 31 })).toThrow(
       new UpstreamProviderError(),
