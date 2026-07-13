@@ -1,4 +1,5 @@
 import {
+  AUTHENTICATION_REQUIRED,
   BRIDGE_RESTART,
   PROTOCOL_VERSION,
   SESSION_REPLACED,
@@ -26,6 +27,7 @@ export interface TerminalSocketDependencies {
   readonly location?: Pick<Location, 'host' | 'protocol'>;
   readonly onSessionStopped?: () => void;
   readonly onSessionRestarting?: () => void;
+  readonly onAuthenticationRequired?: () => void;
 }
 
 export interface TerminalSocketController {
@@ -64,6 +66,7 @@ export function useTerminalSocket(
 ): TerminalSocketController {
   const onSessionStopped = dependencies.onSessionStopped;
   const onSessionRestarting = dependencies.onSessionRestarting;
+  const onAuthenticationRequired = dependencies.onAuthenticationRequired;
   const factory = dependencies.socketFactory ?? defaultSocketFactory;
   const location = dependencies.location ?? window.location;
   const [status, setStatus] = useState<ConnectionStatus>('connecting');
@@ -73,6 +76,8 @@ export function useTerminalSocket(
   const retryAttemptRef = useRef(0);
   const generationRef = useRef(0);
   const stoppedRef = useRef(false);
+  const authenticationSuspendedRef = useRef(false);
+  const removeSocketListenersRef = useRef<() => void>(() => undefined);
   const outputListenersRef = useRef(new Set<(data: string) => void>());
   const connectRef = useRef<() => void>(() => undefined);
 
@@ -107,7 +112,7 @@ export function useTerminalSocket(
   );
 
   const connect = useCallback(() => {
-    if (stoppedRef.current) return;
+    if (stoppedRef.current || authenticationSuspendedRef.current) return;
     cancelRetry();
     const generation = ++generationRef.current;
     const isCurrent = () => generation === generationRef.current;
@@ -164,8 +169,20 @@ export function useTerminalSocket(
     };
     const onClose = (event: Event) => {
       if (!isCurrent()) return;
+      removeSocketListenersRef.current();
+      removeSocketListenersRef.current = () => undefined;
       socketRef.current = null;
       const code = (event as CloseEvent).code;
+      if (code === AUTHENTICATION_REQUIRED) {
+        authenticationSuspendedRef.current = true;
+        stoppedRef.current = true;
+        cancelRetry();
+        generationRef.current += 1;
+        setStatus('disconnected');
+        setError(null);
+        onAuthenticationRequired?.();
+        return;
+      }
       if (code === SESSION_REPLACED) {
         stoppedRef.current = true;
         cancelRetry();
@@ -197,11 +214,18 @@ export function useTerminalSocket(
     socket.addEventListener('message', onMessage);
     socket.addEventListener('error', onError);
     socket.addEventListener('close', onClose);
+    removeSocketListenersRef.current = () => {
+      socket.removeEventListener('open', onOpen);
+      socket.removeEventListener('message', onMessage);
+      socket.removeEventListener('error', onError);
+      socket.removeEventListener('close', onClose);
+    };
   }, [
     cancelRetry,
     config.basePath,
     factory,
     location,
+    onAuthenticationRequired,
     onSessionRestarting,
     onSessionStopped,
     scheduleRetry,
@@ -213,11 +237,14 @@ export function useTerminalSocket(
 
   useEffect(() => {
     stoppedRef.current = false;
+    authenticationSuspendedRef.current = false;
     connectRef.current();
     return () => {
       stoppedRef.current = true;
       cancelRetry();
       generationRef.current += 1;
+      removeSocketListenersRef.current();
+      removeSocketListenersRef.current = () => undefined;
       const socket = socketRef.current;
       socketRef.current = null;
       socket?.close(1000, 'Client disconnect');
@@ -263,6 +290,8 @@ export function useTerminalSocket(
     stoppedRef.current = true;
     cancelRetry();
     generationRef.current += 1;
+    removeSocketListenersRef.current();
+    removeSocketListenersRef.current = () => undefined;
     const socket = socketRef.current;
     socketRef.current = null;
     socket?.close(1000, 'Client disconnect');
@@ -270,9 +299,12 @@ export function useTerminalSocket(
   }, [cancelRetry]);
 
   const reconnect = useCallback(() => {
+    if (authenticationSuspendedRef.current) return;
     stoppedRef.current = false;
     cancelRetry();
     generationRef.current += 1;
+    removeSocketListenersRef.current();
+    removeSocketListenersRef.current = () => undefined;
     const socket = socketRef.current;
     socketRef.current = null;
     socket?.close(1000, 'Client reconnect');

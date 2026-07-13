@@ -44,6 +44,7 @@ import {
   TerminalSession,
   type TerminalSessionHandle,
 } from './TerminalSession.js';
+import { AuthenticationRequiredContext } from './useAuth.js';
 
 describe('TerminalSession', () => {
   it('binds the immutable tab ID and exposes local client controls', () => {
@@ -77,5 +78,25 @@ describe('TerminalSession', () => {
     expect(socket.disconnect).toHaveBeenCalledOnce();
     expect(terminalCommands.clear).toHaveBeenCalledOnce();
     expect(terminalCommands.focus).toHaveBeenCalledOnce();
+  });
+
+  it('routes socket authentication loss to the owning auth epoch', () => {
+    const onAuthenticationRequired = vi.fn();
+    render(
+      <AuthenticationRequiredContext.Provider value={onAuthenticationRequired}>
+        <TerminalSession
+          config={config}
+          tabId={ID}
+          onStatus={vi.fn()}
+          onSessionChanged={vi.fn()}
+        />
+      </AuthenticationRequiredContext.Provider>,
+    );
+
+    expect(useSocket).toHaveBeenLastCalledWith(
+      config,
+      ID,
+      expect.objectContaining({ onAuthenticationRequired }),
+    );
   });
 });

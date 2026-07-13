@@ -27,7 +27,7 @@ describe('loadClientConfig', () => {
       new URL('https://host.example/tools/terminal/api/config'),
       expect.objectContaining({
         cache: 'no-store',
-        credentials: 'same-origin',
+        credentials: 'include',
       }),
     );
   });

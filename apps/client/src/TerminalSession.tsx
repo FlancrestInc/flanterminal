@@ -1,6 +1,7 @@
 import type { ClientConfig } from '@flanterminal/shared';
 import {
   forwardRef,
+  useContext,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -8,6 +9,7 @@ import {
 } from 'react';
 
 import { Terminal, type TerminalHandle } from './Terminal.js';
+import { AuthenticationRequiredContext } from './useAuth.js';
 import {
   useTerminalSocket,
   type ConnectionStatus,
@@ -36,12 +38,16 @@ export const TerminalSession = forwardRef<
   TerminalSessionProps
 >(function TerminalSession({ config, tabId, onStatus, onSessionChanged }, ref) {
   const terminalRef = useRef<TerminalHandle>(null);
+  const onAuthenticationRequired = useContext(AuthenticationRequiredContext);
   const dependencies = useMemo(
     () => ({
       onSessionStopped: () => onSessionChanged(tabId),
       onSessionRestarting: () => onSessionChanged(tabId),
+      ...(onAuthenticationRequired === null
+        ? {}
+        : { onAuthenticationRequired }),
     }),
-    [onSessionChanged, tabId],
+    [onAuthenticationRequired, onSessionChanged, tabId],
   );
   const socket = useTerminalSocket(config, tabId, dependencies);
 

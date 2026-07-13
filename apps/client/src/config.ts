@@ -24,7 +24,7 @@ export async function loadClientConfig(
   try {
     const requestInit: RequestInit = {
       cache: 'no-store',
-      credentials: 'same-origin',
+      credentials: 'include',
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
     const response = await fetchImpl(

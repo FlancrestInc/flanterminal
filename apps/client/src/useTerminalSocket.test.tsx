@@ -9,6 +9,7 @@ import {
   useTerminalSocket,
   type BrowserSocket,
 } from './useTerminalSocket.js';
+import { AUTHENTICATION_REQUIRED } from '@flanterminal/shared';
 
 const config: ClientConfig = {
   basePath: '/tools/terminal',
@@ -352,6 +353,68 @@ describe('useTerminalSocket', () => {
     expect(onSessionRestarting).toHaveBeenCalledOnce();
     act(() => vi.runAllTimers());
     expect(factory).toHaveBeenCalledTimes(3);
+  });
+
+  it('suspends on authentication close and notifies once for the auth epoch', () => {
+    const onAuthenticationRequired = vi.fn();
+    const sockets: FakeSocket[] = [];
+    const factory = vi.fn(() => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    });
+    const { result } = renderHook(() =>
+      useTerminalSocket(config, DYNAMIC_SESSION_ID, {
+        socketFactory: factory,
+        onAuthenticationRequired,
+      }),
+    );
+
+    act(() => {
+      sockets[0]!.dispatchEvent(
+        new CloseEvent('close', { code: AUTHENTICATION_REQUIRED }),
+      );
+      sockets[0]!.dispatchEvent(
+        new CloseEvent('close', { code: AUTHENTICATION_REQUIRED }),
+      );
+    });
+
+    expect(result.current.status).toBe('disconnected');
+    expect(onAuthenticationRequired).toHaveBeenCalledOnce();
+    act(() => vi.runAllTimers());
+    expect(factory).toHaveBeenCalledOnce();
+    act(() => result.current.reconnect());
+    expect(factory).toHaveBeenCalledOnce();
+  });
+
+  it('clears pending retry and ignores late socket events after authentication loss', () => {
+    const onAuthenticationRequired = vi.fn();
+    const sockets: FakeSocket[] = [];
+    const factory = vi.fn(() => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    });
+    const { result } = renderHook(() =>
+      useTerminalSocket(config, DYNAMIC_SESSION_ID, {
+        socketFactory: factory,
+        onAuthenticationRequired,
+      }),
+    );
+    act(() =>
+      sockets[0]!.dispatchEvent(
+        new CloseEvent('close', { code: AUTHENTICATION_REQUIRED }),
+      ),
+    );
+    act(() => {
+      sockets[0]!.open();
+      sockets[0]!.message(readyMessage());
+      vi.runAllTimers();
+    });
+
+    expect(result.current.status).toBe('disconnected');
+    expect(factory).toHaveBeenCalledOnce();
+    expect(onAuthenticationRequired).toHaveBeenCalledOnce();
   });
 
   it('stops on unmount and ignores events from replaced sockets', () => {
