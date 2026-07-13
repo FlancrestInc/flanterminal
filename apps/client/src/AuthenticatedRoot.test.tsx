@@ -432,6 +432,13 @@ describe('AuthenticatedRoot', () => {
       />,
     );
 
+    await waitFor(() =>
+      expect(terminalAuthSuspensionCountsForTests()).toEqual({
+        activeIds: 1,
+        registrations: 1,
+        suspensions: 0,
+      }),
+    );
     fireEvent.click(
       await screen.findByRole('button', { name: 'Expire terminal auth' }),
     );

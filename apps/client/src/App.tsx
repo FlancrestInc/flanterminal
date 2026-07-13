@@ -4,19 +4,12 @@ import type {
   SettingsResponse,
   WorkspaceSettings,
 } from '@flanterminal/shared';
-import { ArrowLeft, Settings } from 'lucide-react';
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { Settings } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { SessionMenu } from './SessionMenu.js';
+import { SettingsView } from './SettingsView.js';
 import { TabBar } from './TabBar.js';
 import { createTabsApi, type TabsApi } from './tabs-api.js';
 import {
@@ -25,11 +18,6 @@ import {
 } from './TerminalSession.js';
 import { useTabs } from './useTabs.js';
 import type { ConnectionStatus } from './useTerminalSocket.js';
-
-const SettingsView = lazy(async () => {
-  const module = await import('./SettingsView.js');
-  return { default: module.SettingsView };
-});
 
 export interface AppProps {
   readonly config: ClientConfig;
@@ -170,21 +158,17 @@ export function App({
   return (
     <>
       {view === 'settings' ? (
-        <Suspense
-          fallback={<SettingsLoadingState onBack={() => setView('terminal')} />}
-        >
-          <SettingsView
-            response={settingsResponse}
-            settingsBusy={settingsBusy}
-            settingsError={settingsError}
-            passwordBusy={passwordBusy}
-            passwordError={passwordError}
-            authMode={authMode}
-            onSave={onSaveSettings}
-            onBack={() => setView('terminal')}
-            {...(onChangePassword === undefined ? {} : { onChangePassword })}
-          />
-        </Suspense>
+        <SettingsView
+          response={settingsResponse}
+          settingsBusy={settingsBusy}
+          settingsError={settingsError}
+          passwordBusy={passwordBusy}
+          passwordError={passwordError}
+          authMode={authMode}
+          onSave={onSaveSettings}
+          onBack={() => setView('terminal')}
+          {...(onChangePassword === undefined ? {} : { onChangePassword })}
+        />
       ) : null}
       <main className="app-shell" hidden={view !== 'terminal'}>
         <header className="top-bar">
@@ -309,29 +293,6 @@ export function App({
         />
       </main>
     </>
-  );
-}
-
-function SettingsLoadingState({ onBack }: { readonly onBack: () => void }) {
-  return (
-    <main className="settings-shell">
-      <header className="settings-header">
-        <button
-          aria-label="Back to terminal"
-          className="icon-button"
-          onClick={onBack}
-          title="Back to terminal"
-          type="button"
-        >
-          <ArrowLeft aria-hidden="true" size={18} strokeWidth={1.8} />
-        </button>
-        <h1>Settings</h1>
-      </header>
-      <div aria-live="polite" className="settings-loading" role="status">
-        <span aria-hidden="true" className="startup-indicator" />
-        <span>Loading settings</span>
-      </div>
-    </main>
   );
 }
 

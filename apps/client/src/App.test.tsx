@@ -207,12 +207,11 @@ describe('App', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
-  it('keeps the terminal mounted while the settings chunk loads and opens', async () => {
+  it('keeps the terminal mounted while settings opens and closes', async () => {
     render(<App config={config} api={api()} {...settingsProps} />);
     await screen.findByRole('tab', { name: 'Terminal 1' });
     const terminal = await screen.findByLabelText(`Terminal ${A}`);
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    expect(screen.getByRole('status')).toHaveTextContent('Loading settings');
     expect(terminal).toBeInTheDocument();
     expect(terminal.closest('.app-shell')).toHaveAttribute('hidden');
     expect(

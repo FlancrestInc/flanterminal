@@ -535,17 +535,6 @@ button {
   letter-spacing: 0;
 }
 
-.settings-loading {
-  display: flex;
-  min-height: 0;
-  flex: 1 1 auto;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  color: var(--ui-text-muted);
-  font-size: 13px;
-}
-
 .settings-scroll {
   min-height: 0;
   flex: 1 1 auto;

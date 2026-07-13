@@ -35,3 +35,13 @@ if (oversizedClientChunks.length > 0) {
       .join(', ')}`,
   );
 }
+
+const settingsViewChunks = filesUnder('apps/client/dist')
+  .map((path) => relative('.', path))
+  .filter((path) => /(?:^|\/)SettingsView-[^/]+\.js$/u.test(path));
+
+if (settingsViewChunks.length > 0) {
+  throw new Error(
+    `Production client must not emit a separate SettingsView chunk: ${settingsViewChunks.join(', ')}`,
+  );
+}

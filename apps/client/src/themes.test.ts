@@ -71,6 +71,20 @@ describe('terminal themes', () => {
     expect(css).toContain('background: var(--ui-danger-hover);');
     expect(css).toContain('outline-color: var(--ui-danger-focus);');
   });
+
+  it('does not reference undefined UI custom properties', () => {
+    const css = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
+    const declarations = new Set(
+      [...css.matchAll(/(--ui-[\w-]+)\s*:/gu)].map((match) => match[1]),
+    );
+    const references = new Set(
+      [...css.matchAll(/var\((--ui-[\w-]+)\)/gu)].map((match) => match[1]),
+    );
+
+    expect(
+      [...references].filter((reference) => !declarations.has(reference)),
+    ).toEqual([]);
+  });
 });
 
 function contrast(first: string, second: string): number {
