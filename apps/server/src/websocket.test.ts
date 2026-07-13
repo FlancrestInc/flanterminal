@@ -38,6 +38,7 @@ const inboxes = new WeakMap<
 
 afterEach(async () => {
   await Promise.allSettled(openResources.splice(0).map((close) => close()));
+  vi.restoreAllMocks();
 });
 
 describe('terminal websocket server', () => {
@@ -588,6 +589,76 @@ describe('terminal websocket server', () => {
     expect(register).toHaveBeenCalledOnce();
     expect(connectSession).not.toHaveBeenCalled();
     expect(auth.index.connectedCount()).toBe(0);
+  });
+
+  it('terminates when an authentication race close throws before index insertion', async () => {
+    const nativeTerminate = WebSocket.prototype.terminate;
+    const close = vi
+      .spyOn(WebSocket.prototype, 'close')
+      .mockImplementation(() => {
+        throw new Error('contained close failure');
+      });
+    const terminate = vi
+      .spyOn(WebSocket.prototype, 'terminate')
+      .mockImplementation(function (this: WebSocket) {
+        nativeTerminate.call(this);
+      });
+    const auth = authHarness();
+    vi.spyOn(auth.index, 'registerIfActive').mockImplementation(() => false);
+    const server = createServer();
+    const gateway = createTerminalWebSocketServer({
+      server,
+      publicOrigin: 'http://app.test',
+      basePath: '/',
+      sessionManager: {
+        authorize: vi.fn(
+          () => ({ sessionId: SESSION_ID, generation: 1 }) as never,
+        ),
+        connect: vi.fn(),
+      },
+      registry: new BridgeRegistry(),
+      logger: logger(),
+      heartbeatIntervalMs: 30_000,
+      ...auth.options,
+    });
+    const port = await listen(server);
+    track(server, gateway);
+    const client = await connect(
+      `ws://127.0.0.1:${port}/ws/sessions/${SESSION_ID}`,
+    );
+
+    const [code] = (await once(client, 'close')) as [number, Buffer];
+    expect(code).toBe(1006);
+    expect(close).toHaveBeenCalled();
+    expect(terminate).toHaveBeenCalled();
+    expect(auth.index.connectedCount()).toBe(0);
+  });
+
+  it('terminates a revoked client after close failure before later PTY output', async () => {
+    const harness = await createHarness();
+    const client = await connect(harness.url);
+    await nextMessage(client);
+    const nativeTerminate = WebSocket.prototype.terminate;
+    vi.spyOn(WebSocket.prototype, 'close').mockImplementation(() => {
+      throw new Error('contained close failure');
+    });
+    const terminate = vi
+      .spyOn(WebSocket.prototype, 'terminate')
+      .mockImplementation(function (this: WebSocket) {
+        nativeTerminate.call(this);
+      });
+    const closed = once(client, 'close');
+
+    harness.auth.revoke();
+    const [code] = (await closed) as [number, Buffer];
+    harness.emitData('revoked private output');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(code).toBe(1006);
+    expect(terminate).toHaveBeenCalled();
+    expect(inboxes.get(client)?.messages).toEqual([]);
+    expect(harness.pty.kill).toHaveBeenCalledOnce();
+    expect(harness.gateway.connectedCount()).toBe(0);
   });
 
   it('closes a late bridge owner and removes it when revoked during pending connect', async () => {

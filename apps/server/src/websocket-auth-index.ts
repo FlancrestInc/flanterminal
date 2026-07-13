@@ -15,6 +15,7 @@ export interface AuthIndexSocket {
   readonly OPEN: number;
   readonly readyState: number;
   close(code: number, reason: string): void;
+  terminate(): void;
   onClose(listener: () => void): Disposable;
   onError(listener: () => void): Disposable;
 }
@@ -147,9 +148,14 @@ export class WebSocketAuthIndex {
       ...(this.#bySession.get(applicationSessionId) ?? []),
     ];
     for (const registration of registrations) {
-      this.unregister(registration.socket);
-      closeAuthenticationRequired(registration.socket);
+      this.closeAuthenticationRequired(registration.socket);
     }
+  }
+
+  closeAuthenticationRequired(socket: AuthIndexSocket): boolean {
+    const secured = secureAuthenticationClosure(socket);
+    if (secured) this.unregister(socket);
+    return secured;
   }
 
   sweepExpired(): void {
@@ -160,8 +166,7 @@ export class WebSocketAuthIndex {
     }
     for (const registration of [...this.#bySocket.values()]) {
       if (!this.#isActive(registration.authority)) {
-        this.unregister(registration.socket);
-        closeAuthenticationRequired(registration.socket);
+        this.closeAuthenticationRequired(registration.socket);
       }
     }
   }
@@ -183,8 +188,7 @@ export class WebSocketAuthIndex {
       // Disposal remains idempotent even if a dependency misbehaves.
     }
     for (const socket of [...this.#bySocket.keys()]) {
-      this.unregister(socket);
-      closeAuthenticationRequired(socket);
+      this.closeAuthenticationRequired(socket);
     }
   }
 
@@ -197,13 +201,20 @@ export class WebSocketAuthIndex {
   }
 }
 
-function closeAuthenticationRequired(socket: AuthIndexSocket): void {
-  if (socket.readyState !== socket.OPEN) return;
+function secureAuthenticationClosure(socket: AuthIndexSocket): boolean {
+  if (socket.readyState !== socket.OPEN) return true;
   try {
     socket.close(AUTHENTICATION_REQUIRED, AUTHENTICATION_REQUIRED_REASON);
   } catch {
-    // The registration is removed before close, so close failure retains nothing.
+    // Termination below is the guaranteed fallback.
   }
+  if (socket.readyState !== socket.OPEN) return true;
+  try {
+    socket.terminate();
+  } catch {
+    // Callers retain registration while the socket is still observably OPEN.
+  }
+  return socket.readyState !== socket.OPEN;
 }
 
 function disposeAll(disposables: Disposable[]): void {

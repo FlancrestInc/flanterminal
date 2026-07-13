@@ -143,7 +143,7 @@ describe('WebSocketAuthIndex', () => {
     expect(index.registerIfActive(AUTH_A, TAB_A, new FakeSocket())).toBe(false);
   });
 
-  it('closes every live socket on dispose even when one close throws', () => {
+  it('terminates and unregisters a live socket when authentication close throws', () => {
     const auth = authSource();
     const index = new WebSocketAuthIndex({
       auth,
@@ -154,21 +154,44 @@ describe('WebSocketAuthIndex', () => {
     throwing.close.mockImplementation(() => {
       throw new Error('contained close failure');
     });
-    const second = new FakeSocket();
     index.registerIfActive(AUTH_A, TAB_A, throwing);
-    index.registerIfActive(AUTH_B, TAB_B, second);
 
     expect(() => index.dispose()).not.toThrow();
     index.dispose();
 
     expect(throwing.close).toHaveBeenCalledOnce();
-    expect(second.close).toHaveBeenCalledOnce();
-    expect(second.close).toHaveBeenCalledWith(4003, 'authentication_required');
+    expect(throwing.terminate).toHaveBeenCalledOnce();
+    expect(throwing.readyState).toBe(throwing.CLOSED);
     expect(throwing.listenerCount()).toBe(0);
-    expect(second.listenerCount()).toBe(0);
     expect(index.connectedCount()).toBe(0);
     expect(index.countForTab(TAB_A)).toBe(0);
-    expect(index.countForTab(TAB_B)).toBe(0);
+    expect(auth.unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('retains tracking when both authentication close and termination fail', () => {
+    const auth = authSource();
+    const index = new WebSocketAuthIndex({
+      auth,
+      maxApplicationSessions: 2,
+      maxSockets: 4,
+    });
+    const socket = new FakeSocket();
+    socket.close.mockImplementation(() => {
+      throw new Error('contained close failure');
+    });
+    socket.terminate.mockImplementation(() => {
+      throw new Error('contained termination failure');
+    });
+    index.registerIfActive(AUTH_A, TAB_A, socket);
+
+    expect(() => index.dispose()).not.toThrow();
+
+    expect(socket.close).toHaveBeenCalledOnce();
+    expect(socket.terminate).toHaveBeenCalledOnce();
+    expect(socket.readyState).toBe(socket.OPEN);
+    expect(index.connectedCount()).toBe(1);
+    expect(index.countForTab(TAB_A)).toBe(1);
+    expect(socket.listenerCount()).toBe(2);
     expect(auth.unsubscribe).toHaveBeenCalledOnce();
   });
 });
@@ -201,9 +224,15 @@ function authSource() {
 
 class FakeSocket implements AuthIndexSocket {
   readonly OPEN = 1;
+  readonly CLOSING = 2;
   readonly CLOSED = 3;
   readyState = this.OPEN;
-  close = vi.fn();
+  close = vi.fn(() => {
+    this.readyState = this.CLOSING;
+  });
+  terminate = vi.fn(() => {
+    this.readyState = this.CLOSED;
+  });
   private readonly closeListeners = new Set<() => void>();
   private readonly errorListeners = new Set<() => void>();
 

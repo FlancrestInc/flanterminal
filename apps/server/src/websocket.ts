@@ -85,6 +85,10 @@ class WsSocketPort implements SocketPort {
     this.socket.close(code, reason);
   }
 
+  terminate(): void {
+    this.socket.terminate();
+  }
+
   onMessage(listener: (data: unknown, isBinary: boolean) => void) {
     const wrapped = (data: RawData, isBinary: boolean) =>
       listener(data, isBinary);
@@ -277,8 +281,7 @@ export function createTerminalWebSocketServer(
         if (!authIndex?.isActive(connection.authority)) {
           authenticationEnded = true;
           ended = true;
-          authIndex?.unregister(port);
-          closeAuthenticationRequired(port);
+          authIndex?.closeAuthenticationRequired(port);
         }
         if (ended || socket.readyState !== WebSocket.OPEN) {
           await cleanupOwner(
@@ -293,8 +296,7 @@ export function createTerminalWebSocketServer(
       })
       .catch(() => {
         if (ended || !authIndex?.isActive(connection.authority)) {
-          authIndex?.unregister(port);
-          closeAuthenticationRequired(port);
+          authIndex?.closeAuthenticationRequired(port);
           return;
         }
         options.logger.error('terminal_connection_failed', {
@@ -380,7 +382,13 @@ function closeAuthenticationRequired(socket: SocketPort): void {
   try {
     socket.close(AUTHENTICATION_REQUIRED, AUTHENTICATION_REQUIRED_REASON);
   } catch {
-    // The authentication index is already clear.
+    // Termination below is the guaranteed fallback before index insertion.
+  }
+  if (socket.readyState !== socket.OPEN) return;
+  try {
+    socket.terminate();
+  } catch {
+    // The accepted socket has no bridge or authentication registration yet.
   }
 }
 

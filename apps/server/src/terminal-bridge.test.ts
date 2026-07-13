@@ -374,6 +374,24 @@ describe('TerminalBridge', () => {
     expectDisposedOnce(bridge, socket, pty);
   });
 
+  it('terminates an open socket when lifecycle close throws', async () => {
+    const socket = new FakeSocket();
+    socket.close.mockImplementation(() => {
+      throw new Error('private close failure');
+    });
+    const pty = new FakePty();
+    const bridge = createBridge(socket, pty);
+
+    await expect(
+      bridge.close(4003, 'authentication_required'),
+    ).resolves.toBeUndefined();
+
+    expect(socket.close).toHaveBeenCalledWith(4003, 'authentication_required');
+    expect(socket.terminate).toHaveBeenCalledOnce();
+    expect(socket.readyState).not.toBe(socket.OPEN);
+    expect(pty.kill).toHaveBeenCalledOnce();
+  });
+
   it('continues cleanup when a subscription disposer throws', async () => {
     const socket = new FakeSocket();
     const pty = new FakePty();
@@ -584,7 +602,12 @@ class FakeSocket implements SocketPort {
     [];
 
   send = vi.fn((data: string) => this.sent.push(data));
-  close = vi.fn();
+  close = vi.fn(() => {
+    this.readyState = 2;
+  });
+  terminate = vi.fn(() => {
+    this.readyState = 3;
+  });
 
   onMessage(listener: (data: unknown, isBinary: boolean) => void): Disposable {
     this.messageListeners.push(listener);

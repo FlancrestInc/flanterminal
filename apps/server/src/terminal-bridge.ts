@@ -21,6 +21,7 @@ export interface SocketPort {
   readonly bufferedAmount: number;
   send(data: string): void;
   close(code: number, reason: string): void;
+  terminate(): void;
   onMessage(listener: (data: unknown, isBinary: boolean) => void): Disposable;
   onClose(listener: () => void): Disposable;
   onError(listener: () => void): Disposable;
@@ -291,6 +292,15 @@ export class TerminalBridge implements BridgeOwner {
         this.options.logger.warn('socket_close_failed', {
           sessionId: this.options.sessionId,
         });
+      }
+      if (this.socketIsOpen()) {
+        try {
+          this.options.socket.terminate();
+        } catch {
+          this.options.logger.warn('socket_terminate_failed', {
+            sessionId: this.options.sessionId,
+          });
+        }
       }
     }
     this.options.logger.info('terminal_closed', {
