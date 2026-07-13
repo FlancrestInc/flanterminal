@@ -260,6 +260,84 @@ describe('AuthService', () => {
     },
   );
 
+  it('handles a queued verification rejection immediately without breaking FIFO', async () => {
+    const h = setup('local', { maxSessions: 3 });
+    const firstVerification = deferred<boolean>();
+    h.credentials.verify
+      .mockReturnValueOnce(firstVerification.promise)
+      .mockRejectedValueOnce(new Error('verification failure'));
+    let unhandledRejections = 0;
+    let rejectionHandledEvents = 0;
+    const onUnhandled = () => {
+      unhandledRejections += 1;
+    };
+    const onHandled = () => {
+      rejectionHandledEvents += 1;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    process.on('rejectionHandled', onHandled);
+
+    try {
+      const settled: string[] = [];
+      const first = h.service
+        .login(login())
+        .then((result) => (settled.push('first'), result));
+      const second = h.service.login({ ...login(), address: '127.0.0.2' }).then(
+        (result) => (settled.push('second'), result),
+        (error: unknown) => {
+          settled.push('second_failed');
+          throw error;
+        },
+      );
+      void second.catch(() => undefined);
+      await flushRejectionEvents();
+      const settledBeforeFirst = [...settled];
+
+      firstVerification.resolve(true);
+      const firstResult = await first;
+      await expect(second).rejects.toThrow('Authentication operation failed');
+      await flushRejectionEvents();
+      const later = await h.service.login({
+        ...login(),
+        address: '127.0.0.3',
+      });
+
+      expect(settledBeforeFirst).toEqual([]);
+      expect(settled).toEqual(['first', 'second_failed']);
+      expect(
+        h.service.authenticateCookie(firstResult.cookieValue),
+      ).toBeDefined();
+      expect(h.service.authenticateCookie(later.cookieValue)).toBeDefined();
+      expect(unhandledRejections).toBe(0);
+      expect(rejectionHandledEvents).toBe(0);
+    } finally {
+      firstVerification.resolve(true);
+      process.off('unhandledRejection', onUnhandled);
+      process.off('rejectionHandled', onHandled);
+    }
+  });
+
+  it('contains synchronous verification throws inside their FIFO slot', async () => {
+    const h = setup('local', { maxSessions: 2 });
+    h.credentials.verify.mockImplementationOnce(() => {
+      throw new Error('synchronous verification failure');
+    });
+
+    const failed = h.service.login(login());
+    const recovered = h.service.login({
+      ...login(),
+      address: '127.0.0.2',
+    });
+    await expect(failed).rejects.toThrow('Authentication operation failed');
+    const result = await recovered;
+    expect(h.service.authenticateCookie(result.cookieValue)).toBeDefined();
+    await expect(
+      h.service.login({ ...login(), address: '127.0.0.3' }),
+    ).resolves.toMatchObject({
+      bootstrap: { authenticated: true, mode: 'local' },
+    });
+  });
+
   it('bounds bootstrap slots behind an unresolved admitted login', async () => {
     const h = setup('local', { maxSessions: 1 });
     const verification = deferred<boolean>();
@@ -902,4 +980,12 @@ function deferred<T>() {
     reject = decline;
   });
   return { promise, resolve, reject };
+}
+
+async function flushRejectionEvents() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await Promise.resolve();
 }

@@ -37,8 +37,19 @@ type PreparedSession = Readonly<{
   session: Stored;
   result: AuthBootstrapResult;
 }>;
+type VerificationOutcome =
+  Readonly<{ ok: true; valid: boolean }> | Readonly<{ ok: false }>;
 const MIN_PENDING_ESTABLISHMENTS = 8;
 const MAX_PENDING_ESTABLISHMENTS = 256;
+const VALID_VERIFICATION: VerificationOutcome = Object.freeze({
+  ok: true,
+  valid: true,
+});
+const INVALID_VERIFICATION: VerificationOutcome = Object.freeze({
+  ok: true,
+  valid: false,
+});
+const FAILED_VERIFICATION: VerificationOutcome = Object.freeze({ ok: false });
 export type AuthServiceOptions = Readonly<{
   mode: AuthMode;
   clock: () => number;
@@ -172,26 +183,26 @@ export class AuthService {
       releaseEstablishment();
       return Promise.resolve(localLoginFailure());
     }
-    const verification = promiseBridge<boolean>();
-    const result = this.#reserveLoginSlot(
-      verification.promise,
-      label,
-      address,
-      releaseEstablishment,
-    );
+    this.#pendingLogins += 1;
+    let verification: Promise<VerificationOutcome>;
     try {
       const credentialVerification = this.#credentials.verify(
         input.username,
         input.password,
       );
-      void credentialVerification.then(
-        verification.resolve,
-        verification.reject,
+      verification = Promise.resolve(credentialVerification).then(
+        fulfilledVerification,
+        failedVerification,
       );
-    } catch (error) {
-      verification.reject(error);
+    } catch {
+      verification = Promise.resolve(FAILED_VERIFICATION);
     }
-    return result;
+    return this.#reserveLoginSlot(
+      verification,
+      label,
+      address,
+      releaseEstablishment,
+    );
   }
   authenticateCookie(
     rawCookie: string | undefined,
@@ -403,12 +414,11 @@ export class AuthService {
     }
   }
   #reserveLoginSlot(
-    verification: Promise<boolean>,
+    verification: Promise<VerificationOutcome>,
     label: string,
     address: string,
     releaseEstablishment: () => void,
   ): Promise<AuthBootstrapResult> {
-    this.#pendingLogins += 1;
     const result = this.#enqueueEstablishment(() =>
       this.#completeLoginSlot(verification, label, address),
     );
@@ -421,17 +431,13 @@ export class AuthService {
     return result;
   }
   async #completeLoginSlot(
-    verification: Promise<boolean>,
+    verification: Promise<VerificationOutcome>,
     label: string,
     address: string,
   ): Promise<AuthBootstrapResult> {
-    let valid: boolean;
-    try {
-      valid = await verification;
-    } catch {
-      throw new AuthServiceError();
-    }
-    if (!valid) return localLoginFailure();
+    const outcome = await verification;
+    if (!outcome.ok) throw new AuthServiceError();
+    if (!outcome.valid) return localLoginFailure();
     return this.#safeEstablish('local', label, undefined, () =>
       this.#limiter.resetAddress(address),
     );
@@ -579,18 +585,11 @@ function localLoginFailure(): AuthBootstrapResult {
 function boundedAddress(value: string): string {
   return typeof value === 'string' && value.length <= 256 ? value : 'unknown';
 }
-function promiseBridge<T>(): Readonly<{
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (reason: unknown) => void;
-}> {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((accept, decline) => {
-    resolve = accept;
-    reject = decline;
-  });
-  return frozen({ promise, resolve, reject });
+function fulfilledVerification(valid: boolean): VerificationOutcome {
+  return valid ? VALID_VERIFICATION : INVALID_VERIFICATION;
+}
+function failedVerification(): VerificationOutcome {
+  return FAILED_VERIFICATION;
 }
 function frozen<T>(v: T): T {
   return Object.freeze(v);
