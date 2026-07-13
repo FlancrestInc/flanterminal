@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import type { ClientConfig } from '@flanterminal/shared';
+import type { ClientConfig, WorkspaceSettings } from '@flanterminal/shared';
 import { act, render } from '@testing-library/react';
 import { createRef } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -12,11 +12,27 @@ import type { TerminalSocketController } from './useTerminalSocket.js';
 const ID = '123e4567-e89b-42d3-a456-426614174000';
 const config = {
   basePath: '/terminal',
-  fontSize: 14,
-  scrollback: 5_000,
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 8,
 } satisfies ClientConfig;
+const settings = {
+  version: 1,
+  fontFamily: 'jetbrains-mono-nerd',
+  fontSize: 14,
+  lineHeight: 1.2,
+  letterSpacing: 0,
+  scrollback: 5_000,
+  theme: 'dark',
+  cursorStyle: 'block',
+  cursorBlink: true,
+  bellBehavior: 'visual',
+  reconnectBehavior: 'automatic',
+  automaticTabCreation: true,
+  workspaceShortcuts: 'default',
+  defaultShell: '/bin/bash',
+  tmuxHistoryLimit: 20_000,
+  staleSessionCleanupHours: 0,
+} satisfies WorkspaceSettings;
 const socket: TerminalSocketController = {
   status: 'connected',
   error: null,
@@ -55,6 +71,7 @@ describe('TerminalSession', () => {
       <TerminalSession
         ref={ref}
         config={config}
+        settings={settings}
         tabId={ID}
         onStatus={onStatus}
         onSessionChanged={onSessionChanged}
@@ -65,6 +82,7 @@ describe('TerminalSession', () => {
       config,
       ID,
       expect.objectContaining({
+        reconnectBehavior: 'automatic',
         onSessionStopped: expect.any(Function),
         onSessionRestarting: expect.any(Function),
       }),
@@ -86,6 +104,7 @@ describe('TerminalSession', () => {
       <AuthenticationRequiredContext.Provider value={onAuthenticationRequired}>
         <TerminalSession
           config={config}
+          settings={settings}
           tabId={ID}
           onStatus={vi.fn()}
           onSessionChanged={vi.fn()}

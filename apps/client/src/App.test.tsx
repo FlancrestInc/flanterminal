@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
 
-import type { ClientConfig, TabView } from '@flanterminal/shared';
+import type {
+  ClientConfig,
+  SettingsResponse,
+  TabView,
+} from '@flanterminal/shared';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -13,10 +17,50 @@ const B = '223e4567-e89b-42d3-a456-426614174000';
 const C = '323e4567-e89b-42d3-a456-426614174000';
 const config: ClientConfig = {
   basePath: '/terminal',
-  fontSize: 14,
-  scrollback: 5_000,
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 8,
+};
+const settingsResponse = {
+  settings: {
+    version: 1,
+    fontFamily: 'jetbrains-mono-nerd',
+    fontSize: 14,
+    lineHeight: 1.2,
+    letterSpacing: 0,
+    scrollback: 5_000,
+    theme: 'dark',
+    cursorStyle: 'block',
+    cursorBlink: true,
+    bellBehavior: 'visual',
+    reconnectBehavior: 'automatic',
+    automaticTabCreation: true,
+    workspaceShortcuts: 'default',
+    defaultShell: '/bin/bash',
+    tmuxHistoryLimit: 20_000,
+    staleSessionCleanupHours: 0,
+  },
+  limits: {
+    fontFamilies: ['jetbrains-mono-nerd', 'system-monospace'],
+    fontSize: { min: 8, max: 32, step: 1 },
+    lineHeight: { min: 1, max: 2, step: 0.05 },
+    letterSpacing: { min: 0, max: 4, step: 1 },
+    scrollback: { min: 0, max: 100_000, step: 1 },
+    themes: ['dark', 'light', 'ubuntu'],
+    cursorStyles: ['block', 'underline', 'bar'],
+    bellBehaviors: ['none', 'visual', 'sound'],
+    reconnectBehaviors: ['automatic', 'manual'],
+    workspaceShortcutModes: ['default', 'disabled'],
+    tmuxHistoryLimit: { min: 0, max: 1_000_000, step: 1 },
+    staleSessionCleanupHours: { min: 0, max: 8_760, step: 1 },
+  },
+  allowedShells: ['/bin/bash'],
+} satisfies SettingsResponse;
+const settingsProps = {
+  settingsResponse,
+  settingsBusy: false,
+  settingsError: null,
+  onSaveSettings: vi.fn(async () => undefined),
+  authMode: 'local' as const,
 };
 const commands = vi.hoisted(() => ({
   reconnect: vi.fn(),
@@ -100,7 +144,7 @@ beforeEach(() => vi.clearAllMocks());
 
 describe('App', () => {
   it('loads tabs, lazily mounts selected terminals, and retains visited sessions', async () => {
-    render(<App config={config} api={api()} />);
+    render(<App config={config} api={api()} {...settingsProps} />);
     await screen.findByRole('tab', { name: 'Terminal 1' });
     expect(await screen.findByLabelText(`Terminal ${A}`)).toBeInTheDocument();
     expect(screen.queryByLabelText(`Terminal ${B}`)).not.toBeInTheDocument();
@@ -112,7 +156,7 @@ describe('App', () => {
 
   it('selects stopped tabs without mounting a socket and recreates on command', async () => {
     const client = api();
-    render(<App config={config} api={client} />);
+    render(<App config={config} api={client} {...settingsProps} />);
     fireEvent.click(await screen.findByRole('tab', { name: 'Terminal 3' }));
     expect(screen.queryByLabelText(`Terminal ${C}`)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Recreate session' }));
@@ -121,7 +165,7 @@ describe('App', () => {
 
   it('confirms closing a tab before terminating its backend session', async () => {
     const client = api();
-    render(<App config={config} api={client} />);
+    render(<App config={config} api={client} {...settingsProps} />);
     await screen.findByRole('tab', { name: 'Terminal 1' });
     fireEvent.click(screen.getByRole('button', { name: 'Close Terminal 1' }));
     expect(client.close).not.toHaveBeenCalled();
@@ -131,7 +175,7 @@ describe('App', () => {
 
   it('reconnects the waiting client only after a session restart succeeds', async () => {
     const client = api();
-    render(<App config={config} api={client} />);
+    render(<App config={config} api={client} {...settingsProps} />);
     await screen.findByLabelText(`Terminal ${A}`);
     fireEvent.click(screen.getByRole('button', { name: 'Session actions' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Restart session' }));
@@ -144,7 +188,7 @@ describe('App', () => {
 
   it('supports new-tab, selection, and close shortcuts without intercepting inputs', async () => {
     const client = api();
-    render(<App config={config} api={client} />);
+    render(<App config={config} api={client} {...settingsProps} />);
     await screen.findByRole('tab', { name: 'Terminal 1' });
     fireEvent.keyDown(document, { key: 't', ctrlKey: true, shiftKey: true });
     await waitFor(() => expect(client.create).toHaveBeenCalledOnce());
@@ -159,6 +203,46 @@ describe('App', () => {
       shiftKey: true,
     });
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('opens settings as a full workspace and returns to the terminal', async () => {
+    render(<App config={config} api={api()} {...settingsProps} />);
+    await screen.findByRole('tab', { name: 'Terminal 1' });
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(
+      screen.getByRole('heading', { name: 'Settings' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('tab', { name: 'Terminal 1' }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to terminal' }));
+    expect(screen.getByRole('tab', { name: 'Terminal 1' })).toBeInTheDocument();
+  });
+
+  it('does not intercept workspace shortcuts when they are disabled', async () => {
+    const client = api();
+    render(
+      <App
+        config={config}
+        api={client}
+        {...settingsProps}
+        settingsResponse={{
+          ...settingsResponse,
+          settings: {
+            ...settingsResponse.settings,
+            workspaceShortcuts: 'disabled',
+          },
+        }}
+      />,
+    );
+    await screen.findByRole('tab', { name: 'Terminal 1' });
+    fireEvent.keyDown(document, { key: 't', ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(document, { key: '2', altKey: true });
+    expect(client.create).not.toHaveBeenCalled();
+    expect(screen.getByRole('tab', { name: 'Terminal 1' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
   });
 });
 

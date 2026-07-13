@@ -1,12 +1,8 @@
 import {
-  MAX_FONT_SIZE,
   MAX_RECONNECT_SECONDS,
   MAX_RESIZE_DEBOUNCE_MS,
-  MAX_SCROLLBACK,
-  MIN_FONT_SIZE,
   MIN_RECONNECT_SECONDS,
   MIN_RESIZE_DEBOUNCE_MS,
-  MIN_SCROLLBACK,
   basePathSchema,
   parseClientConfig,
   type ClientConfig,
@@ -211,8 +207,8 @@ const mergedSchema = z
     APP_BASE_PATH: basePathSchema,
     APP_PUBLIC_URL: publicUrlSchema,
     DEFAULT_SHELL: safeAbsolutePathSchema,
-    DEFAULT_FONT_SIZE: integerInput(MIN_FONT_SIZE, MAX_FONT_SIZE),
-    XTERM_SCROLLBACK: clampedIntegerInput(MIN_SCROLLBACK, MAX_SCROLLBACK),
+    DEFAULT_FONT_SIZE: integerInput(8, 32),
+    XTERM_SCROLLBACK: clampedIntegerInput(0, 100_000),
     TMUX_HISTORY_LIMIT: integerInput(0, 1_000_000),
     WS_HEARTBEAT_SECONDS: integerInput(5, 300),
     WS_MAX_BUFFER_BYTES: integerInput(65_536, MAX_WS_BUFFER_BYTES),
@@ -496,8 +492,6 @@ export function loadConfig(
 export function toClientConfig(config: AppConfig): ClientConfig {
   return parseClientConfig({
     basePath: config.basePath,
-    fontSize: config.defaultFontSize,
-    scrollback: config.xtermScrollback,
     resizeDebounceMs: config.resizeDebounceMs,
     reconnectMaxSeconds: config.reconnectMaxSeconds,
   });

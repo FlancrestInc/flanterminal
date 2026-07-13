@@ -440,8 +440,6 @@ describe('loadConfig', () => {
     expect(toClientConfig(loadConfig({ APP_BASE_PATH: '/terminal/' }))).toEqual(
       {
         basePath: '/terminal',
-        fontSize: 14,
-        scrollback: 10_000,
         resizeDebounceMs: 100,
         reconnectMaxSeconds: 15,
       },

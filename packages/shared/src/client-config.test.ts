@@ -1,17 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  MAX_FONT_SIZE,
-  MAX_SCROLLBACK,
-  MIN_FONT_SIZE,
-  MIN_SCROLLBACK,
-  parseClientConfig,
-} from './client-config.js';
+import { parseClientConfig } from './client-config.js';
 
 const validConfig = {
   basePath: '/terminal/',
-  fontSize: 14,
-  scrollback: 10_000,
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 15,
 };
@@ -57,10 +49,6 @@ describe('parseClientConfig', () => {
   });
 
   it.each([
-    ['fontSize', 7],
-    ['fontSize', 33],
-    ['scrollback', -1],
-    ['scrollback', 100_001],
     ['resizeDebounceMs', 24],
     ['resizeDebounceMs', 1_001],
     ['reconnectMaxSeconds', 0],
@@ -73,28 +61,19 @@ describe('parseClientConfig', () => {
 
   it('requires numeric settings to be integers', () => {
     expect(() =>
-      parseClientConfig({ ...validConfig, fontSize: 14.5 }),
-    ).toThrow();
-    expect(() =>
       parseClientConfig({ ...validConfig, resizeDebounceMs: 100.5 }),
     ).toThrow();
   });
 
-  it('retains the Phase 2 preference bounds until the atomic client migration', () => {
-    expect({
-      MIN_FONT_SIZE,
-      MAX_FONT_SIZE,
-      MIN_SCROLLBACK,
-      MAX_SCROLLBACK,
-    }).toEqual({
-      MIN_FONT_SIZE: 8,
-      MAX_FONT_SIZE: 32,
-      MIN_SCROLLBACK: 0,
-      MAX_SCROLLBACK: 100_000,
-    });
-  });
-
-  it.each(['theme', 'defaultShell', 'homeDir', 'logLevel', 'unknown'])(
+  it.each([
+    'fontSize',
+    'scrollback',
+    'theme',
+    'defaultShell',
+    'homeDir',
+    'logLevel',
+    'unknown',
+  ])(
     'rejects authenticated preference, server-only, or unknown key %s',
     (key) => {
       expect(() =>

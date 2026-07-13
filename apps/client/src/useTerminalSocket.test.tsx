@@ -13,8 +13,6 @@ import { AUTHENTICATION_REQUIRED } from '@flanterminal/shared';
 
 const config: ClientConfig = {
   basePath: '/tools/terminal',
-  fontSize: 14,
-  scrollback: 5_000,
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 8,
 };
@@ -62,7 +60,10 @@ function readyMessage() {
   });
 }
 
-function harness(override: Partial<ClientConfig> = {}) {
+function harness(
+  override: Partial<ClientConfig> = {},
+  dependencies: Parameters<typeof useTerminalSocket>[2] = {},
+) {
   const sockets: FakeSocket[] = [];
   const factory = vi.fn((url: string) => {
     void url;
@@ -72,6 +73,7 @@ function harness(override: Partial<ClientConfig> = {}) {
   });
   const hook = renderHook(() =>
     useTerminalSocket({ ...config, ...override }, DYNAMIC_SESSION_ID, {
+      ...dependencies,
       socketFactory: factory,
     }),
   );
@@ -432,5 +434,40 @@ describe('useTerminalSocket', () => {
     expect(active!.close).toHaveBeenCalled();
     act(() => vi.runAllTimers());
     expect(factory).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for explicit reconnect after abnormal close in manual mode', () => {
+    const { result, sockets, factory } = harness(
+      {},
+      { reconnectBehavior: 'manual' },
+    );
+    act(() => sockets[0]!.temporaryClose());
+    expect(result.current.status).toBe('disconnected');
+    act(() => vi.runAllTimers());
+    expect(factory).toHaveBeenCalledOnce();
+    act(() => result.current.reconnect());
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe('connecting');
+  });
+
+  it('keeps a manual session suspended across auth restoration until explicit reconnect', () => {
+    const onAuthenticationRequired = vi.fn();
+    const first = harness(
+      {},
+      { reconnectBehavior: 'manual', onAuthenticationRequired },
+    );
+    act(() =>
+      first.sockets[0]!.dispatchEvent(
+        new CloseEvent('close', { code: AUTHENTICATION_REQUIRED }),
+      ),
+    );
+    expect(onAuthenticationRequired).toHaveBeenCalledOnce();
+    first.unmount();
+
+    const restored = harness({}, { reconnectBehavior: 'manual' });
+    expect(restored.factory).not.toHaveBeenCalled();
+    expect(restored.result.current.status).toBe('disconnected');
+    act(() => restored.result.current.reconnect());
+    expect(restored.factory).toHaveBeenCalledOnce();
   });
 });

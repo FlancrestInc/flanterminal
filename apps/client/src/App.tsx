@@ -1,8 +1,15 @@
-import type { ClientConfig } from '@flanterminal/shared';
+import type {
+  AuthMode,
+  ClientConfig,
+  SettingsResponse,
+  WorkspaceSettings,
+} from '@flanterminal/shared';
+import { Settings } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { ConfirmDialog } from './ConfirmDialog.js';
 import { SessionMenu } from './SessionMenu.js';
+import { SettingsView } from './SettingsView.js';
 import { TabBar } from './TabBar.js';
 import { createTabsApi, type TabsApi } from './tabs-api.js';
 import {
@@ -15,6 +22,15 @@ import type { ConnectionStatus } from './useTerminalSocket.js';
 export interface AppProps {
   readonly config: ClientConfig;
   readonly api?: TabsApi;
+  readonly settingsResponse: SettingsResponse;
+  readonly settingsBusy: boolean;
+  readonly settingsError: string | null;
+  readonly onSaveSettings: (settings: WorkspaceSettings) => Promise<void>;
+  readonly authMode: AuthMode;
+  readonly onChangePassword?: (
+    current: string,
+    replacement: string,
+  ) => Promise<void>;
 }
 
 type Confirmation = Readonly<{
@@ -22,7 +38,16 @@ type Confirmation = Readonly<{
   id: string;
 }>;
 
-export function App({ config, api: suppliedApi }: AppProps) {
+export function App({
+  config,
+  api: suppliedApi,
+  settingsResponse,
+  settingsBusy,
+  settingsError,
+  onSaveSettings,
+  authMode,
+  onChangePassword,
+}: AppProps) {
   const defaultApi = useMemo(
     () => createTabsApi(config.basePath),
     [config.basePath],
@@ -35,11 +60,16 @@ export function App({ config, api: suppliedApi }: AppProps) {
     Readonly<Record<string, number>>
   >({});
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [view, setView] = useState<'terminal' | 'settings'>('terminal');
   const sessionRefs = useRef(new Map<string, TerminalSessionHandle>());
   const healthRef = useRef(tabs.health);
   useEffect(() => {
     healthRef.current = tabs.health;
   }, [tabs.health]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = settingsResponse.settings.theme;
+  }, [settingsResponse.settings.theme]);
 
   const selected = tabs.tabs.find((tab) => tab.id === tabs.selectedId);
   const selectedIndex = selected
@@ -57,6 +87,7 @@ export function App({ config, api: suppliedApi }: AppProps) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (settingsResponse.settings.workspaceShortcuts === 'disabled') return;
       if (event.defaultPrevented || isEditingTarget(event.target)) return;
       const key = event.key.toLowerCase();
       if (event.ctrlKey && event.shiftKey && key === 't') {
@@ -96,7 +127,7 @@ export function App({ config, api: suppliedApi }: AppProps) {
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [tabs]);
+  }, [settingsResponse.settings.workspaceShortcuts, tabs]);
 
   if (tabs.loading) return <StartupState state="loading" />;
 
@@ -121,118 +152,141 @@ export function App({ config, api: suppliedApi }: AppProps) {
   };
 
   return (
-    <main className="app-shell">
-      <header className="top-bar">
-        <TabBar
-          tabs={tabs.tabs}
-          selectedId={tabs.selectedId}
-          statusFor={(id) => {
-            const tab = tabs.tabs.find((candidate) => candidate.id === id);
-            return tab?.desiredState === 'stopped'
-              ? 'stopped'
-              : (statuses[id] ?? 'disconnected');
-          }}
-          onSelect={tabs.select}
-          onCreate={() => void tabs.create()}
-          onRename={(id, name) => void tabs.rename(id, name)}
-          onReorder={(ids) => void tabs.reorder(ids)}
-          onRequestClose={(id) => setConfirmation({ kind: 'close', id })}
+    <>
+      {view === 'settings' ? (
+        <SettingsView
+          response={settingsResponse}
+          busy={settingsBusy}
+          error={settingsError}
+          authMode={authMode}
+          onSave={onSaveSettings}
+          onBack={() => setView('terminal')}
+          {...(onChangePassword === undefined ? {} : { onChangePassword })}
         />
-        {selected ? (
-          <SessionMenu
-            desiredState={selected.desiredState}
-            sessionState={selected.session.state}
-            canMoveLeft={selectedIndex > 0}
-            canMoveRight={selectedIndex < tabs.tabs.length - 1}
-            onReconnect={() =>
-              sessionRefs.current.get(selected.id)?.reconnect()
-            }
-            onDetach={() => sessionRefs.current.get(selected.id)?.detach()}
-            onClear={() => sessionRefs.current.get(selected.id)?.clear()}
-            onRestartClient={() =>
-              setGenerations((current) => ({
-                ...current,
-                [selected.id]: (current[selected.id] ?? 0) + 1,
-              }))
-            }
-            onRestartBridge={() => void tabs.restartBridge(selected.id)}
-            onRestartSession={() =>
-              setConfirmation({ kind: 'restart', id: selected.id })
-            }
-            onTerminate={() =>
-              setConfirmation({ kind: 'terminate', id: selected.id })
-            }
-            onRecreate={() => void tabs.recreate(selected.id)}
-            onMoveLeft={() => reorderBy(-1)}
-            onMoveRight={() => reorderBy(1)}
-          />
-        ) : null}
-      </header>
-
-      {tabs.error ? (
-        <div className="workspace-error" role="alert">
-          {tabs.error}
-        </div>
       ) : null}
-      <div className="terminal-workspace">
-        {tabs.tabs.length === 0 ? (
-          <div className="empty-terminal">
-            <button type="button" onClick={() => void tabs.create()}>
-              New terminal
-            </button>
+      <main className="app-shell" hidden={view !== 'terminal'}>
+        <header className="top-bar">
+          <TabBar
+            tabs={tabs.tabs}
+            selectedId={tabs.selectedId}
+            statusFor={(id) => {
+              const tab = tabs.tabs.find((candidate) => candidate.id === id);
+              return tab?.desiredState === 'stopped'
+                ? 'stopped'
+                : (statuses[id] ?? 'disconnected');
+            }}
+            onSelect={tabs.select}
+            onCreate={() => void tabs.create()}
+            onRename={(id, name) => void tabs.rename(id, name)}
+            onReorder={(ids) => void tabs.reorder(ids)}
+            onRequestClose={(id) => setConfirmation({ kind: 'close', id })}
+          />
+          {selected ? (
+            <SessionMenu
+              desiredState={selected.desiredState}
+              sessionState={selected.session.state}
+              canMoveLeft={selectedIndex > 0}
+              canMoveRight={selectedIndex < tabs.tabs.length - 1}
+              onReconnect={() =>
+                sessionRefs.current.get(selected.id)?.reconnect()
+              }
+              onDetach={() => sessionRefs.current.get(selected.id)?.detach()}
+              onClear={() => sessionRefs.current.get(selected.id)?.clear()}
+              onRestartClient={() =>
+                setGenerations((current) => ({
+                  ...current,
+                  [selected.id]: (current[selected.id] ?? 0) + 1,
+                }))
+              }
+              onRestartBridge={() => void tabs.restartBridge(selected.id)}
+              onRestartSession={() =>
+                setConfirmation({ kind: 'restart', id: selected.id })
+              }
+              onTerminate={() =>
+                setConfirmation({ kind: 'terminate', id: selected.id })
+              }
+              onRecreate={() => void tabs.recreate(selected.id)}
+              onMoveLeft={() => reorderBy(-1)}
+              onMoveRight={() => reorderBy(1)}
+            />
+          ) : null}
+          <button
+            className="icon-button"
+            type="button"
+            title="Settings"
+            aria-label="Settings"
+            onClick={() => setView('settings')}
+          >
+            <Settings size={17} aria-hidden="true" />
+          </button>
+        </header>
+
+        {tabs.error ? (
+          <div className="workspace-error" role="alert">
+            {tabs.error}
           </div>
         ) : null}
-        {tabs.tabs.map((tab) => {
-          const visited = tabs.visitedIds.has(tab.id);
-          const active = tab.desiredState === 'active';
-          if (!visited || !active) return null;
-          return (
+        <div className="terminal-workspace">
+          {tabs.tabs.length === 0 ? (
+            <div className="empty-terminal">
+              <button type="button" onClick={() => void tabs.create()}>
+                New terminal
+              </button>
+            </div>
+          ) : null}
+          {tabs.tabs.map((tab) => {
+            const visited = tabs.visitedIds.has(tab.id);
+            const active = tab.desiredState === 'active';
+            if (!visited || !active) return null;
+            return (
+              <section
+                key={`${tab.id}:${generations[tab.id] ?? 0}`}
+                className="terminal-panel"
+                role="tabpanel"
+                aria-label={tab.displayName}
+                hidden={tab.id !== tabs.selectedId}
+              >
+                <TerminalSession
+                  ref={(handle) => {
+                    if (handle === null) sessionRefs.current.delete(tab.id);
+                    else sessionRefs.current.set(tab.id, handle);
+                  }}
+                  config={config}
+                  settings={settingsResponse.settings}
+                  tabId={tab.id}
+                  onStatus={onStatus}
+                  onSessionChanged={onSessionChanged}
+                />
+              </section>
+            );
+          })}
+          {selected?.desiredState === 'stopped' ? (
             <section
-              key={`${tab.id}:${generations[tab.id] ?? 0}`}
-              className="terminal-panel"
+              className="stopped-terminal"
               role="tabpanel"
-              aria-label={tab.displayName}
-              hidden={tab.id !== tabs.selectedId}
+              aria-label={selected.displayName}
             >
-              <TerminalSession
-                ref={(handle) => {
-                  if (handle === null) sessionRefs.current.delete(tab.id);
-                  else sessionRefs.current.set(tab.id, handle);
-                }}
-                config={config}
-                tabId={tab.id}
-                onStatus={onStatus}
-                onSessionChanged={onSessionChanged}
-              />
+              <span>Session stopped</span>
+              <button
+                type="button"
+                onClick={() => void tabs.recreate(selected.id)}
+              >
+                Recreate session
+              </button>
             </section>
-          );
-        })}
-        {selected?.desiredState === 'stopped' ? (
-          <section
-            className="stopped-terminal"
-            role="tabpanel"
-            aria-label={selected.displayName}
-          >
-            <span>Session stopped</span>
-            <button
-              type="button"
-              onClick={() => void tabs.recreate(selected.id)}
-            >
-              Recreate session
-            </button>
-          </section>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
 
-      <ConfirmDialog
-        open={confirmation !== null}
-        title={confirmationTitle(confirmation?.kind)}
-        description="This action affects the running shell in this tab."
-        confirmLabel={confirmationLabel(confirmation?.kind)}
-        onCancel={() => setConfirmation(null)}
-        onConfirm={() => void runConfirmation()}
-      />
-    </main>
+        <ConfirmDialog
+          open={confirmation !== null}
+          title={confirmationTitle(confirmation?.kind)}
+          description="This action affects the running shell in this tab."
+          confirmLabel={confirmationLabel(confirmation?.kind)}
+          onCancel={() => setConfirmation(null)}
+          onConfirm={() => void runConfirmation()}
+        />
+      </main>
+    </>
   );
 }
 

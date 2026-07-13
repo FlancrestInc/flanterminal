@@ -4,8 +4,6 @@ import { ClientConfigLoadError, loadClientConfig } from './config.js';
 
 const validConfig = {
   basePath: '/terminal/',
-  fontSize: 14,
-  scrollback: 5_000,
   resizeDebounceMs: 100,
   reconnectMaxSeconds: 8,
 };

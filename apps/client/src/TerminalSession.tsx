@@ -1,4 +1,4 @@
-import type { ClientConfig } from '@flanterminal/shared';
+import type { ClientConfig, WorkspaceSettings } from '@flanterminal/shared';
 import {
   forwardRef,
   useContext,
@@ -24,6 +24,7 @@ export interface TerminalSessionHandle {
 
 export type TerminalSessionProps = Readonly<{
   config: ClientConfig;
+  settings: WorkspaceSettings;
   tabId: string;
   onStatus: (
     id: string,
@@ -36,7 +37,10 @@ export type TerminalSessionProps = Readonly<{
 export const TerminalSession = forwardRef<
   TerminalSessionHandle,
   TerminalSessionProps
->(function TerminalSession({ config, tabId, onStatus, onSessionChanged }, ref) {
+>(function TerminalSession(
+  { config, settings, tabId, onStatus, onSessionChanged },
+  ref,
+) {
   const terminalRef = useRef<TerminalHandle>(null);
   const onAuthenticationRequired = useContext(AuthenticationRequiredContext);
   const dependencies = useMemo(
@@ -49,7 +53,10 @@ export const TerminalSession = forwardRef<
     }),
     [onAuthenticationRequired, onSessionChanged, tabId],
   );
-  const socket = useTerminalSocket(config, tabId, dependencies);
+  const socket = useTerminalSocket(config, tabId, {
+    ...dependencies,
+    reconnectBehavior: settings.reconnectBehavior,
+  });
 
   useEffect(() => {
     onStatus(tabId, socket.status, socket.error);
@@ -66,5 +73,12 @@ export const TerminalSession = forwardRef<
     [socket.disconnect, socket.reconnect],
   );
 
-  return <Terminal ref={terminalRef} config={config} socket={socket} />;
+  return (
+    <Terminal
+      ref={terminalRef}
+      config={config}
+      settings={settings}
+      socket={socket}
+    />
+  );
 });

@@ -1,4 +1,4 @@
-import type { ClientConfig } from '@flanterminal/shared';
+import type { ClientConfig, SettingsResponse } from '@flanterminal/shared';
 import type { ReactNode } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -6,12 +6,14 @@ import { App, StartupState } from './App.js';
 import { createAuthApi, type AuthApi } from './auth-api.js';
 import { loadClientConfig, type LoadClientConfigOptions } from './config.js';
 import { LoginScreen } from './LoginScreen.js';
+import { createSettingsApi, type SettingsApi } from './settings-api.js';
 import { createTabsApi } from './tabs-api.js';
 import {
   AuthenticationRequiredContext,
   useAuth,
   type AuthenticationRequiredHandler,
 } from './useAuth.js';
+import { useSettings } from './useSettings.js';
 
 type ConfigLoader = (
   options?: LoadClientConfigOptions,
@@ -21,10 +23,12 @@ export type AuthenticatedRootProps = Readonly<{
   api?: AuthApi;
   fetchImpl?: typeof fetch;
   loadConfig?: ConfigLoader;
+  settingsApi?: SettingsApi;
   renderWorkspace?: (
     config: ClientConfig,
     privateFetch: typeof fetch,
     onAuthenticationRequired: AuthenticationRequiredHandler,
+    settings: SettingsResponse,
   ) => ReactNode;
 }>;
 
@@ -32,6 +36,7 @@ export function AuthenticatedRoot({
   api: suppliedApi,
   fetchImpl,
   loadConfig = loadClientConfig,
+  settingsApi: suppliedSettingsApi,
   renderWorkspace,
 }: AuthenticatedRootProps) {
   const [loaded, setLoaded] = useState<{
@@ -55,6 +60,14 @@ export function AuthenticatedRoot({
         ? null
         : createTabsApi(loaded.config.basePath, auth.privateFetch),
     [auth.privateFetch, loaded.config],
+  );
+  const settingsApi = useMemo(
+    () =>
+      suppliedSettingsApi ??
+      (loaded.config === null
+        ? null
+        : createSettingsApi(loaded.config.basePath, auth.privateFetch)),
+    [auth.privateFetch, loaded.config, suppliedSettingsApi],
   );
 
   useEffect(() => {
@@ -91,16 +104,71 @@ export function AuthenticatedRoot({
   if (loaded.failed) return <StartupState state="error" />;
   if (loaded.config === null) return <StartupState state="loading" />;
   if (tabsApi === null) return <StartupState state="loading" />;
+  if (settingsApi === null) return <StartupState state="loading" />;
 
-  const workspace = renderWorkspace?.(
-    loaded.config,
-    auth.privateFetch,
-    auth.authenticationRequired,
-  ) ?? <App config={loaded.config} api={tabsApi} />;
   return (
     <AuthenticationRequiredContext.Provider value={auth.authenticationRequired}>
-      {workspace}
+      <SettingsWorkspace
+        config={loaded.config}
+        api={settingsApi}
+        privateFetch={auth.privateFetch}
+        onAuthenticationRequired={auth.authenticationRequired}
+        renderWorkspace={renderWorkspace}
+        tabsApi={tabsApi}
+        authMode={auth.bootstrap?.mode ?? 'none'}
+        authBusy={auth.busy}
+        authError={auth.error}
+        onChangePassword={auth.changePassword}
+      />
     </AuthenticationRequiredContext.Provider>
+  );
+}
+
+function SettingsWorkspace({
+  config,
+  api,
+  privateFetch,
+  onAuthenticationRequired,
+  renderWorkspace,
+  tabsApi,
+  authMode,
+  authBusy,
+  authError,
+  onChangePassword,
+}: Readonly<{
+  config: ClientConfig;
+  api: SettingsApi;
+  privateFetch: typeof fetch;
+  onAuthenticationRequired: AuthenticationRequiredHandler;
+  renderWorkspace: AuthenticatedRootProps['renderWorkspace'];
+  tabsApi: ReturnType<typeof createTabsApi>;
+  authMode: 'local' | 'cloudflare-access' | 'trusted-header' | 'none';
+  authBusy: boolean;
+  authError: string | null;
+  onChangePassword: (current: string, replacement: string) => Promise<void>;
+}>) {
+  const settings = useSettings(api, { onAuthenticationRequired });
+  if (settings.loading && settings.response === null)
+    return <StartupState state="loading" />;
+  if (settings.response === null) return <StartupState state="error" />;
+  return (
+    renderWorkspace?.(
+      config,
+      privateFetch,
+      onAuthenticationRequired,
+      settings.response,
+    ) ?? (
+      <App
+        config={config}
+        api={tabsApi}
+        settingsResponse={settings.response}
+        settingsBusy={settings.busy || authBusy}
+        settingsError={settings.error ?? authError}
+        onSaveSettings={settings.save}
+        authMode={authMode}
+        onChangePassword={onChangePassword}
+      />
+    )
   );
 }
 

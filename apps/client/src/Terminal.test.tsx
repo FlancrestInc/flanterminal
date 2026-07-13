@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import type { ClientConfig } from '@flanterminal/shared';
+import type { ClientConfig, WorkspaceSettings } from '@flanterminal/shared';
 import { act, render } from '@testing-library/react';
 import { createRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,10 +22,26 @@ type Mutable<T> = { -readonly [Property in keyof T]: T[Property] };
 
 const config: ClientConfig = {
   basePath: '/terminal',
-  fontSize: 15,
-  scrollback: 12_345,
   resizeDebounceMs: 75,
   reconnectMaxSeconds: 8,
+};
+const settings: WorkspaceSettings = {
+  version: 1,
+  fontFamily: 'jetbrains-mono-nerd',
+  fontSize: 15,
+  lineHeight: 1.2,
+  letterSpacing: 0,
+  scrollback: 12_345,
+  theme: 'dark',
+  cursorStyle: 'block',
+  cursorBlink: true,
+  bellBehavior: 'visual',
+  reconnectBehavior: 'automatic',
+  automaticTabCreation: true,
+  workspaceShortcuts: 'default',
+  defaultShell: '/bin/bash',
+  tmuxHistoryLimit: 20_000,
+  staleSessionCleanupHours: 0,
 };
 
 class FakeTerminal implements TerminalLike {
@@ -38,10 +54,18 @@ class FakeTerminal implements TerminalLike {
   readonly write = vi.fn();
   readonly dispose = vi.fn();
   readonly dataListeners = new Set<(data: string) => void>();
+  readonly bellListeners = new Set<() => void>();
 
   onData(listener: (data: string) => void) {
     this.dataListeners.add(listener);
     return { dispose: () => this.dataListeners.delete(listener) };
+  }
+  onBell(listener: () => void) {
+    this.bellListeners.add(listener);
+    return { dispose: () => this.bellListeners.delete(listener) };
+  }
+  bell() {
+    for (const listener of this.bellListeners) listener();
   }
 
   input(data: string) {
@@ -49,7 +73,10 @@ class FakeTerminal implements TerminalLike {
   }
 }
 
-function setup(status: TerminalSocketController['status'] = 'connected') {
+function setup(
+  status: TerminalSocketController['status'] = 'connected',
+  overrides: Partial<WorkspaceSettings> = {},
+) {
   const terminal = new FakeTerminal();
   const terminalFactory = vi.fn(() => terminal);
   const fitAddon = { fit: vi.fn(), dispose: vi.fn() };
@@ -90,9 +117,16 @@ function setup(status: TerminalSocketController['status'] = 'connected') {
     scheduleInitialFit,
     setTimer: setTimeout,
     clearTimer: clearTimeout,
+    audioFactory: vi.fn(() => ({ play: vi.fn(async () => undefined) })),
   };
+  const effectiveSettings = { ...settings, ...overrides };
   const view = render(
-    <Terminal config={config} socket={socket} dependencies={dependencies} />,
+    <Terminal
+      config={config}
+      settings={effectiveSettings}
+      socket={socket}
+      dependencies={dependencies}
+    />,
   );
   return {
     ...view,
@@ -107,6 +141,7 @@ function setup(status: TerminalSocketController['status'] = 'connected') {
     terminalFactory,
     unsubscribe,
     webLinksAddon,
+    settings: effectiveSettings,
   };
 }
 
@@ -136,6 +171,10 @@ describe('Terminal', () => {
         lineHeight: 1.2,
         rightClickSelectsWord: true,
         scrollback: 12_345,
+        theme: expect.objectContaining({
+          background: '#101112',
+          foreground: '#dddcd7',
+        }),
       }),
     );
     expect(terminal.loadAddon).toHaveBeenNthCalledWith(1, fitAddon);
@@ -188,6 +227,7 @@ describe('Terminal', () => {
     result.rerender(
       <Terminal
         config={config}
+        settings={result.settings}
         socket={result.socket}
         dependencies={result.dependencies}
       />,
@@ -199,6 +239,7 @@ describe('Terminal', () => {
     result.rerender(
       <Terminal
         config={config}
+        settings={result.settings}
         socket={result.socket}
         dependencies={result.dependencies}
       />,
@@ -207,6 +248,7 @@ describe('Terminal', () => {
     result.rerender(
       <Terminal
         config={config}
+        settings={result.settings}
         socket={result.socket}
         dependencies={result.dependencies}
       />,
@@ -247,6 +289,7 @@ describe('Terminal', () => {
       <Terminal
         ref={ref}
         config={config}
+        settings={settings}
         socket={result.socket}
         dependencies={dependencies}
       />,
@@ -257,6 +300,69 @@ describe('Terminal', () => {
     expect(terminal.focus).toHaveBeenCalledOnce();
     expect(terminal.clear).toHaveBeenCalledOnce();
     expect(terminalFactory).toHaveBeenCalledOnce();
+  });
+
+  it('applies every constructor preference and recreates xterm without reconnecting the socket', () => {
+    const result = setup('connected', {
+      fontFamily: 'system-monospace',
+      fontSize: 18,
+      lineHeight: 1.4,
+      letterSpacing: 2,
+      scrollback: 4_000,
+      theme: 'ubuntu',
+      cursorStyle: 'bar',
+      cursorBlink: false,
+      bellBehavior: 'none',
+    });
+    expect(result.terminalFactory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fontFamily: expect.stringContaining('ui-monospace'),
+        fontSize: 18,
+        lineHeight: 1.4,
+        letterSpacing: 2,
+        scrollback: 4_000,
+        cursorStyle: 'bar',
+        cursorBlink: false,
+        theme: expect.objectContaining({ background: '#300a24' }),
+      }),
+    );
+    result.rerender(
+      <Terminal
+        config={config}
+        settings={{ ...result.settings, fontSize: 19 }}
+        socket={result.socket}
+        dependencies={result.dependencies}
+      />,
+    );
+    expect(result.terminal.dispose).toHaveBeenCalledOnce();
+    expect(result.terminalFactory).toHaveBeenCalledTimes(2);
+    expect(result.socket.disconnect).not.toHaveBeenCalled();
+    expect(result.socket.reconnect).not.toHaveBeenCalled();
+  });
+
+  it('uses only the local bell asset and never stores bell or output data', async () => {
+    const storage = vi.spyOn(Storage.prototype, 'setItem');
+    const sound = setup('connected', { bellBehavior: 'sound' });
+    act(() => sound.terminal.bell());
+    const bellUrl = vi.mocked(sound.dependencies.audioFactory).mock
+      .calls[0]![0];
+    expect(new URL(bellUrl, window.location.href).origin).toBe(
+      window.location.origin,
+    );
+    expect(new URL(bellUrl, window.location.href).pathname).toMatch(
+      /terminal-bell\.wav$/,
+    );
+    const visual = setup('connected', { bellBehavior: 'visual' });
+    act(() => visual.terminal.bell());
+    expect(visual.container.querySelector('.terminal-host')).toHaveClass(
+      'is-belling',
+    );
+    act(() => vi.advanceTimersByTime(140));
+    expect(visual.container.querySelector('.terminal-host')).not.toHaveClass(
+      'is-belling',
+    );
+    expect(storage).not.toHaveBeenCalled();
+    storage.mockRestore();
   });
 
   it('disposes observers, scheduling, subscriptions, addons and terminal', () => {

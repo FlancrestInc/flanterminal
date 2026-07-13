@@ -28,6 +28,7 @@ export interface TerminalSocketDependencies {
   readonly onSessionStopped?: () => void;
   readonly onSessionRestarting?: () => void;
   readonly onAuthenticationRequired?: () => void;
+  readonly reconnectBehavior?: 'automatic' | 'manual';
 }
 
 export interface TerminalSocketController {
@@ -48,6 +49,22 @@ const SERVER_ERROR = 'Terminal server reported an error.';
 const SESSION_REPLACED_ERROR =
   'Terminal opened in another browser. Reconnect to take control.';
 const defaultSocketFactory: SocketFactory = (url) => new WebSocket(url);
+const authenticationSuspendedSessions = new Set<string>();
+const MAX_AUTHENTICATION_SUSPENSIONS = 64;
+
+function rememberAuthenticationSuspension(sessionId: string): void {
+  if (!authenticationSuspendedSessions.has(sessionId)) {
+    while (
+      authenticationSuspendedSessions.size >= MAX_AUTHENTICATION_SUSPENSIONS
+    ) {
+      const oldest = authenticationSuspendedSessions.values().next().value as
+        string | undefined;
+      if (oldest === undefined) break;
+      authenticationSuspendedSessions.delete(oldest);
+    }
+  }
+  authenticationSuspendedSessions.add(sessionId);
+}
 
 export function terminalSocketUrl(
   config: Pick<ClientConfig, 'basePath'>,
@@ -67,19 +84,35 @@ export function useTerminalSocket(
   const onSessionStopped = dependencies.onSessionStopped;
   const onSessionRestarting = dependencies.onSessionRestarting;
   const onAuthenticationRequired = dependencies.onAuthenticationRequired;
+  const reconnectBehavior = dependencies.reconnectBehavior ?? 'automatic';
   const factory = dependencies.socketFactory ?? defaultSocketFactory;
   const location = dependencies.location ?? window.location;
-  const [status, setStatus] = useState<ConnectionStatus>('connecting');
+  const [restoredManualSuspension] = useState(() => {
+    const restored =
+      reconnectBehavior === 'manual' &&
+      authenticationSuspendedSessions.has(sessionId);
+    if (reconnectBehavior === 'automatic')
+      authenticationSuspendedSessions.delete(sessionId);
+    return restored;
+  });
+  const [status, setStatus] = useState<ConnectionStatus>(
+    restoredManualSuspension ? 'disconnected' : 'connecting',
+  );
   const [error, setError] = useState<string | null>(null);
   const socketRef = useRef<BrowserSocket | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryAttemptRef = useRef(0);
   const generationRef = useRef(0);
-  const stoppedRef = useRef(false);
+  const stoppedRef = useRef(restoredManualSuspension);
   const authenticationSuspendedRef = useRef(false);
+  const reconnectBehaviorRef = useRef(reconnectBehavior);
   const removeSocketListenersRef = useRef<() => void>(() => undefined);
   const outputListenersRef = useRef(new Set<(data: string) => void>());
   const connectRef = useRef<() => void>(() => undefined);
+
+  useEffect(() => {
+    reconnectBehaviorRef.current = reconnectBehavior;
+  }, [reconnectBehavior]);
 
   const cancelRetry = useCallback(() => {
     if (retryTimerRef.current !== null) {
@@ -92,6 +125,13 @@ export function useTerminalSocket(
     (message?: string) => {
       if (stoppedRef.current) {
         setStatus('disconnected');
+        return;
+      }
+      if (reconnectBehaviorRef.current === 'manual') {
+        stoppedRef.current = true;
+        cancelRetry();
+        setStatus('disconnected');
+        if (message !== undefined) setError(message);
         return;
       }
       cancelRetry();
@@ -174,6 +214,7 @@ export function useTerminalSocket(
       socketRef.current = null;
       const code = (event as CloseEvent).code;
       if (code === AUTHENTICATION_REQUIRED) {
+        rememberAuthenticationSuspension(sessionId);
         authenticationSuspendedRef.current = true;
         stoppedRef.current = true;
         cancelRetry();
@@ -236,9 +277,9 @@ export function useTerminalSocket(
   }, [connect]);
 
   useEffect(() => {
-    stoppedRef.current = false;
+    stoppedRef.current = restoredManualSuspension;
     authenticationSuspendedRef.current = false;
-    connectRef.current();
+    if (!restoredManualSuspension) connectRef.current();
     return () => {
       stoppedRef.current = true;
       cancelRetry();
@@ -249,7 +290,7 @@ export function useTerminalSocket(
       socketRef.current = null;
       socket?.close(1000, 'Client disconnect');
     };
-  }, [cancelRetry, connect]);
+  }, [cancelRetry, connect, restoredManualSuspension]);
 
   const send = useCallback((message: ClientMessage): boolean => {
     const socket = socketRef.current;
@@ -300,6 +341,7 @@ export function useTerminalSocket(
 
   const reconnect = useCallback(() => {
     if (authenticationSuspendedRef.current) return;
+    authenticationSuspendedSessions.delete(sessionId);
     stoppedRef.current = false;
     cancelRetry();
     generationRef.current += 1;
@@ -311,7 +353,7 @@ export function useTerminalSocket(
     retryAttemptRef.current = 0;
     setStatus('connecting');
     connectRef.current();
-  }, [cancelRetry]);
+  }, [cancelRetry, sessionId]);
 
   return {
     status,

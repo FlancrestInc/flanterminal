@@ -132,8 +132,6 @@ describe('createApp', () => {
     expect(response.headers.get('cache-control')).toContain('no-store');
     expect(await response.json()).toEqual({
       basePath: '/terminal',
-      fontSize: 14,
-      scrollback: 10_000,
       resizeDebounceMs: 100,
       reconnectMaxSeconds: 15,
     });

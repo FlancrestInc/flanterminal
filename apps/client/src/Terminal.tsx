@@ -14,8 +14,10 @@ import {
   MIN_COLS,
   MIN_ROWS,
   type ClientConfig,
+  type WorkspaceSettings,
 } from '@flanterminal/shared';
 
+import { FONT_STACKS, themeFor } from './themes.js';
 import type { TerminalSocketController } from './useTerminalSocket.js';
 
 export interface DisposableLike {
@@ -37,6 +39,7 @@ export interface TerminalLike extends DisposableLike {
   clear(): void;
   write(data: string): void;
   onData(listener: (data: string) => void): DisposableLike;
+  onBell(listener: () => void): DisposableLike;
 }
 
 export interface ResizeObserverLike {
@@ -52,6 +55,7 @@ export interface TerminalDependencies {
   readonly scheduleInitialFit: (callback: () => void) => () => void;
   readonly setTimer: typeof setTimeout;
   readonly clearTimer: typeof clearTimeout;
+  readonly audioFactory: (url: string) => Readonly<{ play(): Promise<void> }>;
 }
 
 const defaultDependencies: TerminalDependencies = {
@@ -70,6 +74,7 @@ const defaultDependencies: TerminalDependencies = {
       clear: () => terminal.clear(),
       write: (data) => terminal.write(data),
       onData: (listener) => terminal.onData(listener),
+      onBell: (listener) => terminal.onBell(listener),
       dispose: () => terminal.dispose(),
     };
   },
@@ -91,10 +96,12 @@ const defaultDependencies: TerminalDependencies = {
   },
   setTimer: (callback, delay, ...args) => setTimeout(callback, delay, ...args),
   clearTimer: (timer) => clearTimeout(timer),
+  audioFactory: (url) => new Audio(url),
 };
 
 export interface TerminalProps {
   readonly config: ClientConfig;
+  readonly settings: WorkspaceSettings;
   readonly socket: TerminalSocketController;
   readonly dependencies?: TerminalDependencies;
 }
@@ -104,12 +111,12 @@ export interface TerminalHandle {
   clear(): void;
 }
 
-const FONT_FAMILY =
-  "'JetBrainsMono Nerd Font', ui-monospace, 'Noto Sans Mono', 'Symbols Nerd Font', 'Noto Color Emoji', monospace";
+const BELL_URL = new URL('./assets/sounds/terminal-bell.wav', import.meta.url)
+  .href;
 
 export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
   function Terminal(
-    { config, socket, dependencies = defaultDependencies },
+    { config, settings, socket, dependencies = defaultDependencies },
     ref,
   ) {
     const hostRef = useRef<HTMLDivElement>(null);
@@ -146,14 +153,15 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         allowTransparency: false,
         altClickMovesCursor: true,
         convertEol: false,
-        cursorBlink: true,
-        cursorStyle: 'block',
-        fontFamily: FONT_FAMILY,
-        fontSize: config.fontSize,
-        letterSpacing: 0,
-        lineHeight: 1.2,
+        cursorBlink: settings.cursorBlink,
+        cursorStyle: settings.cursorStyle,
+        fontFamily: FONT_STACKS[settings.fontFamily],
+        fontSize: settings.fontSize,
+        letterSpacing: settings.letterSpacing,
+        lineHeight: settings.lineHeight,
         rightClickSelectsWord: true,
-        scrollback: config.scrollback,
+        scrollback: settings.scrollback,
+        theme: themeFor(settings.theme).terminal,
       });
       const fitAddon = dependencies.fitAddonFactory();
       const webLinksAddon = dependencies.webLinksAddonFactory();
@@ -208,6 +216,23 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       const outputSubscription = subscribeOutput((data) => {
         terminal.write(data);
       });
+      let bellTimer: ReturnType<typeof setTimeout> | null = null;
+      const bellSubscription = terminal.onBell(() => {
+        if (settings.bellBehavior === 'none') return;
+        if (settings.bellBehavior === 'sound') {
+          void dependencies
+            .audioFactory(BELL_URL)
+            .play()
+            .catch(() => undefined);
+          return;
+        }
+        host.classList.add('is-belling');
+        if (bellTimer !== null) dependencies.clearTimer(bellTimer);
+        bellTimer = dependencies.setTimer(() => {
+          bellTimer = null;
+          host.classList.remove('is-belling');
+        }, 140);
+      });
 
       return () => {
         observer.disconnect();
@@ -219,15 +244,25 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         cancelResizeRef.current = () => undefined;
         dataSubscription.dispose();
         outputSubscription();
+        bellSubscription.dispose();
+        if (bellTimer !== null) dependencies.clearTimer(bellTimer);
+        host.classList.remove('is-belling');
         fitAddon.dispose();
         webLinksAddon.dispose();
         terminal.dispose();
       };
     }, [
-      config.fontSize,
       config.resizeDebounceMs,
-      config.scrollback,
       dependencies,
+      settings.bellBehavior,
+      settings.cursorBlink,
+      settings.cursorStyle,
+      settings.fontFamily,
+      settings.fontSize,
+      settings.letterSpacing,
+      settings.lineHeight,
+      settings.scrollback,
+      settings.theme,
       sendInput,
       sendResize,
       subscribeOutput,
