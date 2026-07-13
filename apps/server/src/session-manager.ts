@@ -23,6 +23,10 @@ import {
   type SocketPort,
 } from './terminal-bridge.js';
 import type { AttachSpec, SessionPreparer } from './tmux.js';
+import type {
+  SessionRuntimeSettings,
+  SessionRuntimeSettingsProvider,
+} from './session-runtime-settings.js';
 
 export type ManagedBridgeOptions = Readonly<{
   sessionId: string;
@@ -76,7 +80,7 @@ export interface SessionRuntimeController extends SessionPreparer {
   exists(sessionId: string): Promise<boolean>;
   kill(sessionId: string): Promise<void>;
   listActiveSessionIds(): Promise<string[]>;
-  attachSpec(sessionId: string): AttachSpec;
+  attachSpec(sessionId: string, settings?: SessionRuntimeSettings): AttachSpec;
 }
 
 export type SessionManagerOptions = Readonly<{
@@ -86,6 +90,7 @@ export type SessionManagerOptions = Readonly<{
   bridgeFactory: ManagedBridgeFactory;
   store?: SessionTabStore;
   activity?: ActivityMarker;
+  runtimeSettings?: SessionRuntimeSettingsProvider;
 }>;
 
 const ATTACH_TOKEN_BRAND = Symbol('AttachToken');
@@ -243,6 +248,7 @@ export class SessionManager {
         dimensions,
         dependencies.runtime,
         true,
+        this.captureRuntimeSettings(),
       );
     });
   }
@@ -280,6 +286,7 @@ export class SessionManager {
       if (this.requireCurrentRecord(id).desiredState !== 'stopped') {
         throw new InvalidSessionStateError();
       }
+      const settings = this.captureRuntimeSettings();
 
       let exists: boolean;
       try {
@@ -291,7 +298,7 @@ export class SessionManager {
 
       this.incrementGeneration(id);
       try {
-        await dependencies.runtime.prepare(id);
+        await dependencies.runtime.prepare(id, settings);
         await dependencies.store.setDesiredState(id, 'active');
       } catch {
         await ignoreFailure(() => dependencies.runtime.kill(id));
@@ -309,6 +316,7 @@ export class SessionManager {
   restart(id: string): Promise<TabView> {
     return this.mutex.runExclusive(id, async () => {
       const dependencies = this.requireLifecycleTab(id);
+      const settings = this.captureRuntimeSettings();
       this.incrementGeneration(id);
       try {
         await dependencies.store.setDesiredState(id, 'stopped');
@@ -328,7 +336,7 @@ export class SessionManager {
       }
 
       try {
-        await dependencies.runtime.prepare(id);
+        await dependencies.runtime.prepare(id, settings);
         await dependencies.store.setDesiredState(id, 'active');
       } catch {
         await ignoreFailure(() => dependencies.runtime.kill(id));
@@ -452,9 +460,10 @@ export class SessionManager {
     dimensions: TerminalDimensions,
     preparer: SessionPreparer,
     markActivity: boolean,
+    settings?: SessionRuntimeSettings,
   ): Promise<BridgeOwner> {
     try {
-      const spec = await preparer.prepare(id);
+      const spec = await preparer.prepare(id, settings);
       await this.options.registry.close(id);
       const pty = this.options.ptyFactory.spawn(spec, dimensions);
       const bridge = this.options.bridgeFactory.create({
@@ -613,6 +622,16 @@ export class SessionManager {
       this.options.activity?.mark(id);
     } catch {
       // Activity is best-effort and must not change lifecycle outcomes.
+    }
+  }
+
+  private captureRuntimeSettings(): SessionRuntimeSettings {
+    try {
+      const settings = this.options.runtimeSettings?.current();
+      if (settings === undefined) throw new Error();
+      return settings;
+    } catch {
+      throw new OperationFailedError();
     }
   }
 }

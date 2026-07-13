@@ -30,6 +30,7 @@ import type {
   UpstreamAuthentication,
   UpstreamIdentity,
 } from './auth-types.js';
+import type { AuthenticatedWorkspaceBootstrap } from './workspace-bootstrap.js';
 
 const MAX_JSON_BYTES = 16 * 1024;
 const INVALID_BODY_ERROR_TYPES = new Set([
@@ -61,6 +62,7 @@ export type AuthRouterOptions = Omit<AuthMiddlewareOptions, 'authService'> &
     authService: AuthRouterService;
     basePath: string;
     secureCookie: boolean;
+    workspaceBootstrap: AuthenticatedWorkspaceBootstrap;
   }>;
 
 export function createAuthRouter(options: AuthRouterOptions): Router {
@@ -87,12 +89,13 @@ export function createAuthRouter(options: AuthRouterOptions): Router {
       response.locals.authSession = existing.authSession;
       if (existing.upstreamIdentity !== undefined)
         response.locals.upstreamIdentity = existing.upstreamIdentity;
-      options.authService.touch(existing.authSession.id, 'http');
       const resumed = options.authService.resume(existing.authSession.id);
       if (resumed === undefined) {
         sendError(response, 401, 'authentication_required');
         return;
       }
+      await options.workspaceBootstrap.ensureForAuthenticatedSession();
+      options.authService.touch(existing.authSession.id, 'http');
       response.json(resumed.bootstrap);
       return;
     }
@@ -105,7 +108,7 @@ export function createAuthRouter(options: AuthRouterOptions): Router {
       return;
     }
     const result = await options.authService.bootstrap(upstream);
-    publishBootstrap(options, response, result);
+    await publishBootstrap(options, response, result);
   });
 
   router.post(
@@ -132,7 +135,7 @@ export function createAuthRouter(options: AuthRouterOptions): Router {
         sendError(response, 401, 'authentication_failed');
         return;
       }
-      publishBootstrap(options, response, result);
+      await publishBootstrap(options, response, result);
     },
   );
 
@@ -232,11 +235,11 @@ export function createAuthRouter(options: AuthRouterOptions): Router {
   return router;
 }
 
-function publishBootstrap(
+async function publishBootstrap(
   options: AuthRouterOptions,
   response: Response,
   result: AuthBootstrapResult,
-): void {
+): Promise<void> {
   if (!result.bootstrap.authenticated) {
     if (result.cookieValue !== undefined) throw new Error('Invalid bootstrap');
     response.json(result.bootstrap);
@@ -251,6 +254,7 @@ function publishBootstrap(
     session.identityLabel !== result.bootstrap.identityLabel
   )
     throw new Error('Invalid bootstrap');
+  await options.workspaceBootstrap.ensureForAuthenticatedSession();
   options.authService.touch(session.id, 'http');
   setSessionCookie(
     response,

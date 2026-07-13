@@ -151,20 +151,10 @@ export class TabStore {
         this.ready = true;
       } catch (error) {
         if (!isErrorCode(error, 'ENOENT')) throw error;
-        const timestamp = this.now();
         document = parseDocument({
           formatVersion: TAB_DOCUMENT_FORMAT_VERSION,
           structureRevision: 0,
-          tabs: [
-            {
-              id: this.randomUUID(),
-              displayName: 'Terminal 1',
-              position: 0,
-              createdAt: timestamp,
-              lastActivityAt: timestamp,
-              desiredState: 'active',
-            },
-          ],
+          tabs: [],
         });
         await this.persist(document);
       }
@@ -205,6 +195,28 @@ export class TabStore {
       };
       return {
         next: structuralDocument(current, [...current.tabs, tab]),
+        result: () => findTab(this.requireDocument(), tab.id),
+      };
+    });
+  }
+
+  ensureInitialTab(): Promise<TabRecord | undefined> {
+    return this.mutate(async (current) => {
+      if (current.tabs.length > 0) return undefined;
+      if (current.tabs.length >= this.options.sessionMaxCount) {
+        throw new SessionLimitError();
+      }
+      const timestamp = this.now();
+      const tab: TabRecord = {
+        id: this.randomUUID(),
+        displayName: 'Terminal 1',
+        position: 0,
+        createdAt: timestamp,
+        lastActivityAt: timestamp,
+        desiredState: 'active',
+      };
+      return {
+        next: structuralDocument(current, [tab]),
         result: () => findTab(this.requireDocument(), tab.id),
       };
     });

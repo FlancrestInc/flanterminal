@@ -24,6 +24,7 @@ import {
   type SessionTabStore,
 } from './session-manager.js';
 import type { BridgeOwner, SocketPort } from './terminal-bridge.js';
+import type { SessionRuntimeSettings } from './session-runtime-settings.js';
 import type { AttachSpec } from './tmux.js';
 
 const TAB_A = '11111111-1111-4111-8111-111111111111';
@@ -40,8 +41,70 @@ const attachSpec: AttachSpec = Object.freeze({
     TERM: 'xterm-256color',
   }),
 });
+const runtimeSettings = Object.freeze({
+  shell: '/bin/bash',
+  historyLimit: 20_000,
+});
 
 describe('SessionManager Phase 2 lifecycle', () => {
+  it('captures one runtime snapshot before commands and does not mix changes across awaits', async () => {
+    const harness = createHarness();
+    harness.store.applyState(TAB_A, 'stopped');
+    harness.tmux.active.delete(TAB_A);
+    const existsGate = deferred<boolean>();
+    vi.mocked(harness.tmux.exists).mockReturnValueOnce(existsGate.promise);
+    const first = Object.freeze({ shell: '/bin/zsh', historyLimit: 30_000 });
+    const second = Object.freeze({ shell: '/bin/bash', historyLimit: 40_000 });
+    vi.mocked(harness.runtimeSettings.current).mockReturnValueOnce(first);
+
+    const recreating = harness.manager.recreate(TAB_A);
+    await vi.waitFor(() =>
+      expect(harness.runtimeSettings.current).toHaveBeenCalledOnce(),
+    );
+    vi.mocked(harness.runtimeSettings.current).mockReturnValue(second);
+    existsGate.resolve(false);
+    await recreating;
+
+    expect(harness.tmux.prepare).toHaveBeenCalledWith(TAB_A, first);
+    expect(harness.runtimeSettings.current).toHaveBeenCalledOnce();
+  });
+
+  it('rejects invalid runtime settings before any tmux command', async () => {
+    const harness = createHarness();
+    harness.store.applyState(TAB_A, 'stopped');
+    harness.tmux.active.delete(TAB_A);
+    vi.mocked(harness.runtimeSettings.current).mockImplementationOnce(() => {
+      throw new Error('Invalid runtime settings');
+    });
+
+    await expect(harness.manager.recreate(TAB_A)).rejects.toBeInstanceOf(
+      OperationFailedError,
+    );
+
+    expect(harness.tmux.exists).not.toHaveBeenCalled();
+    expect(harness.tmux.prepare).not.toHaveBeenCalled();
+    expect(harness.tmux.kill).not.toHaveBeenCalled();
+  });
+
+  it('reads exactly one current snapshot for create and restart operations', async () => {
+    const creating = createHarness();
+    await creating.manager.connect(
+      creating.manager.authorize(TAB_A)!,
+      fakeSocket(),
+      { cols: 80, rows: 24 },
+    );
+    expect(creating.runtimeSettings.current).toHaveBeenCalledOnce();
+    expect(creating.tmux.prepare).toHaveBeenCalledWith(TAB_A, runtimeSettings);
+
+    const restarting = createHarness();
+    await restarting.manager.restart(TAB_A);
+    expect(restarting.runtimeSettings.current).toHaveBeenCalledOnce();
+    expect(restarting.tmux.prepare).toHaveBeenCalledWith(
+      TAB_A,
+      runtimeSettings,
+    );
+  });
+
   it('authorizes only canonical active existing tabs with an immutable token', () => {
     const harness = createHarness();
     harness.store.records.get(TAB_B)!.desiredState = 'stopped';
@@ -83,7 +146,7 @@ describe('SessionManager Phase 2 lifecycle', () => {
       rows: 24,
     });
 
-    expect(harness.tmux.prepare).toHaveBeenCalledWith(TAB_A);
+    expect(harness.tmux.prepare).toHaveBeenCalledWith(TAB_A, runtimeSettings);
     expect(harness.ptyFactory.spawn).toHaveBeenCalledWith(attachSpec, {
       cols: 80,
       rows: 24,
@@ -131,7 +194,7 @@ describe('SessionManager Phase 2 lifecycle', () => {
       { cols: 80, rows: 24 },
     );
     await vi.waitFor(() =>
-      expect(harness.tmux.prepare).toHaveBeenCalledWith(TAB_A),
+      expect(harness.tmux.prepare).toHaveBeenCalledWith(TAB_A, runtimeSettings),
     );
 
     await harness.manager.connect(
@@ -947,6 +1010,9 @@ function createHarness() {
     create: vi.fn(({ pty }) => ({ close: vi.fn(async () => pty.kill()) })),
   };
   const activity = { mark: vi.fn<(id: string) => void>() };
+  const runtimeSettingsProvider = {
+    current: vi.fn((): SessionRuntimeSettings => runtimeSettings),
+  };
   const manager = new SessionManager({
     store,
     activity,
@@ -954,6 +1020,7 @@ function createHarness() {
     ptyFactory,
     registry,
     bridgeFactory,
+    runtimeSettings: runtimeSettingsProvider,
   });
   return {
     manager,
@@ -963,6 +1030,7 @@ function createHarness() {
     ptyFactory,
     bridgeFactory,
     activity,
+    runtimeSettings: runtimeSettingsProvider,
   };
 }
 
@@ -1007,10 +1075,13 @@ class MemoryStore implements SessionTabStore {
 
 class FakeTmux implements SessionRuntimeController {
   readonly active: Set<string>;
-  readonly prepare = vi.fn(async (id: string) => {
-    this.active.add(id);
-    return attachSpec;
-  });
+  readonly prepare = vi.fn(
+    async (id: string, settings: SessionRuntimeSettings) => {
+      void settings;
+      this.active.add(id);
+      return attachSpec;
+    },
+  );
   readonly exists = vi.fn(async (id: string) => this.active.has(id));
   readonly kill = vi.fn(async (id: string) => {
     this.active.delete(id);

@@ -13,10 +13,9 @@ const SESSION_NAME = 'webterm-tab-550e8400e29b41d4a716446655440000';
 
 const config = {
   executable: '/usr/bin/tmux',
-  shell: '/bin/bash',
   homeDir: '/home/webterm',
-  historyLimit: 20_000,
 };
+const settings = Object.freeze({ shell: '/bin/bash', historyLimit: 20_000 });
 
 function runnerWith(...results: CommandResult[]): CommandRunner {
   let index = 0;
@@ -39,7 +38,7 @@ describe('TmuxSessionPreparer', () => {
       const runner = runnerWith();
       const preparer = new TmuxSessionPreparer(config, runner);
 
-      await expect(preparer.prepare(sessionId)).rejects.toThrow(
+      await expect(preparer.prepare(sessionId, settings)).rejects.toThrow(
         'Invalid session',
       );
       expect(runner.run).not.toHaveBeenCalled();
@@ -82,7 +81,7 @@ describe('TmuxSessionPreparer', () => {
     const runner = runnerWith({ exitCode: 0, stdout: '', stderr: '' });
     const preparer = new TmuxSessionPreparer(config, runner);
 
-    await preparer.prepare(SESSION_ID);
+    await preparer.prepare(SESSION_ID, settings);
 
     expect(runner.run).toHaveBeenCalledOnce();
   });
@@ -94,7 +93,7 @@ describe('TmuxSessionPreparer', () => {
     );
     const preparer = new TmuxSessionPreparer(config, runner);
 
-    await preparer.prepare(SESSION_ID);
+    await preparer.prepare(SESSION_ID, settings);
 
     expect(runner.run).toHaveBeenNthCalledWith(2, '/usr/bin/tmux', [
       'start-server',
@@ -208,7 +207,7 @@ describe('TmuxSessionPreparer', () => {
       runnerWith({ exitCode: 0, stdout: '', stderr: '' }),
     );
 
-    await expect(preparer.prepare(SESSION_ID)).resolves.toEqual({
+    await expect(preparer.prepare(SESSION_ID, settings)).resolves.toEqual({
       executable: '/usr/bin/tmux',
       args: ['attach-session', '-t', SESSION_NAME],
       cwd: '/home/webterm',
@@ -219,4 +218,34 @@ describe('TmuxSessionPreparer', () => {
       },
     });
   });
+
+  it('uses only the captured settings snapshot across the existence await', async () => {
+    const probe = deferred<CommandResult>();
+    const runner: CommandRunner = {
+      run: vi
+        .fn<CommandRunner['run']>()
+        .mockReturnValueOnce(probe.promise)
+        .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' }),
+    };
+    const preparer = new TmuxSessionPreparer(config, runner);
+    const captured = Object.freeze({ shell: '/bin/zsh', historyLimit: 30_000 });
+
+    const preparing = preparer.prepare(SESSION_ID, captured);
+    probe.resolve({ exitCode: 1, stdout: '', stderr: '' });
+    await preparing;
+
+    expect(runner.run).toHaveBeenNthCalledWith(
+      2,
+      '/usr/bin/tmux',
+      expect.arrayContaining(['30000', '/bin/zsh']),
+    );
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}

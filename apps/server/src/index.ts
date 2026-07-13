@@ -233,9 +233,7 @@ export async function startProductionServer(
   const preparer = new TmuxSessionPreparer(
     {
       executable: TMUX_EXECUTABLE,
-      shell: config.defaultShell,
       homeDir: config.homeDir,
-      historyLimit: config.tmuxHistoryLimit,
     },
     runner,
   );
@@ -250,6 +248,13 @@ export async function startProductionServer(
     ),
     store: tabStore,
     activity,
+    runtimeSettings: {
+      current: () =>
+        Object.freeze({
+          shell: config.defaultShell,
+          historyLimit: config.tmuxHistoryLimit,
+        }),
+    },
   });
 
   const runtime: {

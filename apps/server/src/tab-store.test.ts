@@ -26,26 +26,57 @@ const LATER = '2026-07-11T12:05:00.000Z';
 const TEMP_PATH_PATTERN = /^\/data\/tabs\.json\.tmp\./;
 
 describe('TabStore', () => {
-  it('atomically creates one active Terminal 1 only when primary is absent', async () => {
+  it('atomically persists a valid empty document when primary is absent', async () => {
     const fs = new MemoryFileSystem();
     const store = makeStore(fs);
 
     await store.initialize();
 
-    expect(store.snapshot()).toEqual({
-      structureRevision: 0,
-      tabs: [
-        {
-          id: IDS[0],
-          displayName: 'Terminal 1',
-          position: 0,
-          createdAt: NOW,
-          lastActivityAt: NOW,
-          desiredState: 'active',
-        },
-      ],
+    expect(store.snapshot()).toEqual({ structureRevision: 0, tabs: [] });
+    expect(readDocument(fs).tabs).toEqual([]);
+  });
+
+  it('serializes idempotent initial-tab creation and persists Terminal 1 once', async () => {
+    const fs = new MemoryFileSystem();
+    const store = makeStore(fs);
+    await store.initialize();
+
+    const [first, second] = await Promise.all([
+      store.ensureInitialTab(),
+      store.ensureInitialTab(),
+    ]);
+
+    expect(first).toMatchObject({ displayName: 'Terminal 1', position: 0 });
+    expect(second).toBeUndefined();
+    expect(store.snapshot()).toMatchObject({
+      structureRevision: 1,
+      tabs: [{ displayName: 'Terminal 1' }],
     });
     expect(readDocument(fs).tabs).toHaveLength(1);
+  });
+
+  it('leaves existing Phase 2 metadata untouched and enforces the session limit', async () => {
+    const existing = document([record(IDS[0], 0, 'Existing')], 7);
+    const fs = new MemoryFileSystem({
+      '/data/tabs.json': JSON.stringify(existing),
+    });
+    const store = makeStore(fs, { maxCount: 1 });
+    await store.initialize();
+    fs.operations.length = 0;
+
+    await expect(store.ensureInitialTab()).resolves.toBeUndefined();
+
+    expect(store.snapshot()).toEqual({
+      structureRevision: 7,
+      tabs: [record(IDS[0], 0, 'Existing')],
+    });
+    expect(fs.operations).toEqual([]);
+
+    const impossible = makeStore(new MemoryFileSystem(), { maxCount: 0 });
+    await impossible.initialize();
+    await expect(impossible.ensureInitialTab()).rejects.toBeInstanceOf(
+      SessionLimitError,
+    );
   });
 
   it('restores a valid intentional empty document without recreating a tab', async () => {
@@ -196,6 +227,7 @@ describe('TabStore', () => {
   it('returns immutable snapshots and records detached from internal state', async () => {
     const store = makeStore(new MemoryFileSystem());
     await store.initialize();
+    await store.ensureInitialTab();
 
     const snapshot = store.snapshot();
     expect(Object.isFrozen(snapshot)).toBe(true);
@@ -210,6 +242,7 @@ describe('TabStore', () => {
   it('creates generated UUID tabs with normalized or sequential names', async () => {
     const store = makeStore(new MemoryFileSystem());
     await store.initialize();
+    await store.ensureInitialTab();
 
     const named = await store.create('  Cafe\u0301  ');
     const automatic = await store.create();
@@ -225,13 +258,14 @@ describe('TabStore', () => {
       position: 2,
     });
     expect(Object.isFrozen(named)).toBe(true);
-    expect(store.snapshot().structureRevision).toBe(2);
+    expect(store.snapshot().structureRevision).toBe(3);
   });
 
   it('enforces session capacity with a stable error and no write', async () => {
     const fs = new MemoryFileSystem();
     const store = makeStore(fs, { maxCount: 1 });
     await store.initialize();
+    await store.ensureInitialTab();
     fs.operations.length = 0;
 
     await expect(store.create()).rejects.toEqual(
@@ -244,6 +278,7 @@ describe('TabStore', () => {
   it('normalizes rename and reports missing tabs with a stable error', async () => {
     const store = makeStore(new MemoryFileSystem());
     await store.initialize();
+    await store.ensureInitialTab();
 
     await expect(store.rename(IDS[0], '  Cafe\u0301  ')).resolves.toMatchObject(
       {
@@ -253,12 +288,13 @@ describe('TabStore', () => {
     await expect(store.rename(IDS[5], 'Missing')).rejects.toBeInstanceOf(
       TabNotFoundError,
     );
-    expect(store.snapshot().structureRevision).toBe(1);
+    expect(store.snapshot().structureRevision).toBe(2);
   });
 
   it('reorders only an exact current ID set at the current revision', async () => {
     const store = makeStore(new MemoryFileSystem());
     await store.initialize();
+    await store.ensureInitialTab();
     const second = await store.create('Second');
     const revision = store.snapshot().structureRevision;
 
@@ -281,6 +317,7 @@ describe('TabStore', () => {
   it('sets desired state, removes tabs, and keeps positions contiguous', async () => {
     const store = makeStore(new MemoryFileSystem());
     await store.initialize();
+    await store.ensureInitialTab();
     const second = await store.create('Second');
     const third = await store.create('Third');
 
@@ -307,6 +344,7 @@ describe('TabStore', () => {
     const fs = new MemoryFileSystem();
     const store = makeStore(fs);
     await store.initialize();
+    await store.ensureInitialTab();
     const revision = store.snapshot().structureRevision;
 
     await store.flushActivity(new Set([IDS[0], IDS[5]]), LATER);
@@ -324,6 +362,7 @@ describe('TabStore', () => {
     const fs = new MemoryFileSystem();
     const store = makeStore(fs);
     await store.initialize();
+    await store.ensureInitialTab();
     fs.pauseNextWrite();
 
     const first = store.create('Second');
@@ -334,7 +373,7 @@ describe('TabStore', () => {
     await Promise.all([first, second]);
 
     expect(store.snapshot()).toMatchObject({
-      structureRevision: 2,
+      structureRevision: 3,
       tabs: [{ displayName: 'Primary' }, { displayName: 'Second' }],
     });
   });
@@ -411,6 +450,7 @@ describe('TabStore', () => {
     const fs = new MemoryFileSystem();
     const store = makeStore(fs);
     await store.initialize();
+    await store.ensureInitialTab();
     fs.operations.length = 0;
 
     await store.rename(IDS[0], 'One');
@@ -442,6 +482,7 @@ describe('TabStore', () => {
     const fs = new MemoryFileSystem();
     const store = makeStore(fs);
     await store.initialize();
+    await store.ensureInitialTab();
     fs.collideNextOpen = true;
 
     await store.rename(IDS[0], 'Retried');
@@ -461,6 +502,7 @@ describe('TabStore', () => {
       const fs = new MemoryFileSystem();
       const store = makeStore(fs);
       await store.initialize();
+      await store.ensureInitialTab();
       const beforeMemory = store.snapshot();
       const beforeDisk = fs.entry('/data/tabs.json');
       fs.failNext = phase;
@@ -482,6 +524,7 @@ describe('TabStore', () => {
     const onDurabilityEvent = vi.fn();
     const store = makeStore(fs, { onDurabilityEvent });
     await store.initialize();
+    await store.ensureInitialTab();
     fs.failNext = 'dir-sync';
 
     await expect(store.rename(IDS[0], 'Committed')).resolves.toMatchObject({
@@ -510,6 +553,7 @@ describe('TabStore', () => {
     const onDurabilityEvent = vi.fn();
     const store = makeStore(fs, { onDurabilityEvent });
     await store.initialize();
+    await store.ensureInitialTab();
     fs.failNext = 'dir-sync';
     fs.directoryCloseError = nodeError('EINVAL');
 
@@ -545,11 +589,12 @@ function makeStore(
   } = {},
 ) {
   let index = 0;
+  const generated = [IDS[1], IDS[0], IDS[1], IDS[2], IDS[3], IDS[4], IDS[5]];
   return new TabStore({
     dataDir: '/data',
     sessionMaxCount: options.maxCount ?? 10,
     fileSystem,
-    randomUUID: () => IDS[index++ % IDS.length]!,
+    randomUUID: () => generated[index++ % generated.length]!,
     now: () => NOW,
     ...(options.onDurabilityEvent
       ? { onDurabilityEvent: options.onDurabilityEvent }

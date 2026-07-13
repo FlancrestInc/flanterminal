@@ -42,6 +42,9 @@ describe('createAuthRouter', () => {
       type: 'none',
     });
     expect(response.headers.get('set-cookie')).toBeNull();
+    expect(
+      options.workspaceBootstrap.ensureForAuthenticatedSession,
+    ).not.toHaveBeenCalled();
   });
 
   it('establishes none mode and returns only shared bootstrap fields', async () => {
@@ -67,6 +70,12 @@ describe('createAuthRouter', () => {
       'Path=/terminal; HttpOnly; Secure; SameSite=Strict',
     );
     expect(text).not.toContain('cookieValue');
+    expect(
+      options.workspaceBootstrap.ensureForAuthenticatedSession,
+    ).toHaveBeenCalledOnce();
+    expect(options.authService.authenticateCookie).toHaveBeenCalledBefore(
+      vi.mocked(options.workspaceBootstrap.ensureForAuthenticatedSession),
+    );
   });
 
   it.each(['missing cookie value', 'unresolved cookie session'] as const)(
@@ -91,6 +100,9 @@ describe('createAuthRouter', () => {
       expect(JSON.parse(text)).toEqual({ error: 'operation_failed' });
       expect(text).not.toContain(CSRF);
       expect(response.headers.get('set-cookie')).toBeNull();
+      expect(
+        options.workspaceBootstrap.ensureForAuthenticatedSession,
+      ).not.toHaveBeenCalled();
       expect(options.authService.touch).not.toHaveBeenCalled();
       expect(options.authService.authenticateCookie).toHaveBeenCalledTimes(
         failure === 'missing cookie value' ? 0 : 1,
@@ -120,6 +132,9 @@ describe('createAuthRouter', () => {
       'http',
     );
     expect(options.authService.bootstrap).not.toHaveBeenCalled();
+    expect(
+      options.workspaceBootstrap.ensureForAuthenticatedSession,
+    ).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -172,6 +187,68 @@ describe('createAuthRouter', () => {
     expect(response.headers.get('set-cookie')).toBe(
       `flanterminal_session=${COOKIE}; Path=/terminal; HttpOnly; Secure; SameSite=Strict`,
     );
+    expect(
+      options.workspaceBootstrap.ensureForAuthenticatedSession,
+    ).toHaveBeenCalledOnce();
+    expect(options.authService.authenticateCookie).toHaveBeenCalledBefore(
+      vi.mocked(options.workspaceBootstrap.ensureForAuthenticatedSession),
+    );
+  });
+
+  it.each(['cloudflare-access', 'trusted-header'] as const)(
+    'coordinates a successful %s bootstrap after application authority exists',
+    async (mode) => {
+      const identityLabel = 'person@example.com';
+      const identity = { mode, identityLabel };
+      options = routerOptions({
+        mode,
+        session: session({ mode, identityLabel }),
+        ...(mode === 'cloudflare-access'
+          ? {
+              cloudflareAccessProvider: {
+                authenticate: vi.fn(async () => identity),
+              },
+            }
+          : {
+              trustedHeaderProvider: {
+                authenticate: vi.fn(async () => identity),
+              },
+            }),
+      });
+      vi.mocked(options.authService.bootstrap).mockResolvedValue(
+        authenticatedResult(mode, identityLabel),
+      );
+
+      const response = await call('/terminal/api/auth/session');
+
+      expect(response.status).toBe(200);
+      expect(
+        options.workspaceBootstrap.ensureForAuthenticatedSession,
+      ).toHaveBeenCalledOnce();
+      expect(options.authService.authenticateCookie).toHaveBeenCalledBefore(
+        vi.mocked(options.workspaceBootstrap.ensureForAuthenticatedSession),
+      );
+    },
+  );
+
+  it('fails closed without publishing a cookie when workspace bootstrap fails', async () => {
+    options = routerOptions({
+      mode: 'none',
+      session: session({ mode: 'none', identityLabel: 'anonymous' }),
+    });
+    vi.mocked(options.authService.bootstrap).mockResolvedValue(
+      authenticatedResult('none', 'anonymous'),
+    );
+    vi.mocked(
+      options.workspaceBootstrap.ensureForAuthenticatedSession,
+    ).mockRejectedValue(new Error('private tab storage failure'));
+
+    const response = await call('/terminal/api/auth/session');
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'operation_failed' });
+    expect(response.headers.get('set-cookie')).toBeNull();
+    expect(options.authService.touch).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -358,6 +435,9 @@ function routerOptions(
     publicOrigin: ORIGIN,
     basePath: '/terminal',
     secureCookie: true,
+    workspaceBootstrap: {
+      ensureForAuthenticatedSession: vi.fn(async () => undefined),
+    },
     authService: {
       bootstrap: vi.fn(async (): Promise<AuthBootstrapResult> => ({
         bootstrap: { authenticated: false, mode: 'local' },

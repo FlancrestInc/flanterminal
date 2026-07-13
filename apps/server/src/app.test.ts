@@ -812,6 +812,9 @@ function httpDependencies(failure?: AppTabFailure): AppHttpDependencies {
     auth: {
       mode: 'local',
       authService,
+      workspaceBootstrap: {
+        ensureForAuthenticatedSession: vi.fn(async () => undefined),
+      },
       logger: { warn: vi.fn(), error: vi.fn() },
     },
     settings: {

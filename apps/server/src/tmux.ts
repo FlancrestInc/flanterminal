@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process';
 
 import { isSessionId } from '@flanterminal/shared';
 
+import type { SessionRuntimeSettings } from './session-runtime-settings.js';
+
 export type CommandResult = Readonly<{
   exitCode: number;
   stdout: string;
@@ -39,14 +41,15 @@ export type AttachSpec = Readonly<{
 }>;
 
 export interface SessionPreparer {
-  prepare(sessionId: string): Promise<AttachSpec>;
+  prepare(
+    sessionId: string,
+    settings?: SessionRuntimeSettings,
+  ): Promise<AttachSpec>;
 }
 
 export type TmuxConfig = Readonly<{
   executable: string;
-  shell: string;
   homeDir: string;
-  historyLimit: number;
 }>;
 
 const APP_SESSION_NAME = /^webterm-tab-([0-9a-f]{32})$/;
@@ -62,8 +65,12 @@ export class TmuxSessionPreparer implements SessionPreparer {
     private readonly runner: CommandRunner,
   ) {}
 
-  async prepare(sessionId: string): Promise<AttachSpec> {
+  async prepare(
+    sessionId: string,
+    settings?: SessionRuntimeSettings,
+  ): Promise<AttachSpec> {
     const name = tmuxSessionName(sessionId);
+    if (settings === undefined) throw new Error('Invalid runtime settings');
     if (!(await this.exists(sessionId))) {
       const creation = await this.run([
         'start-server',
@@ -76,18 +83,18 @@ export class TmuxSessionPreparer implements SessionPreparer {
         'set-option',
         '-g',
         'history-limit',
-        String(this.config.historyLimit),
+        String(settings.historyLimit),
         ';',
         'set-option',
         '-g',
         'default-shell',
-        this.config.shell,
+        settings.shell,
         ';',
         'new-session',
         '-d',
         '-s',
         name,
-        this.config.shell,
+        settings.shell,
         ';',
         'set-option',
         '-g',
@@ -97,7 +104,7 @@ export class TmuxSessionPreparer implements SessionPreparer {
       if (creation.exitCode !== 0) throw new Error('Tmux command failed');
     }
 
-    return this.attachSpec(sessionId);
+    return this.attachSpec(sessionId, settings);
   }
 
   async exists(sessionId: string): Promise<boolean> {
@@ -146,7 +153,8 @@ export class TmuxSessionPreparer implements SessionPreparer {
     return sessionIds;
   }
 
-  attachSpec(sessionId: string): AttachSpec {
+  attachSpec(sessionId: string, settings?: SessionRuntimeSettings): AttachSpec {
+    if (settings === undefined) throw new Error('Invalid runtime settings');
     const name = tmuxSessionName(sessionId);
     return {
       executable: this.config.executable,
@@ -154,7 +162,7 @@ export class TmuxSessionPreparer implements SessionPreparer {
       cwd: this.config.homeDir,
       env: {
         HOME: this.config.homeDir,
-        SHELL: this.config.shell,
+        SHELL: settings.shell,
         TERM: 'xterm-256color',
       },
     };

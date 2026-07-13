@@ -918,6 +918,10 @@ async function createHarness(
     bridgeFactory: new TerminalBridgeFactory(log, 1_048_576),
     store,
     activity: { mark: vi.fn() },
+    runtimeSettings: {
+      current: () =>
+        Object.freeze({ shell: '/bin/bash', historyLimit: 20_000 }),
+    },
   });
   const server = createServer();
   const auth = authHarness();
