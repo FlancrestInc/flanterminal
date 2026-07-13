@@ -64,12 +64,33 @@ describe('terminal themes', () => {
     }
   });
 
+  it('keeps administration error text readable on every actual surface', () => {
+    for (const theme of Object.values(THEMES)) {
+      expect(
+        contrast(theme.ui.errorText, theme.ui.surface),
+      ).toBeGreaterThanOrEqual(4.5);
+      expect(
+        contrast(theme.ui.errorText, theme.ui.canvas),
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   it('uses semantic destructive tokens for normal, hover, and focus states', () => {
     const css = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
     expect(css).toContain('background: var(--ui-danger-bg);');
     expect(css).toContain('color: var(--ui-danger-text);');
     expect(css).toContain('background: var(--ui-danger-hover);');
     expect(css).toContain('outline-color: var(--ui-danger-focus);');
+  });
+
+  it('uses the semantic error token for all administration error text', () => {
+    const css = readFileSync(new URL('./theme.css', import.meta.url), 'utf8');
+    expect(css).toMatch(
+      /\.admin-row-error[\s\S]*?color: var\(--ui-error-text\)/u,
+    );
+    expect(css).toMatch(
+      /\.admin-state-error,[\s\S]*?\.admin-inline-error[\s\S]*?color: var\(--ui-error-text\)/u,
+    );
   });
 
   it('does not reference undefined UI custom properties', () => {

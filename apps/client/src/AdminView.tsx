@@ -124,7 +124,7 @@ export function AdminView({ controller, onBack }: AdminViewProps) {
             <section className="admin-summary" aria-label="Application health">
               <time
                 dateTime={snapshot.generatedAt}
-                aria-label="Snapshot generated at"
+                aria-label={`Snapshot generated at ${formatCanonicalTime(snapshot.generatedAt)}`}
                 title={snapshot.generatedAt}
               >
                 {formatCanonicalTime(snapshot.generatedAt)}

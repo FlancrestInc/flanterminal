@@ -330,6 +330,7 @@ export function useAdmin(
     cleanupControllerRef.current = controller;
     setCleanupBusy(true);
     setCleanupError(null);
+    setCleanupResult(null);
     const operation = (async () => {
       let refreshRequired = false;
       try {

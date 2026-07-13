@@ -24,6 +24,7 @@ type UiTokens = Readonly<{
   dangerHover: string;
   dangerBorder: string;
   dangerFocus: string;
+  errorText: string;
 }>;
 
 export type AppTheme = Readonly<{ ui: UiTokens; terminal: ITheme }>;
@@ -45,6 +46,7 @@ export const THEMES: Readonly<Record<WorkspaceSettings['theme'], AppTheme>> =
         dangerHover: '#a33b35',
         dangerBorder: '#df6a64',
         dangerFocus: '#ef7770',
+        errorText: '#ef7770',
       }),
       terminal: Object.freeze({
         background: '#101112',
@@ -85,6 +87,7 @@ export const THEMES: Readonly<Record<WorkspaceSettings['theme'], AppTheme>> =
         dangerHover: '#862c28',
         dangerBorder: '#862c28',
         dangerFocus: '#862c28',
+        errorText: '#a33b35',
       }),
       terminal: Object.freeze({
         background: '#fbfbf8',
@@ -125,6 +128,7 @@ export const THEMES: Readonly<Record<WorkspaceSettings['theme'], AppTheme>> =
         dangerHover: '#bd3934',
         dangerBorder: '#ef6d65',
         dangerFocus: '#ff786c',
+        errorText: '#ff786c',
       }),
       terminal: Object.freeze({
         background: '#300a24',

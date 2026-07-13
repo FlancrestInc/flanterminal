@@ -21,6 +21,7 @@
   --ui-danger-hover: #a33b35;
   --ui-danger-border: #df6a64;
   --ui-danger-focus: #ef7770;
+  --ui-error-text: #ef7770;
   --ui-positive: #82b596;
   --ui-positive-bg: #20352a;
   --ui-warning: #d1a451;
@@ -59,6 +60,7 @@
   --ui-danger-hover: #862c28;
   --ui-danger-border: #862c28;
   --ui-danger-focus: #862c28;
+  --ui-error-text: #a33b35;
   --ui-positive: #286b42;
   --ui-positive-bg: #e6f2e9;
   --ui-warning: #80570f;
@@ -80,6 +82,7 @@
   --ui-danger-hover: #bd3934;
   --ui-danger-border: #ef6d65;
   --ui-danger-focus: #ff786c;
+  --ui-error-text: #ff786c;
   --ui-positive: #93c8a3;
   --ui-positive-bg: #263b2d;
   --ui-warning: #f0af72;
@@ -789,7 +792,7 @@ button {
 }
 
 .admin-row-error {
-  color: var(--ui-danger) !important;
+  color: var(--ui-error-text) !important;
 }
 
 .cleanup-eligible {
@@ -832,7 +835,7 @@ button {
 
 .admin-state-error,
 .admin-inline-error {
-  color: var(--ui-danger);
+  color: var(--ui-error-text);
 }
 
 .admin-inline-error,

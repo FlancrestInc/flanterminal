@@ -243,10 +243,19 @@ describe('useAdmin', () => {
 
   it('invalidates same-session queued work when the view ownership epoch closes', async () => {
     const actionA = deferred<void>();
+    let loads = 0;
     const sessionAction = vi.fn<AdminApi['sessionAction']>(
       () => actionA.promise,
     );
-    const client = api({ sessionAction });
+    const client = api({
+      sessionAction,
+      load: vi.fn(async () => {
+        loads += 1;
+        return snapshot(
+          loads === 1 ? '2026-07-13T12:00:00.000Z' : '2026-07-13T15:00:00.000Z',
+        );
+      }),
+    });
     const hook = renderHook(({ active }) => useAdmin(client, { active }), {
       initialProps: { active: true },
     });
@@ -259,7 +268,11 @@ describe('useAdmin', () => {
 
     hook.rerender({ active: false });
     hook.rerender({ active: true });
-    await waitFor(() => expect(client.load).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(hook.result.current.snapshot?.generatedAt).toBe(
+        '2026-07-13T15:00:00.000Z',
+      ),
+    );
     const reopenedSnapshot = hook.result.current.snapshot;
     actionA.resolve();
     await act(async () => Promise.resolve());
@@ -436,6 +449,38 @@ describe('useAdmin', () => {
     await act(async () => result.current.runCleanup());
     expect(client.load).toHaveBeenCalledOnce();
     expect(result.current.cleanupError).toBeNull();
+  });
+
+  it('clears a prior cleanup result before a new attempt can fail', async () => {
+    const second = deferred<never>();
+    const cleanup = vi
+      .fn<AdminApi['cleanup']>()
+      .mockResolvedValueOnce({
+        disabled: false,
+        examined: 2,
+        terminated: 1,
+        skipped: 1,
+        failed: 0,
+        startedAt: '2026-07-13T12:00:00.000Z',
+        finishedAt: '2026-07-13T12:00:01.000Z',
+      })
+      .mockImplementationOnce(() => second.promise);
+    const client = api({ cleanup });
+    const { result } = renderHook(() => useAdmin(client, { active: true }));
+    await waitFor(() => expect(result.current.snapshot).not.toBeNull());
+    await act(async () => result.current.runCleanup());
+    expect(result.current.cleanupResult?.terminated).toBe(1);
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.runCleanup();
+    });
+    expect(result.current.cleanupBusy).toBe(true);
+    expect(result.current.cleanupResult).toBeNull();
+    second.reject(new Error('private cleanup detail'));
+    await act(async () => pending);
+    expect(result.current.cleanupResult).toBeNull();
+    expect(result.current.cleanupError).toBe('Stale session cleanup failed.');
   });
 
   it('propagates authentication loss, aborts ownership, and exposes no server detail', async () => {
