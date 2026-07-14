@@ -515,8 +515,8 @@ path.
 | `AUTH_MODE`                        | `local`                 | `local`, `cloudflare-access`, `trusted-header`, `none` |
 | `LOCAL_AUTH_USERNAME`              | `webterm`               | Enrolled local administrator, 1-64 characters          |
 | `BCRYPT_COST`                      | `12`                    | bcrypt cost, `10..15`                                  |
-| `AUTH_IDLE_MINUTES`                | `60`                    | Idle application-session lifetime, `1..10080`          |
-| `AUTH_ABSOLUTE_HOURS`              | `24`                    | Absolute lifetime, `1..8760`                           |
+| `AUTH_IDLE_MINUTES`                | `60`                    | Idle application-session lifetime, `5..1440`           |
+| `AUTH_ABSOLUTE_HOURS`              | `24`                    | Absolute lifetime, `1..168`                            |
 | `AUTH_SESSION_MAX_COUNT`           | `32`                    | Concurrent application sessions, `1..256`              |
 | `CLOUDFLARE_TEAM_DOMAIN`           | unset                   | Required HTTPS `*.cloudflareaccess.com` origin         |
 | `CLOUDFLARE_ACCESS_AUD`            | unset                   | Required Access application AUD                        |
