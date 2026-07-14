@@ -52,9 +52,11 @@ class FakeTerminal implements TerminalLike {
   readonly focus = vi.fn();
   readonly clear = vi.fn();
   readonly write = vi.fn();
+  readonly scrollLines = vi.fn();
   readonly dispose = vi.fn();
   readonly dataListeners = new Set<(data: string) => void>();
   readonly bellListeners = new Set<() => void>();
+  wheelListener: ((event: WheelEvent) => boolean) | undefined;
 
   onData(listener: (data: string) => void) {
     this.dataListeners.add(listener);
@@ -64,6 +66,9 @@ class FakeTerminal implements TerminalLike {
     this.bellListeners.add(listener);
     return { dispose: () => this.bellListeners.delete(listener) };
   }
+  attachCustomWheelEventHandler(handler: (event: WheelEvent) => boolean) {
+    this.wheelListener = handler;
+  }
   bell() {
     for (const listener of this.bellListeners) listener();
   }
@@ -71,6 +76,29 @@ class FakeTerminal implements TerminalLike {
   input(data: string) {
     for (const listener of this.dataListeners) listener(data);
   }
+
+  emitWheel(event: WheelEvent) {
+    return this.wheelListener?.(event);
+  }
+}
+
+function wheelEvent({
+  deltaX = 0,
+  deltaY = 0,
+  deltaMode = 0,
+  ctrlKey = false,
+  metaKey = false,
+  shiftKey = false,
+}: Partial<WheelEvent> = {}) {
+  return {
+    deltaX,
+    deltaY,
+    deltaMode,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    preventDefault: vi.fn(),
+  } as unknown as WheelEvent;
 }
 
 function setup(
@@ -195,6 +223,85 @@ describe('Terminal', () => {
     const disconnected = setup('reconnecting');
     act(() => disconnected.terminal.input('do not replay'));
     expect(disconnected.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('registers a wheel handler that scrolls signed rounded line deltas without sending input', () => {
+    const result = setup();
+    const down = wheelEvent({ deltaY: 1.6, deltaMode: 1 });
+    const up = wheelEvent({ deltaY: -1.6, deltaMode: 1 });
+
+    expect(result.terminal.wheelListener).toBeTypeOf('function');
+    expect(result.terminal.emitWheel(down)).toBe(false);
+    expect(result.terminal.emitWheel(up)).toBe(false);
+    expect(result.terminal.scrollLines).toHaveBeenNthCalledWith(1, 2);
+    expect(result.terminal.scrollLines).toHaveBeenNthCalledWith(2, -2);
+    expect(down.preventDefault).toHaveBeenCalledOnce();
+    expect(up.preventDefault).toHaveBeenCalledOnce();
+    expect(result.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('scrolls page deltas using terminal rows and prevents default at scrollback boundaries', () => {
+    const result = setup();
+    const event = wheelEvent({ deltaY: 1.6, deltaMode: 2 });
+
+    expect(result.terminal.emitWheel(event)).toBe(false);
+    expect(result.terminal.scrollLines).toHaveBeenCalledWith(48);
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it('converts pixel wheel deltas to lines while retaining remainders', () => {
+    const result = setup();
+    const first = wheelEvent({ deltaY: 25 });
+    const second = wheelEvent({ deltaY: 25 });
+    const third = wheelEvent({ deltaY: -90 });
+
+    expect(result.terminal.emitWheel(first)).toBe(false);
+    expect(result.terminal.scrollLines).not.toHaveBeenCalled();
+    expect(result.terminal.emitWheel(second)).toBe(false);
+    expect(result.terminal.scrollLines).toHaveBeenCalledWith(1);
+    expect(result.terminal.emitWheel(third)).toBe(false);
+    expect(result.terminal.scrollLines).toHaveBeenLastCalledWith(-2);
+    expect(first.preventDefault).toHaveBeenCalledOnce();
+    expect(second.preventDefault).toHaveBeenCalledOnce();
+    expect(third.preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['Ctrl', { deltaY: 80, ctrlKey: true }],
+    ['Meta', { deltaY: 80, metaKey: true }],
+    ['Shift', { deltaY: 80, shiftKey: true }],
+    ['horizontal', { deltaX: 80, deltaY: 40 }],
+  ])('leaves %s wheel gestures to xterm', (_gesture, init) => {
+    const result = setup();
+    const event = wheelEvent(init);
+
+    expect(result.terminal.emitWheel(event)).toBe(true);
+    expect(result.terminal.scrollLines).not.toHaveBeenCalled();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('registers a new wheel handler when recreating the terminal', () => {
+    const first = new FakeTerminal();
+    const second = new FakeTerminal();
+    const terminalFactory = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockReturnValueOnce(second);
+    const result = setup('connected', {}, { terminalFactory });
+
+    result.rerender(
+      <Terminal
+        config={config}
+        settings={{ ...result.settings, fontSize: 16 }}
+        socket={result.socket}
+        dependencies={result.dependencies}
+      />,
+    );
+
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect(first.wheelListener).toBeTypeOf('function');
+    expect(second.wheelListener).toBeTypeOf('function');
+    expect(second.wheelListener).not.toBe(first.wheelListener);
   });
 
   it('fits after layout and observer changes, then debounces distinct dimensions', () => {
