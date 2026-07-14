@@ -200,6 +200,7 @@ class ProbeSocket extends EventTarget implements BrowserSocket {
 function api(result: AuthBootstrap = session): AuthApi {
   return {
     bootstrap: vi.fn(async () => result),
+    setup: vi.fn(async () => session),
     login: vi.fn(async () => session),
     refresh: vi.fn(async () => session),
     logout: vi.fn(async () => undefined),
@@ -212,6 +213,76 @@ describe('AuthenticatedRoot', () => {
     terminalProbe.enabled = false;
     terminalProbe.factory.mockReset();
     resetTerminalAuthSuspensionsForTests();
+  });
+  it('selects administrator setup only for the strict setup bootstrap', async () => {
+    const setupBootstrap: AuthBootstrap = {
+      authenticated: false,
+      mode: 'local',
+      setupRequired: true,
+      username: 'configured-operator',
+    };
+    const view = render(
+      <AuthenticatedRoot
+        api={api(setupBootstrap)}
+        settingsApi={settingsApi()}
+        loadConfig={vi.fn(async () => config)}
+      />,
+    );
+
+    expect(
+      await screen.findByRole('heading', { name: 'Set up FlanTerminal' }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Username')).toHaveValue(
+      'configured-operator',
+    );
+
+    view.unmount();
+    render(
+      <AuthenticatedRoot
+        api={api({ authenticated: false, mode: 'local' })}
+        settingsApi={settingsApi()}
+        loadConfig={vi.fn(async () => config)}
+      />,
+    );
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+  });
+
+  it('creates the administrator through auth setup and enters the workspace', async () => {
+    const setupBootstrap: AuthBootstrap = {
+      authenticated: false,
+      mode: 'local',
+      setupRequired: true,
+      username: 'operator',
+    };
+    const authApi = api(setupBootstrap);
+    render(
+      <AuthenticatedRoot
+        api={authApi}
+        settingsApi={settingsApi()}
+        loadConfig={vi.fn(async () => config)}
+        renderWorkspace={() => <div>Private workspace</div>}
+      />,
+    );
+    fireEvent.change(await screen.findByLabelText('New Password'), {
+      target: { value: 'private-password' },
+    });
+    fireEvent.change(screen.getByLabelText('Confirm password'), {
+      target: { value: 'private-password' },
+    });
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Create administrator' }),
+    );
+
+    await waitFor(() =>
+      expect(authApi.setup).toHaveBeenCalledWith(
+        { password: 'private-password' },
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(await screen.findByText('Private workspace')).toBeInTheDocument();
   });
   it('loads private config only after authentication and mounts the workspace', async () => {
     const loadConfig = vi.fn(async () => config);

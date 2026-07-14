@@ -1193,6 +1193,19 @@ button {
   border-color: #c45c56;
 }
 
+.login-form input[readonly] {
+  background: var(--ui-raised);
+  color: #b9b8b3;
+}
+
+.login-form .login-help {
+  margin: -2px 0 4px;
+  color: #898984;
+  font-size: 11px;
+  line-height: 1.4;
+  letter-spacing: 0;
+}
+
 .login-form button,
 .access-state button {
   min-height: 38px;

@@ -93,8 +93,10 @@ export function AuthenticatedRoot({
     return (
       <LoginScreen
         status={auth.status}
+        bootstrap={auth.bootstrap}
         busy={auth.busy}
         error={auth.error}
+        onSetup={auth.setup}
         onLogin={auth.login}
         onRetry={auth.retry}
       />
