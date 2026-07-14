@@ -176,6 +176,88 @@ describe('LoginScreen', () => {
     expect(screen.getByLabelText('New Password')).toHaveFocus();
   });
 
+  it('lets a local mismatch replace stale controller password field targeting', async () => {
+    const onSetup = vi.fn(async () => undefined);
+    render(
+      <LoginScreen
+        {...props({
+          bootstrap: setupRequired,
+          error: 'Password could not be accepted.',
+          onSetup,
+        })}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('New Password'), {
+      target: { value: 'first-password' },
+    });
+    fireEvent.change(screen.getByLabelText('Confirm password'), {
+      target: { value: 'second-password' },
+    });
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Create administrator' }),
+    );
+
+    expect(onSetup).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Passwords do not match.',
+    );
+    expect(screen.getByLabelText('New Password')).not.toHaveAttribute(
+      'aria-invalid',
+    );
+    expect(screen.getByLabelText('New Password')).toHaveAttribute(
+      'aria-describedby',
+      'setup-requirement',
+    );
+    expect(screen.getByLabelText('Confirm password')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+    expect(screen.getByLabelText('Confirm password')).toHaveAttribute(
+      'aria-describedby',
+      'setup-error',
+    );
+  });
+
+  it('lets a local byte error replace stale controller error semantics', async () => {
+    const onSetup = vi.fn(async () => undefined);
+    render(
+      <LoginScreen
+        {...props({
+          bootstrap: setupRequired,
+          error: 'Password could not be accepted.',
+          onSetup,
+        })}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText('New Password'), {
+      target: { value: 'too-short' },
+    });
+    fireEvent.change(screen.getByLabelText('Confirm password'), {
+      target: { value: 'too-short' },
+    });
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Create administrator' }),
+    );
+
+    expect(onSetup).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Password must be 12 to 72 UTF-8 bytes and contain no NUL characters.',
+    );
+    expect(screen.getByLabelText('New Password')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+    expect(screen.getByLabelText('New Password')).toHaveAttribute(
+      'aria-describedby',
+      'setup-requirement setup-error',
+    );
+    expect(screen.getByLabelText('Confirm password')).not.toHaveAttribute(
+      'aria-invalid',
+    );
+  });
+
   it('locks duplicate setup submissions and clears credentials when completed', async () => {
     let finish!: () => void;
     const onSetup = vi.fn(
@@ -407,19 +489,49 @@ describe('LoginScreen', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled();
   });
 
-  it('keeps readonly username colors on auth-surface tokens in light theme', () => {
+  it('keeps readonly username contrast accessible across themes', () => {
     const css = readFileSync('src/theme.css', 'utf8');
-    const lightTheme = css.match(
-      /:root\[data-theme='light'\]\s*{([^}]*)}/s,
-    )?.[1];
+    const themes = [
+      css.match(/:root\s*{([^}]*)}/s)?.[1],
+      css.match(/:root\[data-theme='light'\]\s*{([^}]*)}/s)?.[1],
+      css.match(/:root\[data-theme='ubuntu'\]\s*{([^}]*)}/s)?.[1],
+    ];
     const readonlyRule = css.match(
       /\.login-form input\[readonly\]\s*{([^}]*)}/s,
     )?.[1];
 
-    expect(lightTheme).toMatch(/--login-readonly-bg:\s*#[0-9a-f]{6}/i);
-    expect(lightTheme).toMatch(/--login-readonly-fg:\s*#[0-9a-f]{6}/i);
+    for (const theme of themes) {
+      const background = cssHexToken(theme, '--login-readonly-bg');
+      const foreground = cssHexToken(theme, '--login-readonly-fg');
+      expect(contrast(foreground, background)).toBeGreaterThanOrEqual(4.5);
+    }
     expect(readonlyRule).toContain('background: var(--login-readonly-bg)');
     expect(readonlyRule).toContain('color: var(--login-readonly-fg)');
     expect(readonlyRule).not.toContain('--ui-raised');
   });
 });
+
+function cssHexToken(block: string | undefined, token: string): string {
+  const value = block?.match(
+    new RegExp(`${token}:\\s*(#[0-9a-f]{6})`, 'i'),
+  )?.[1];
+  expect(value).toBeDefined();
+  return value!;
+}
+
+function contrast(first: string, second: string): number {
+  const brighter = Math.max(luminance(first), luminance(second));
+  const darker = Math.min(luminance(first), luminance(second));
+  return (brighter + 0.05) / (darker + 0.05);
+}
+
+function luminance(hex: string): number {
+  const channels = hex
+    .slice(1)
+    .match(/.{2}/g)!
+    .map((channel) => Number.parseInt(channel, 16) / 255)
+    .map((channel) =>
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+    );
+  return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+}
