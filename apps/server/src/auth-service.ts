@@ -1,20 +1,26 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { inspect } from 'node:util';
 import { type AuthBootstrap } from '@flanterminal/shared';
-import { type ReplaceResult } from './secure-json-file.js';
+import { type EnrollmentResult } from './credential-store.js';
 import { CsrfService, type CsrfRecord } from './csrf-service.js';
+import { type ReplaceResult } from './secure-json-file.js';
 import {
   type AuthBootstrapResult,
   type AuthenticatedSession,
   type AuthenticatedSessionAuthority,
   type AuthMode,
   type LocalLoginAttempt,
+  type LocalLoginFailure,
+  type LocalSetupAttempt,
+  type LocalSetupFailure,
   type RevocationReason,
   type UpstreamAuthentication,
   type UpstreamIdentity,
 } from './auth-types.js';
 
 type Credentials = {
+  isInitialized(): boolean;
+  enroll(password: string): Promise<EnrollmentResult>;
   verify(username: string, password: string): boolean | Promise<boolean>;
   replacePassword(password: string): Promise<ReplaceResult>;
 };
@@ -37,7 +43,7 @@ type Stored = {
 };
 type PreparedSession = Readonly<{
   session: Stored;
-  result: AuthBootstrapResult;
+  result: AuthBootstrapResult<never>;
 }>;
 type VerificationOutcome =
   Readonly<{ ok: true; valid: boolean }> | Readonly<{ ok: false }>;
@@ -52,8 +58,7 @@ const INVALID_VERIFICATION: VerificationOutcome = Object.freeze({
   valid: false,
 });
 const FAILED_VERIFICATION: VerificationOutcome = Object.freeze({ ok: false });
-export type AuthServiceOptions = Readonly<{
-  mode: AuthMode;
+type SharedAuthServiceOptions = Readonly<{
   clock: () => number;
   randomBytes?: (size: number) => Uint8Array;
   credentialStore: Credentials;
@@ -64,6 +69,19 @@ export type AuthServiceOptions = Readonly<{
   maxSessions: number;
   maxObservers?: number;
 }>;
+export type AuthServiceOptions = SharedAuthServiceOptions &
+  (
+    | Readonly<{
+        mode: 'local';
+        localUsername: string;
+        onDurabilityUncertain: () => void;
+      }>
+    | Readonly<{
+        mode: Exclude<AuthMode, 'local'>;
+        localUsername?: never;
+        onDurabilityUncertain?: never;
+      }>
+  );
 
 export class AuthServiceError extends Error {
   constructor() {
@@ -74,6 +92,8 @@ export class AuthServiceError extends Error {
 
 export class AuthService {
   readonly #mode: AuthMode;
+  readonly #localUsername: string | undefined;
+  readonly #onDurabilityUncertain: (() => void) | undefined;
   readonly #clock: () => number;
   readonly #random: (n: number) => Uint8Array;
   readonly #credentials: Credentials;
@@ -93,7 +113,7 @@ export class AuthService {
   >();
   #establishmentTail: Promise<void> = Promise.resolve();
   #pendingEstablishments = 0;
-  #pendingLogins = 0;
+  #pendingLocalAttempts = 0;
   #passwordChangeActive = false;
   #generation = 0;
   constructor(o: AuthServiceOptions) {
@@ -112,6 +132,20 @@ export class AuthService {
     )
       throw new AuthServiceError();
     this.#mode = o.mode;
+    if (o.mode === 'local') {
+      if (typeof o.onDurabilityUncertain !== 'function')
+        throw new AuthServiceError();
+      this.#localUsername = normalizeLabel(o.localUsername);
+      this.#onDurabilityUncertain = o.onDurabilityUncertain;
+    } else {
+      if (
+        o.localUsername !== undefined ||
+        o.onDurabilityUncertain !== undefined
+      )
+        throw new AuthServiceError();
+      this.#localUsername = undefined;
+      this.#onDurabilityUncertain = undefined;
+    }
     this.#clock = o.clock;
     this.#random = o.randomBytes ?? randomBytes;
     this.#credentials = o.credentialStore;
@@ -134,9 +168,7 @@ export class AuthService {
     const result = this.#enqueueEstablishment<AuthBootstrapResult>(async () => {
       if (this.#mode === 'local') {
         if (input.type !== 'none') throw new AuthServiceError();
-        return frozen({
-          bootstrap: frozen({ authenticated: false, mode: 'local' }),
-        });
+        return frozen({ bootstrap: this.#localBootstrap() });
       }
       if (this.#mode === 'none') {
         if (input.type !== 'none') throw new AuthServiceError();
@@ -161,9 +193,19 @@ export class AuthService {
     void result.finally(release).catch(() => undefined);
     return result;
   }
-  login(input: LocalLoginAttempt): Promise<AuthBootstrapResult> {
+  login(
+    input: LocalLoginAttempt,
+  ): Promise<AuthBootstrapResult<LocalLoginFailure>> {
     if (this.#mode !== 'local') return Promise.reject(new AuthServiceError());
-    if (this.#pendingLogins >= this.#max)
+    try {
+      if (!this.#credentials.isInitialized())
+        return Promise.resolve(
+          localFailure('setup_required', this.#localBootstrap(true)),
+        );
+    } catch {
+      return Promise.reject(new AuthServiceError());
+    }
+    if (this.#pendingLocalAttempts >= this.#max)
       return Promise.resolve(localLoginFailure('rate_limited'));
     const releaseEstablishment = this.#reserveEstablishment();
     if (!releaseEstablishment)
@@ -187,9 +229,9 @@ export class AuthService {
       releaseEstablishment();
       return Promise.resolve(localLoginFailure('rate_limited'));
     }
-    this.#pendingLogins += 1;
+    this.#pendingLocalAttempts += 1;
     const verification = verificationOutcomeBridge();
-    let result: Promise<AuthBootstrapResult>;
+    let result: Promise<AuthBootstrapResult<LocalLoginFailure>>;
     try {
       result = this.#reserveLoginSlot(
         verification.promise,
@@ -199,7 +241,7 @@ export class AuthService {
       );
     } catch {
       verification.fail();
-      this.#pendingLogins -= 1;
+      this.#pendingLocalAttempts -= 1;
       releaseEstablishment();
       return Promise.reject(new AuthServiceError());
     }
@@ -218,6 +260,53 @@ export class AuthService {
     } catch {
       verification.fail();
     }
+    return result;
+  }
+  setup(
+    input: LocalSetupAttempt,
+  ): Promise<AuthBootstrapResult<LocalSetupFailure>> {
+    if (this.#mode !== 'local') return Promise.reject(new AuthServiceError());
+    try {
+      if (this.#credentials.isInitialized())
+        return Promise.resolve(
+          localFailure('already_initialized', this.#localBootstrap(false)),
+        );
+    } catch {
+      return Promise.reject(new AuthServiceError());
+    }
+    if (this.#pendingLocalAttempts >= this.#max)
+      return Promise.resolve(
+        localFailure('rate_limited', this.#localBootstrap(true)),
+      );
+    const releaseEstablishment = this.#reserveEstablishment();
+    if (!releaseEstablishment)
+      return Promise.resolve(
+        localFailure('rate_limited', this.#localBootstrap(true)),
+      );
+    const address = boundedAddress(input.address);
+    let allowed: boolean;
+    try {
+      allowed = this.#limiter.consume(address);
+    } catch {
+      releaseEstablishment();
+      return Promise.reject(new AuthServiceError());
+    }
+    if (!allowed) {
+      releaseEstablishment();
+      return Promise.resolve(
+        localFailure('rate_limited', this.#localBootstrap(true)),
+      );
+    }
+    this.#pendingLocalAttempts += 1;
+    const result = this.#enqueueEstablishment(() =>
+      this.#completeSetup(input.password, address),
+    );
+    void result
+      .finally(() => {
+        this.#pendingLocalAttempts -= 1;
+        releaseEstablishment();
+      })
+      .catch(() => undefined);
     return result;
   }
   authenticateCookie(
@@ -453,7 +542,7 @@ export class AuthService {
   #commitSession(
     prepared: PreparedSession,
     beforeCommit?: () => void,
-  ): AuthBootstrapResult {
+  ): AuthBootstrapResult<never> {
     const { session: s, result } = prepared;
     if (this.#byDigest.has(s.digest) || this.#byId.has(s.id))
       throw new AuthServiceError();
@@ -490,7 +579,7 @@ export class AuthService {
     label: string,
     upstreamExpiresAt?: number,
     beforeCommit?: () => void,
-  ): AuthBootstrapResult {
+  ): AuthBootstrapResult<never> {
     try {
       const prepared = this.#prepareSession(mode, label, upstreamExpiresAt);
       return this.#commitSession(prepared, beforeCommit);
@@ -503,13 +592,13 @@ export class AuthService {
     label: string,
     address: string,
     releaseEstablishment: () => void,
-  ): Promise<AuthBootstrapResult> {
+  ): Promise<AuthBootstrapResult<LocalLoginFailure>> {
     const result = this.#enqueueEstablishment(() =>
       this.#completeLoginSlot(verification, label, address),
     );
     void result
       .finally(() => {
-        this.#pendingLogins -= 1;
+        this.#pendingLocalAttempts -= 1;
         releaseEstablishment();
       })
       .catch(() => undefined);
@@ -519,11 +608,35 @@ export class AuthService {
     verification: Promise<VerificationOutcome>,
     label: string,
     address: string,
-  ): Promise<AuthBootstrapResult> {
+  ): Promise<AuthBootstrapResult<LocalLoginFailure>> {
     const outcome = await verification;
     if (!outcome.ok) throw new AuthServiceError();
     if (!outcome.valid) return localLoginFailure('authentication_failed');
     return this.#safeEstablish('local', label, undefined, () =>
+      this.#limiter.resetAddress(address),
+    );
+  }
+  async #completeSetup(
+    password: string,
+    address: string,
+  ): Promise<AuthBootstrapResult<LocalSetupFailure>> {
+    let enrollment: EnrollmentResult;
+    try {
+      enrollment = await this.#credentials.enroll(password);
+    } catch {
+      throw new AuthServiceError();
+    }
+    if (enrollment.outcome === 'already_initialized')
+      return localFailure('already_initialized', this.#localBootstrap(false));
+    if (enrollment.outcome === 'not_committed') throw new AuthServiceError();
+    if (enrollment.persistence === 'committed_durability_uncertain') {
+      try {
+        this.#onDurabilityUncertain?.();
+      } catch {
+        // Operational logging cannot change credential authority.
+      }
+    }
+    return this.#safeEstablish('local', this.#localUsername!, undefined, () =>
       this.#limiter.resetAddress(address),
     );
   }
@@ -622,6 +735,23 @@ export class AuthService {
       this.#pendingEstablishments -= 1;
     };
   }
+  #localBootstrap(setupRequired?: boolean): AuthBootstrap {
+    if (setupRequired === undefined) {
+      try {
+        setupRequired = !this.#credentials.isInitialized();
+      } catch {
+        throw new AuthServiceError();
+      }
+    }
+    return setupRequired
+      ? frozen({
+          authenticated: false,
+          mode: 'local',
+          setupRequired: true,
+          username: this.#localUsername!,
+        })
+      : frozen({ authenticated: false, mode: 'local' });
+  }
 }
 function validateIdentity(i: UpstreamIdentity): UpstreamIdentity {
   const label = normalizeLabel(i.identityLabel);
@@ -669,12 +799,18 @@ function expiredReasonAt(s: Stored, now: number): RevocationReason | undefined {
 }
 function localLoginFailure(
   failure: 'authentication_failed' | 'rate_limited',
-): AuthBootstrapResult {
+): AuthBootstrapResult<LocalLoginFailure> {
+  return localFailure(failure, frozen({ authenticated: false, mode: 'local' }));
+}
+function localFailure<Failure extends LocalLoginFailure | LocalSetupFailure>(
+  failure: Failure,
+  bootstrap: AuthBootstrap,
+): AuthBootstrapResult<Failure> {
   const result: {
     bootstrap: AuthBootstrap;
-    failure?: 'authentication_failed' | 'rate_limited';
+    failure?: Failure;
   } = {
-    bootstrap: frozen({ authenticated: false, mode: 'local' }),
+    bootstrap,
   };
   Object.defineProperty(result, 'failure', {
     value: failure,

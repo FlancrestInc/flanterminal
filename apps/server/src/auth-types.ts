@@ -14,11 +14,20 @@ export type LocalLoginAttempt = Readonly<{
   password: string;
   address: string;
 }>;
-export type AuthBootstrapResult = Readonly<{
-  bootstrap: AuthBootstrap;
-  cookieValue?: string;
-  failure?: 'authentication_failed' | 'rate_limited';
+export type LocalSetupAttempt = Readonly<{
+  password: string;
+  address: string;
 }>;
+export type LocalLoginFailure =
+  'authentication_failed' | 'rate_limited' | 'setup_required';
+export type LocalSetupFailure = 'already_initialized' | 'rate_limited';
+export type AuthFailure = LocalLoginFailure | LocalSetupFailure;
+export type AuthBootstrapResult<Failure extends AuthFailure = AuthFailure> =
+  Readonly<{
+    bootstrap: AuthBootstrap;
+    cookieValue?: string;
+    failure?: Failure;
+  }>;
 export type AuthenticatedSession = Readonly<{
   id: string;
   mode: AuthMode;

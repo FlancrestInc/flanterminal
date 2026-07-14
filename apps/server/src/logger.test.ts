@@ -7,6 +7,35 @@ import { createLifecycleLogger } from './logger.js';
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 
 describe('createLifecycleLogger', () => {
+  it('recognizes uncertain authentication durability without serializing supplied context', () => {
+    const capture = logCapture();
+    const logger = createLifecycleLogger('info', capture.destination);
+
+    logger.warn('authentication_activity_failed', {
+      category: 'durability_uncertain',
+      username: 'administrator-secret',
+      password: 'password-secret',
+      path: '/private/auth.json',
+      context: { cookie: 'cookie-secret' },
+    });
+
+    expect(capture.records()).toEqual([
+      expect.objectContaining({
+        event: 'authentication_activity_failed',
+        category: 'durability_uncertain',
+      }),
+    ]);
+    const serialized = capture.output();
+    for (const secret of [
+      'administrator-secret',
+      'password-secret',
+      '/private/auth.json',
+      'cookie-secret',
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
   it.each([
     ['administration_action_succeeded', 'restart_bridge'],
     ['administration_cleanup_succeeded', 'cleanup_completed'],

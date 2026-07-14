@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { CsrfService } from './csrf-service.js';
 import { AuthService } from './auth-service.js';
+import { type EnrollmentResult } from './credential-store.js';
 import { LoginRateLimiter } from './rate-limiter.js';
 
 describe('AuthService', () => {
@@ -8,12 +9,16 @@ describe('AuthService', () => {
     let now = 1000;
     let byte = 1;
     const credentials = {
+      isInitialized: vi.fn(() => true),
+      enroll: vi.fn(),
       verify: vi.fn(async () => true),
       replacePassword: vi.fn(),
     };
     const limiter = { consume: vi.fn(() => true), resetAddress: vi.fn() };
     const service = new AuthService({
       mode: 'local',
+      localUsername: 'admin',
+      onDurabilityUncertain: vi.fn(),
       clock: () => now,
       randomBytes: (n) => Buffer.alloc(n, byte++),
       credentialStore: credentials,
@@ -56,7 +61,14 @@ describe('AuthService', () => {
       mode: 'local',
       clock: () => now,
       randomBytes: (n) => Buffer.alloc(n, byte++),
-      credentialStore: { verify, replacePassword: vi.fn() },
+      credentialStore: {
+        isInitialized: vi.fn(() => true),
+        enroll: vi.fn(),
+        verify,
+        replacePassword: vi.fn(),
+      },
+      localUsername: 'admin',
+      onDurabilityUncertain: vi.fn(),
       csrfService: new CsrfService(),
       rateLimiter: { consume, resetAddress: vi.fn() },
       idleDurationMs: 10,
@@ -87,6 +99,302 @@ describe('AuthService', () => {
     expect(JSON.stringify(denied)).not.toContain('failure');
   });
 
+  it('publishes exact frozen setup-required bootstrap state only while local credentials are uninitialized', async () => {
+    const h = setup('local', { localUsername: 'operator' });
+    h.credentials.isInitialized.mockReturnValue(false);
+
+    const fresh = await h.service.bootstrap({ type: 'none' });
+
+    expect(fresh).toEqual({
+      bootstrap: {
+        authenticated: false,
+        mode: 'local',
+        setupRequired: true,
+        username: 'operator',
+      },
+    });
+    expect(Object.isFrozen(fresh)).toBe(true);
+    expect(Object.isFrozen(fresh.bootstrap)).toBe(true);
+
+    h.credentials.isInitialized.mockReturnValue(true);
+    const initialized = await h.service.bootstrap({ type: 'none' });
+    expect(initialized).toEqual({
+      bootstrap: { authenticated: false, mode: 'local' },
+    });
+    expect(Object.isFrozen(initialized)).toBe(true);
+    expect(Object.isFrozen(initialized.bootstrap)).toBe(true);
+  });
+
+  it('rejects an invalid configured local username', () => {
+    expect(() => setup('local', { localUsername: 'admin\0secret' })).toThrow(
+      'Authentication operation failed',
+    );
+  });
+
+  it('returns a hidden setup-required login failure before limiter or verifier work', async () => {
+    const h = setup('local', { localUsername: 'operator' });
+    h.credentials.isInitialized.mockReturnValue(false);
+
+    const result = await h.service.login(login());
+
+    expect(result).toEqual({
+      bootstrap: {
+        authenticated: false,
+        mode: 'local',
+        setupRequired: true,
+        username: 'operator',
+      },
+    });
+    expect(result.failure).toBe('setup_required');
+    expect(Object.keys(result)).toEqual(['bootstrap']);
+    expect(JSON.stringify(result)).not.toContain('failure');
+    expect(h.limiter.consume).not.toHaveBeenCalled();
+    expect(h.credentials.verify).not.toHaveBeenCalled();
+  });
+
+  it('rejects setup outside local mode before credential or limiter work', async () => {
+    const h = setup('none');
+
+    await expect(
+      h.service.setup({ password: 'password-password', address: '127.0.0.1' }),
+    ).rejects.toThrow('Authentication operation failed');
+    expect(h.credentials.isInitialized).not.toHaveBeenCalled();
+    expect(h.credentials.enroll).not.toHaveBeenCalled();
+    expect(h.limiter.consume).not.toHaveBeenCalled();
+  });
+
+  it('returns hidden already-initialized setup failure before consuming limiter capacity', async () => {
+    const h = setup('local');
+
+    const result = await h.service.setup({
+      password: 'password-password',
+      address: '127.0.0.1',
+    });
+
+    expect(result).toEqual({
+      bootstrap: { authenticated: false, mode: 'local' },
+    });
+    expect(result.failure).toBe('already_initialized');
+    expect(Object.keys(result)).toEqual(['bootstrap']);
+    expect(JSON.stringify(result)).not.toContain('failure');
+    expect(h.credentials.enroll).not.toHaveBeenCalled();
+    expect(h.limiter.consume).not.toHaveBeenCalled();
+  });
+
+  it('enrolls the configured local username and establishes a normal session', async () => {
+    const h = setup('local', { localUsername: 'operator' });
+    let initialized = false;
+    h.credentials.isInitialized.mockImplementation(() => initialized);
+    h.credentials.enroll.mockImplementation(async () => {
+      initialized = true;
+      return { outcome: 'enrolled', persistence: 'committed' };
+    });
+
+    const result = await h.service.setup({
+      password: 'password-password',
+      address: '127.0.0.1',
+    });
+
+    expect(result.bootstrap).toMatchObject({
+      authenticated: true,
+      mode: 'local',
+      identityLabel: 'operator',
+    });
+    expect(h.service.authenticateCookie(result.cookieValue)).toMatchObject({
+      identityLabel: 'operator',
+    });
+    expect(h.credentials.enroll).toHaveBeenCalledWith('password-password');
+    expect(h.limiter.consume).toHaveBeenCalledWith('127.0.0.1');
+    expect(h.limiter.resetAddress).toHaveBeenCalledWith('127.0.0.1');
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.bootstrap)).toBe(true);
+  });
+
+  it('admits concurrent claims but lets credential serialization select exactly one winner', async () => {
+    const h = setup('local', { maxSessions: 2 });
+    let initialized = false;
+    const firstEnrollment = deferred<void>();
+    h.credentials.isInitialized.mockImplementation(() => initialized);
+    h.credentials.enroll.mockImplementationOnce(async () => {
+      await firstEnrollment.promise;
+      initialized = true;
+      return { outcome: 'enrolled', persistence: 'committed' };
+    });
+    h.credentials.enroll.mockImplementationOnce(async () => ({
+      outcome: 'already_initialized',
+    }));
+
+    const first = h.service.setup({
+      password: 'first-password',
+      address: '127.0.0.1',
+    });
+    const second = h.service.setup({
+      password: 'second-password',
+      address: '127.0.0.2',
+    });
+    await Promise.resolve();
+    expect(h.credentials.enroll).toHaveBeenCalledTimes(1);
+
+    firstEnrollment.resolve();
+    const [winner, loser] = await Promise.all([first, second]);
+
+    expect(winner.bootstrap.authenticated).toBe(true);
+    expect(loser).toEqual({
+      bootstrap: { authenticated: false, mode: 'local' },
+    });
+    expect(loser.failure).toBe('already_initialized');
+    expect(h.credentials.enroll).toHaveBeenCalledTimes(2);
+    expect(h.limiter.consume).toHaveBeenCalledTimes(2);
+    expect(h.random).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns rate-limited for limiter rejection and bounded setup overflow', async () => {
+    const rejected = setup('local');
+    rejected.credentials.isInitialized.mockReturnValue(false);
+    rejected.limiter.consume.mockReturnValue(false);
+    const denied = await rejected.service.setup({
+      password: 'password-password',
+      address: '127.0.0.1',
+    });
+    expect(denied.failure).toBe('rate_limited');
+    expect(rejected.credentials.enroll).not.toHaveBeenCalled();
+
+    const bounded = setup('local', { maxSessions: 1 });
+    const enrollment = deferred<{
+      outcome: 'enrolled';
+      persistence: 'committed';
+    }>();
+    bounded.credentials.isInitialized.mockReturnValue(false);
+    bounded.credentials.enroll.mockReturnValueOnce(enrollment.promise);
+    const admitted = bounded.service.setup({
+      password: 'first-password',
+      address: '127.0.0.1',
+    });
+    const overflow = await bounded.service.setup({
+      password: 'second-password',
+      address: '127.0.0.2',
+    });
+    expect(overflow.failure).toBe('rate_limited');
+    expect(bounded.limiter.consume).toHaveBeenCalledOnce();
+
+    enrollment.resolve({ outcome: 'enrolled', persistence: 'committed' });
+    await expect(admitted).resolves.toMatchObject({
+      bootstrap: { authenticated: true, mode: 'local' },
+    });
+  });
+
+  it.each(['not_committed', 'exception'] as const)(
+    'contains an enrollment %s and permits the next admitted claim',
+    async (failure) => {
+      const h = setup('local', { maxSessions: 2 });
+      let initialized = false;
+      h.credentials.isInitialized.mockImplementation(() => initialized);
+      if (failure === 'not_committed') {
+        h.credentials.enroll.mockResolvedValueOnce({
+          outcome: 'not_committed',
+        });
+      } else {
+        h.credentials.enroll.mockRejectedValueOnce(
+          new Error('hashing /secret failed'),
+        );
+      }
+      h.credentials.enroll.mockImplementationOnce(async () => {
+        initialized = true;
+        return { outcome: 'enrolled', persistence: 'committed' };
+      });
+
+      const first = h.service.setup({
+        password: 'first-password',
+        address: '127.0.0.1',
+      });
+      const second = h.service.setup({
+        password: 'second-password',
+        address: '127.0.0.2',
+      });
+
+      await expect(first).rejects.toMatchObject({
+        message: 'Authentication operation failed',
+      });
+      const recovered = await second;
+      expect(recovered.bootstrap.authenticated).toBe(true);
+      expect(h.service.authenticateCookie(recovered.cookieValue)).toBeDefined();
+      expect(h.credentials.enroll).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('warns exactly once without arguments and authenticates after uncertain credential durability', async () => {
+    const warning = vi.fn();
+    const h = setup('local', { onDurabilityUncertain: warning });
+    h.credentials.isInitialized.mockReturnValue(false);
+    h.credentials.enroll.mockResolvedValueOnce({
+      outcome: 'enrolled',
+      persistence: 'committed_durability_uncertain',
+    });
+
+    const result = await h.service.setup({
+      password: 'password-password',
+      address: '127.0.0.1',
+    });
+
+    expect(result.bootstrap.authenticated).toBe(true);
+    expect(warning).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith();
+  });
+
+  it('keeps committed credentials after session preparation fails and allows normal login', async () => {
+    let initialized = false;
+    let enrolledPassword = '';
+    let randomCalls = 0;
+    const credentials = {
+      isInitialized: vi.fn(() => initialized),
+      enroll: vi.fn(async (password: string) => {
+        initialized = true;
+        enrolledPassword = password;
+        return {
+          outcome: 'enrolled' as const,
+          persistence: 'committed' as const,
+        };
+      }),
+      verify: vi.fn(async (username: string, password: string) =>
+        Boolean(
+          initialized && username === 'admin' && password === enrolledPassword,
+        ),
+      ),
+      replacePassword: vi.fn(),
+    };
+    const service = new AuthService({
+      mode: 'local',
+      localUsername: 'admin',
+      onDurabilityUncertain: vi.fn(),
+      clock: () => 0,
+      randomBytes: (size) => {
+        randomCalls += 1;
+        if (randomCalls === 1) throw new Error('random failed');
+        return Buffer.alloc(size, randomCalls);
+      },
+      credentialStore: credentials,
+      csrfService: new CsrfService(),
+      rateLimiter: { consume: vi.fn(() => true), resetAddress: vi.fn() },
+      idleDurationMs: 100,
+      absoluteDurationMs: 1000,
+      maxSessions: 1,
+    });
+
+    await expect(
+      service.setup({
+        password: 'password-password',
+        address: '127.0.0.1',
+      }),
+    ).rejects.toThrow('Authentication operation failed');
+    expect(initialized).toBe(true);
+    expect(credentials.enroll).toHaveBeenCalledOnce();
+
+    const loggedIn = await service.login(login());
+    expect(loggedIn.bootstrap.authenticated).toBe(true);
+    expect(service.authenticateCookie(loggedIn.cookieValue)).toBeDefined();
+    expect(credentials.enroll).toHaveBeenCalledOnce();
+  });
+
   it('denies a login burst immediately while one admitted verification is unresolved', async () => {
     const firstVerification = deferred<boolean>();
     const secondVerification = deferred<boolean>();
@@ -110,7 +418,14 @@ describe('AuthService', () => {
       mode: 'local',
       clock: () => 0,
       randomBytes: random,
-      credentialStore: { verify, replacePassword: vi.fn() },
+      credentialStore: {
+        isInitialized: vi.fn(() => true),
+        enroll: vi.fn(),
+        verify,
+        replacePassword: vi.fn(),
+      },
+      localUsername: 'admin',
+      onDurabilityUncertain: vi.fn(),
       csrfService: csrf,
       rateLimiter: limiter,
       idleDurationMs: 100,
@@ -210,7 +525,14 @@ describe('AuthService', () => {
       mode: 'local',
       clock: () => now,
       randomBytes: (size) => Buffer.alloc(size, byte++),
-      credentialStore: { verify, replacePassword: vi.fn() },
+      credentialStore: {
+        isInitialized: vi.fn(() => true),
+        enroll: vi.fn(),
+        verify,
+        replacePassword: vi.fn(),
+      },
+      localUsername: 'admin',
+      onDurabilityUncertain: vi.fn(),
       csrfService: new CsrfService(),
       rateLimiter: limiter,
       idleDurationMs: 100,
@@ -363,6 +685,8 @@ describe('AuthService', () => {
     let reentrantBootstrap!: Promise<unknown>;
     let reentrantLogin!: Promise<Awaited<ReturnType<AuthService['login']>>>;
     const credentials = {
+      isInitialized: vi.fn(() => true),
+      enroll: vi.fn(),
       verify: vi.fn(() => {
         if (reenter && !reentered) {
           reentered = true;
@@ -379,6 +703,8 @@ describe('AuthService', () => {
     };
     const service = new AuthService({
       mode: 'local',
+      localUsername: 'admin',
+      onDurabilityUncertain: vi.fn(),
       clock: () => 0,
       randomBytes: (size) => Buffer.alloc(size, byte++),
       credentialStore: credentials,
@@ -539,7 +865,12 @@ describe('AuthService', () => {
         if (calls === 1) throw new Error('random failure');
         return Buffer.alloc(size, calls);
       },
-      credentialStore: { verify: vi.fn(), replacePassword: vi.fn() },
+      credentialStore: {
+        isInitialized: vi.fn(() => false),
+        enroll: vi.fn(),
+        verify: vi.fn(),
+        replacePassword: vi.fn(),
+      },
       csrfService: new CsrfService(),
       rateLimiter: { consume: vi.fn(), resetAddress: vi.fn() },
       idleDurationMs: 100,
@@ -843,7 +1174,12 @@ describe('AuthService', () => {
       mode: 'none',
       clock: () => 0,
       randomBytes: (size) => Buffer.alloc(size, byte++),
-      credentialStore: { verify: vi.fn(), replacePassword: vi.fn() },
+      credentialStore: {
+        isInitialized: vi.fn(() => false),
+        enroll: vi.fn(),
+        verify: vi.fn(),
+        replacePassword: vi.fn(),
+      },
       csrfService: csrf,
       rateLimiter: { consume: vi.fn(() => true), resetAddress: vi.fn() },
       idleDurationMs: 100,
@@ -1061,9 +1397,13 @@ describe('AuthService', () => {
         return Buffer.alloc(size, calls);
       },
       credentialStore: {
+        isInitialized: vi.fn(() => true),
+        enroll: vi.fn(),
         verify: vi.fn(async () => true),
         replacePassword: vi.fn(),
       },
+      localUsername: 'admin',
+      onDurabilityUncertain: vi.fn(),
       csrfService: new CsrfService(),
       rateLimiter: { consume: () => true, resetAddress },
       idleDurationMs: 100,
@@ -1095,9 +1435,13 @@ describe('AuthService', () => {
       clock: () => 0,
       randomBytes: (size) => Buffer.alloc(size, byte++),
       credentialStore: {
+        isInitialized: vi.fn(() => true),
+        enroll: vi.fn(),
         verify: vi.fn(async () => true),
         replacePassword: vi.fn(),
       },
+      localUsername: 'admin',
+      onDurabilityUncertain: vi.fn(),
       csrfService: new FailingCsrfService(),
       rateLimiter: { consume: () => true, resetAddress },
       idleDurationMs: 100,
@@ -1192,11 +1536,18 @@ function setup(
     absoluteDurationMs: number;
     maxSessions: number;
     maxObservers: number;
+    localUsername: string;
+    onDurabilityUncertain: () => void;
   }> = {},
 ) {
   const time = { now: 0 };
   let byte = 1;
   const credentials = {
+    isInitialized: vi.fn(() => true),
+    enroll: vi.fn(async (): Promise<EnrollmentResult> => ({
+      outcome: 'enrolled',
+      persistence: 'committed',
+    })),
     verify: vi.fn(async () => true),
     replacePassword: vi.fn(async () => ({ state: 'committed' as const })),
   };
@@ -1205,8 +1556,7 @@ function setup(
   const csrf = new CsrfService({
     randomBytes: (size) => Buffer.alloc(size, byte++),
   });
-  const service = new AuthService({
-    mode,
+  const options = {
     clock: () => time.now,
     randomBytes: random,
     credentialStore: credentials,
@@ -1218,7 +1568,16 @@ function setup(
     ...(overrides.maxObservers === undefined
       ? {}
       : { maxObservers: overrides.maxObservers }),
-  });
+  };
+  const service =
+    mode === 'local'
+      ? new AuthService({
+          ...options,
+          mode,
+          localUsername: overrides.localUsername ?? 'admin',
+          onDurabilityUncertain: overrides.onDurabilityUncertain ?? vi.fn(),
+        })
+      : new AuthService({ ...options, mode });
   return { service, credentials, limiter, time, random, csrf };
 }
 
