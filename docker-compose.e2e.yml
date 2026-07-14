@@ -13,7 +13,6 @@ services:
       APP_PUBLIC_URL: http://localhost:3000
       AUTH_MODE: local
       LOCAL_AUTH_USERNAME: ${E2E_LOCAL_USERNAME:-webterm}
-      LOCAL_AUTH_PASSWORD_FILE: /run/secrets/local_auth_password
       BCRYPT_COST: 10
       AUTH_IDLE_MINUTES: 60
       AUTH_ABSOLUTE_HOURS: 24
@@ -41,9 +40,6 @@ services:
     volumes:
       - e2e-app:/app/data
       - e2e-home:/home/webterm
-    secrets:
-      - source: local_auth_password
-        target: local_auth_password
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
@@ -82,7 +78,3 @@ services:
 volumes:
   e2e-app:
   e2e-home:
-
-secrets:
-  local_auth_password:
-    file: ${E2E_LOCAL_PASSWORD_FILE:?E2E local password file is required}

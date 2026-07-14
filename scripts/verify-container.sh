@@ -7,21 +7,21 @@ project=${COMPOSE_PROJECT_NAME:-flanterminal_verify}
 : "${SESSION_MAX_COUNT:=20}"
 export HOST_PORT SESSION_MAX_COUNT
 terminal_secret=PHASE3_TERMINAL_DATA_NOT_IN_LOGS
-bootstrap_password=$(openssl rand -hex 24)
+enrollment_password=$(openssl rand -hex 24)
 replacement_password=$(openssl rand -hex 24)
 auth_cookie=
 auth_csrf=
 hold_pid=
 hold_log=
 hold_stop=/tmp/.flanterminal-verify-stop
-bootstrap_secret=
-empty_secret=
-invalid_secret=
 local_config=
 none_config=
 cloudflare_config=
+example_config=
+e2e_config=
 negative_containers=
 negative_volumes=
+pre_recreate_logs=
 
 case $# in
   0) check=all ;;
@@ -48,12 +48,11 @@ cleanup() {
     wait "$hold_pid" >/dev/null 2>&1 || true
   fi
   [ -z "$hold_log" ] || rm -f "$hold_log"
-  [ -z "$bootstrap_secret" ] || rm -f "$bootstrap_secret"
-  [ -z "$empty_secret" ] || rm -f "$empty_secret"
-  [ -z "$invalid_secret" ] || rm -f "$invalid_secret"
   [ -z "$local_config" ] || rm -f "$local_config"
   [ -z "$none_config" ] || rm -f "$none_config"
   [ -z "$cloudflare_config" ] || rm -f "$cloudflare_config"
+  [ -z "$example_config" ] || rm -f "$example_config"
+  [ -z "$e2e_config" ] || rm -f "$e2e_config"
   for negative_container in $negative_containers; do
     docker rm -f "$negative_container" >/dev/null 2>&1 || true
   done
@@ -107,9 +106,11 @@ verify_static_hardening() {
   require_file_pattern .gitignore '^secrets/$' 'host secret directory is not excluded from version control'
 
   require_file_pattern docker-compose.yml 'AUTH_MODE:.*local' 'default Compose does not enable local authentication'
-  require_file_pattern docker-compose.yml 'LOCAL_AUTH_PASSWORD_FILE:.*\/run\/secrets\/local_auth_password' 'default Compose does not mount the local password at the fixed runtime path'
-  require_file_pattern docker-compose.yml '^secrets:' 'default Compose has no top-level secret declaration'
-  require_file_pattern docker-compose.yml 'source: local_auth_password' 'default Compose has no local password secret source'
+  for local_file in docker-compose.yml docker-compose.example.yml; do
+    reject_file_pattern "$local_file" 'LOCAL_AUTH_PASSWORD|LOCAL_PASSWORD_FILE|local_auth_password|^[[:space:]]*secrets:' "local Compose contains a password-file or secret reference in $local_file"
+  done
+  reject_file_pattern docker-compose.e2e.yml 'LOCAL_AUTH_PASSWORD|E2E_LOCAL_PASSWORD_FILE|local_auth_password|^[[:space:]]*secrets:' 'E2E Compose contains an app password-file or secret reference'
+  reject_file_pattern .env.example 'LOCAL_AUTH_PASSWORD_FILE|LOCAL_AUTH_PASSWORD_FILE_HOST|local_auth_password' 'example environment contains local password-file configuration'
   require_file_pattern docker-compose.yml 'HOST_BIND_ADDRESS:-127\.0\.0\.1' 'default host bind address is not loopback'
   reject_file_pattern docker-compose.yml 'node_modules' 'default Compose persists node_modules'
   reject_file_pattern docker-compose.yml 'docker\.sock|privileged:[[:space:]]*true' 'default Compose grants Docker or privileged access'
@@ -129,18 +130,25 @@ verify_compose_models() {
   local_config=$(mktemp)
   none_config=$(mktemp)
   cloudflare_config=$(mktemp)
+  example_config=$(mktemp)
+  e2e_config=$(mktemp)
   docker compose -f docker-compose.yml config --format json >"$local_config"
   AUTH_MODE=none docker compose -f docker-compose.yml config --format json >"$none_config"
-  LOCAL_AUTH_PASSWORD_FILE_HOST=/definitely/missing \
-    docker compose -f docker-compose.cloudflare.yml config --format json >"$cloudflare_config"
-  rg -qi 'local_auth_password|LOCAL_AUTH_PASSWORD|"secrets"' "$cloudflare_config" &&
-    fail 'Cloudflare resolved configuration contains a local secret dependency'
-  node - "$local_config" "$none_config" "$cloudflare_config" <<'NODE'
+  docker compose -f docker-compose.cloudflare.yml config --format json >"$cloudflare_config"
+  docker compose -f docker-compose.example.yml config --format json >"$example_config"
+  docker compose -f docker-compose.e2e.yml config --format json >"$e2e_config"
+  for resolved_config in "$local_config" "$none_config" "$cloudflare_config"; do
+    rg -qi 'local_auth_password|LOCAL_AUTH_PASSWORD|"secrets"' "$resolved_config" &&
+      fail 'resolved Compose configuration contains a local secret dependency'
+  done
+  node - "$local_config" "$none_config" "$cloudflare_config" "$example_config" "$e2e_config" <<'NODE'
 const fs = require('node:fs');
-const [localPath, nonePath, cloudflarePath] = process.argv.slice(2);
+const [localPath, nonePath, cloudflarePath, examplePath, e2ePath] = process.argv.slice(2);
 const local = JSON.parse(fs.readFileSync(localPath, 'utf8'));
 const none = JSON.parse(fs.readFileSync(nonePath, 'utf8'));
 const cloudflare = JSON.parse(fs.readFileSync(cloudflarePath, 'utf8'));
+const example = JSON.parse(fs.readFileSync(examplePath, 'utf8'));
+const e2e = JSON.parse(fs.readFileSync(e2ePath, 'utf8'));
 const hardeningKeys = [
   'build', 'cap_drop', 'healthcheck', 'mem_limit', 'pids_limit', 'ports',
   'read_only', 'restart', 'security_opt', 'tmpfs', 'volumes',
@@ -159,6 +167,20 @@ for (const service of [local.services.app, cloudflare.services.app]) {
   if (service.cap_add !== undefined || service.privileged === true) {
     throw new Error('Compose adds privileges');
   }
+  if (service.secrets !== undefined) throw new Error('Compose mounts a secret');
+}
+for (const service of [example.services.app, e2e.services.app]) {
+  const mounts = service.volumes.map(({ target }) => target).sort();
+  if (JSON.stringify(mounts) !== JSON.stringify(expectedMounts)) {
+    throw new Error(`Unexpected local app volumes: ${mounts.join(', ')}`);
+  }
+  if (service.secrets !== undefined) throw new Error('Local app mounts a secret');
+  if (Object.keys(service.environment ?? {}).some((key) => /password|secret/i.test(key))) {
+    throw new Error('Local app receives password or secret environment');
+  }
+}
+if (!Object.hasOwn(e2e.services.e2e.environment, 'E2E_LOCAL_PASSWORD')) {
+  throw new Error('E2E password compatibility is unavailable to Playwright');
 }
 if (local.services.app.environment.AUTH_MODE !== 'local') throw new Error('Local auth is not enabled');
 if (none.services.app.environment.AUTH_MODE !== 'none') throw new Error('AUTH_MODE does not override the local default');
@@ -170,49 +192,80 @@ if (local.services.app.ports[0].host_ip !== '127.0.0.1' || cloudflare.services.a
 NODE
 }
 
-verify_failed_local_bootstrap() {
+verify_failed_local_record() {
   case_name=$1
-  secret_file=${2-}
-  secret_value=${3-}
   negative_container="${project}_negative_${case_name}"
   negative_data="${project}_negative_data_${case_name}"
   negative_home="${project}_negative_home_${case_name}"
   negative_containers="$negative_containers $negative_container"
   negative_volumes="$negative_volumes $negative_data $negative_home"
-  secret_mount=
-  if [ -n "$secret_file" ]; then
-    secret_mount="--mount type=bind,src=$secret_file,dst=/run/secrets/local_auth_password,readonly"
-  fi
-  # shellcheck disable=SC2086
+
+  case "$case_name" in
+    malformed) record='{' ;;
+    invalid) record='{"version":2,"marker":"UNSAFE_AUTH_RECORD_MARKER"}' ;;
+    *) fail 'unknown invalid local credential case' ;;
+  esac
+  printf '%s' "$record" | docker run -i --rm \
+    --mount "type=volume,src=$negative_data,dst=/app/data" \
+    --entrypoint sh "$image" -c 'umask 077; cat > /app/data/auth.json'
+  unset record
+
   docker run -d --name "$negative_container" \
     --read-only \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777 \
     --tmpfs /run:rw,noexec,nosuid,nodev,size=1m,mode=0755,uid=1000,gid=1000 \
     --mount "type=volume,src=$negative_data,dst=/app/data" \
     --mount "type=volume,src=$negative_home,dst=/home/webterm" \
-    $secret_mount \
     -e AUTH_MODE=local \
-    -e LOCAL_AUTH_PASSWORD_FILE=/run/secrets/local_auth_password \
     "$image" >/dev/null
   attempt=0
   while [ "$(docker inspect -f '{{.State.Running}}' "$negative_container")" = true ]; do
     attempt=$((attempt + 1))
-    [ "$attempt" -lt 100 ] || fail "$case_name local bootstrap did not exit"
+    [ "$attempt" -lt 100 ] || fail "$case_name local credential record did not exit"
     sleep 0.1
   done
   [ "$(docker inspect -f '{{.State.ExitCode}}' "$negative_container")" -ne 0 ] ||
-    fail "$case_name local bootstrap exited successfully"
+    fail "$case_name local credential record exited successfully"
   container_logs=$(docker logs "$negative_container" 2>&1)
   printf '%s' "$container_logs" | rg -q 'server_started' &&
-    fail "$case_name local bootstrap listened before failing"
-  if [ -n "$secret_value" ]; then
-    printf '%s' "$container_logs" | rg -F -q -- "$secret_value" &&
-      fail "$case_name local bootstrap exposed the password in logs"
-  fi
+    fail "$case_name local credential record listened before failing"
+  printf '%s' "$container_logs" | rg -F -q -- 'UNSAFE_AUTH_RECORD_MARKER' &&
+    fail "$case_name local credential record contents appeared in logs"
   docker rm "$negative_container" >/dev/null
   negative_containers=$(printf '%s' "$negative_containers" | sed "s/ $negative_container//")
   docker volume rm "$negative_data" "$negative_home" >/dev/null
   negative_volumes=$(printf '%s' "$negative_volumes" | sed "s/ $negative_data//; s/ $negative_home//")
+}
+
+setup_response() {
+  password=$1
+  printf '%s' "$password" | dc exec -T app node --input-type=module -e '
+let password = "";
+for await (const chunk of process.stdin) password += chunk;
+const base = process.env.APP_BASE_PATH === "/" ? "" : process.env.APP_BASE_PATH;
+const api = `http://127.0.0.1:${process.env.APP_PORT}${base}/api/auth`;
+const session = await fetch(`${api}/session`);
+const bootstrap = await session.json();
+const expected = {
+  authenticated: false,
+  mode: "local",
+  setupRequired: true,
+  username: process.env.LOCAL_AUTH_USERNAME,
+};
+if (session.status !== 200 || JSON.stringify(bootstrap) !== JSON.stringify(expected)) process.exit(2);
+const response = await fetch(`${api}/setup`, {
+  method: "POST",
+  headers: { Origin: process.env.APP_PUBLIC_URL, "Content-Type": "application/json" },
+  body: JSON.stringify({ password }),
+});
+const text = await response.text();
+const setCookie = response.headers.get("set-cookie");
+process.stdout.write(JSON.stringify({
+  status: response.status,
+  cookie: setCookie?.split(";", 1)[0] ?? null,
+  body: text === "" ? null : JSON.parse(text),
+}));
+'
 }
 
 login_response() {
@@ -257,6 +310,26 @@ auth_login() {
   auth_csrf=$(printf '%s' "$response" | json_value body.csrfToken)
   [ -n "$auth_cookie" ] && [ -n "$auth_csrf" ] ||
     fail 'local authentication returned no cookie or CSRF token'
+}
+
+auth_setup() {
+  response=$(setup_response "$1")
+  [ "$(printf '%s' "$response" | json_value status)" = 200 ] ||
+    fail 'local first-run enrollment failed'
+  [ "$(printf '%s' "$response" | json_value body.authenticated)" = true ] ||
+    fail 'local first-run enrollment did not authenticate'
+  [ "$(printf '%s' "$response" | json_value body.identityLabel)" = "$(dc exec -T app printenv LOCAL_AUTH_USERNAME)" ] ||
+    fail 'local first-run enrollment returned the wrong identity'
+  auth_cookie=$(printf '%s' "$response" | json_value cookie)
+  auth_csrf=$(printf '%s' "$response" | json_value body.csrfToken)
+  [ -n "$auth_cookie" ] && [ -n "$auth_csrf" ] ||
+    fail 'local first-run enrollment returned no cookie or CSRF token'
+}
+
+auth_logout() {
+  response=$(api POST /api/auth/logout '{}')
+  [ "$(printf '%s' "$response" | json_value status)" = 204 ] ||
+    fail 'local logout failed'
 }
 
 session_response() {
@@ -428,10 +501,6 @@ printf 'checking: hardening\n'
 [ -f Dockerfile ] || fail 'Dockerfile is unavailable'
 rg -q "JetBrainsMonoNerdFont-Regular.ttf" apps/client/src/theme.css || fail 'bundled font unavailable'
 verify_static_hardening
-bootstrap_secret=$(mktemp)
-printf '%s\n' "$bootstrap_password" >"$bootstrap_secret"
-chmod 0600 "$bootstrap_secret"
-export LOCAL_AUTH_PASSWORD_FILE_HOST=$bootstrap_secret
 verify_compose_models
 dc down -v --remove-orphans >/dev/null 2>&1 || true
 dc config --quiet
@@ -451,8 +520,8 @@ docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$container
 mounts=$(docker inspect -f '{{range .Mounts}}{{println .Destination}}{{end}}' "$container")
 printf '%s\n' "$mounts" | rg -q '^/app/data$' || fail 'application data volume is unavailable'
 printf '%s\n' "$mounts" | rg -q '^/home/webterm$' || fail 'home volume is unavailable'
-printf '%s\n' "$mounts" | rg -q '^/run/secrets/local_auth_password$' || fail 'local password secret is unavailable'
-unexpected_mounts=$(printf '%s\n' "$mounts" | rg -v '^(/app/data|/home/webterm|/run/secrets/local_auth_password)$' || true)
+printf '%s\n' "$mounts" | rg -q '^/run/secrets(?:/|$)' && fail 'runtime secrets mount is present'
+unexpected_mounts=$(printf '%s\n' "$mounts" | rg -v '^(/app/data|/home/webterm)$' || true)
 [ -z "$unexpected_mounts" ] || fail 'unexpected persistent or secret mounts are present'
 dc exec -T app sh -c '
   ! test -w /app &&
@@ -464,10 +533,8 @@ dc exec -T app sh -c '
   [ "$(stat -c %u "$HOME")" = "$(id -u)" ] &&
   [ "$(stat -c %a "$HOME/.ssh")" = 700 ] &&
   [ "$(stat -c %a "$HOME/.bash_history")" = 600 ] &&
-  [ "$(stat -c %a /app/data/auth.json)" = 600 ] &&
+  [ ! -e /app/data/auth.json ] &&
   [ "$(stat -c %a /app/data/settings.json)" = 600 ] &&
-  [ -r /run/secrets/local_auth_password ] &&
-  [ "$(stat -c %a /run/secrets/local_auth_password)" = 600 ] &&
   node --input-type=module -e "await import(\"bcrypt\"); await import(\"jose\")" &&
   test -n "$(find /app/apps/client/dist/assets -name "JetBrainsMonoNerdFont-Regular-*.ttf" -print -quit)" &&
   test -n "$(find /app/apps/client/dist/assets -name "terminal-bell-*.wav" -print -quit)"
@@ -493,16 +560,8 @@ for (const path of ['/app/data/http-private', '/data/http-private', '/home/webte
 }
 NODE
 
-empty_secret=$(mktemp)
-invalid_secret=$(mktemp)
-chmod 0600 "$empty_secret" "$invalid_secret"
-printf '%s\n' short >"$invalid_secret"
-verify_failed_local_bootstrap missing
-verify_failed_local_bootstrap empty "$empty_secret"
-verify_failed_local_bootstrap invalid "$invalid_secret" short
-rm -f "$empty_secret" "$invalid_secret"
-empty_secret=
-invalid_secret=
+verify_failed_local_record malformed
+verify_failed_local_record invalid
 printf 'hardening checks passed\n'
 [ "$check" = all ] || exit 0
 
@@ -513,7 +572,15 @@ printf '%s' "$health" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('e
 printf '%s' "$ready" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const v=JSON.parse(s);if(v.status!=='ready'||v.ready!==true)process.exit(1)})"
 dc exec -T app sh -c 'command -v tmux >/dev/null && command -v ssh >/dev/null && [ "$(id -u)" -ne 0 ] && [ "$(id -un)" = webterm ]'
 
-auth_login "$bootstrap_password"
+auth_setup "$enrollment_password"
+enrollment_cookie=$auth_cookie
+dc exec -T app sh -c '[ "$(stat -c %a /app/data/auth.json)" = 600 ]'
+auth_logout
+logged_out=$(session_response "$enrollment_cookie")
+[ "$(printf '%s' "$logged_out" | json_value status)" = 200 ] &&
+  [ "$(printf '%s' "$logged_out" | json_value body.authenticated)" = false ] ||
+  fail 'logged-out local session remained authenticated'
+auth_login "$enrollment_password"
 first_id=$(tab_ids | sed -n '1p')
 [ -n "$first_id" ] || fail 'initial tab metadata is unavailable'
 ws_probe "$first_id" "export PHASE3_MARKER=$terminal_secret; printf 'MARKER_SET\\n'" MARKER_SET
@@ -560,10 +627,11 @@ dc exec -T -e VERIFY_MARKER="$terminal_secret" app sh -c '
   chmod 750 "$HOME/scripts/verify-script"
 '
 
-[ "$(change_password "$bootstrap_password" "$replacement_password")" = 204 ] ||
+[ "$(change_password "$enrollment_password" "$replacement_password")" = 204 ] ||
   fail 'password rotation failed'
 auth_login "$replacement_password"
 pre_recreate_cookie=$auth_cookie
+pre_recreate_logs=$(dc logs app 2>&1)
 
 dc stop app >/dev/null
 dc run --rm --no-deps --entrypoint node app --input-type=module - "$second_id" <<'NODE'
@@ -585,9 +653,9 @@ lost_session=$(session_response "$pre_recreate_cookie")
 [ "$(printf '%s' "$lost_session" | json_value status)" = 200 ] &&
   [ "$(printf '%s' "$lost_session" | json_value body.authenticated)" = false ] ||
   fail 'application session survived container recreation'
-old_password=$(login_response "$bootstrap_password")
+old_password=$(login_response "$enrollment_password")
 [ "$(printf '%s' "$old_password" | json_value status)" = 401 ] ||
-  fail 'bootstrap password remained valid after recreation'
+  fail 'enrollment password remained valid after recreation'
 auth_login "$replacement_password"
 
 [ "$(tab_ids | wc -l | tr -d ' ')" = 2 ] || fail 'tab metadata did not survive recreation'
@@ -654,11 +722,11 @@ rm -f "$hold_log"
 hold_log=
 wait_for_bridge_count 0 'PTY bridges leaked after multi-client disconnect'
 
-container_logs=$(dc logs 2>&1)
-for sensitive in "$terminal_secret" "$bootstrap_password" "$replacement_password"; do
+container_logs=$(printf '%s\n%s' "$pre_recreate_logs" "$(dc logs 2>&1)")
+for sensitive in "$terminal_secret" "$enrollment_password" "$replacement_password"; do
   printf '%s' "$container_logs" | rg -F -q -- "$sensitive" && fail 'terminal or authentication secret leaked to logs'
 done
-printf '%s\n%s\n%s' "$terminal_secret" "$bootstrap_password" "$replacement_password" | \
+printf '%s\n%s\n%s' "$terminal_secret" "$enrollment_password" "$replacement_password" | \
   dc exec -T app node --input-type=module -e '
 import { readFile } from "node:fs/promises";
 let input = "";

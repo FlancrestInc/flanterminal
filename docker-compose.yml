@@ -14,7 +14,6 @@ services:
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
       AUTH_MODE: ${AUTH_MODE:-local}
       LOCAL_AUTH_USERNAME: ${LOCAL_AUTH_USERNAME:-webterm}
-      LOCAL_AUTH_PASSWORD_FILE: /run/secrets/local_auth_password
       BCRYPT_COST: ${BCRYPT_COST:-12}
       AUTH_IDLE_MINUTES: ${AUTH_IDLE_MINUTES:-60}
       AUTH_ABSOLUTE_HOURS: ${AUTH_ABSOLUTE_HOURS:-24}
@@ -44,9 +43,6 @@ services:
     volumes:
       - app-data:/app/data
       - webterm-home:/home/webterm
-    secrets:
-      - source: local_auth_password
-        target: local_auth_password
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
@@ -74,7 +70,3 @@ services:
 volumes:
   app-data:
   webterm-home:
-
-secrets:
-  local_auth_password:
-    file: ${LOCAL_AUTH_PASSWORD_FILE_HOST:-./secrets/local_auth_password}
