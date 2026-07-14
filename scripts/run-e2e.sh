@@ -27,7 +27,6 @@ run_variant() {
       --abort-on-container-exit --exit-code-from e2e
 }
 
-temporary_dir=$(mktemp -d)
 case $mode in
   all | local | cloudflare) ;;
   *)
@@ -40,10 +39,7 @@ if [ "$mode" = all ] || [ "$mode" = local ]; then
   E2E_MODE=local
   export E2E_MODE
   E2E_LOCAL_PASSWORD=$(openssl rand -hex 24)
-  E2E_LOCAL_PASSWORD_FILE=$temporary_dir/local_auth_password
-  export E2E_LOCAL_PASSWORD E2E_LOCAL_PASSWORD_FILE
-  printf '%s\n' "$E2E_LOCAL_PASSWORD" >"$E2E_LOCAL_PASSWORD_FILE"
-  chmod 0600 "$E2E_LOCAL_PASSWORD_FILE"
+  export E2E_LOCAL_PASSWORD
   e2e_compose=docker-compose.e2e.yml
   docker compose -p "$project" -f "$e2e_compose" build
   run_variant local-root / /
@@ -53,6 +49,7 @@ if [ "$mode" = all ] || [ "$mode" = local ]; then
 fi
 
 if [ "$mode" = all ] || [ "$mode" = cloudflare ]; then
+  temporary_dir=$(mktemp -d)
   E2E_MODE=cloudflare
   export E2E_MODE
   E2E_CLOUDFLARE_CA_FILE=$temporary_dir/cloudflare-ca.crt

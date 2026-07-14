@@ -14,6 +14,41 @@ export function localPassword(): string {
   return password;
 }
 
+export async function enrollLocalAdministrator(page: Page): Promise<void> {
+  const password = localPassword();
+  await page.goto(workspacePath);
+
+  await expect(
+    page.getByRole('heading', { name: 'Set up FlanTerminal' }),
+  ).toBeVisible();
+  const username = page.getByLabel('Username');
+  await expect(username).toHaveValue(localUsername);
+  await expect(username).toHaveAttribute('readonly', '');
+  await expect(username).toHaveAttribute('autocomplete', 'username');
+
+  const newPassword = page.getByLabel('New Password');
+  const confirmation = page.getByLabel('Confirm password');
+  await expect(newPassword).toHaveAttribute('autocomplete', 'new-password');
+  await expect(confirmation).toHaveAttribute('autocomplete', 'new-password');
+
+  await newPassword.fill(password);
+  await confirmation.fill(`${password}-mismatch`);
+  await page.getByRole('button', { name: 'Create administrator' }).click();
+  await expect(page.getByRole('alert')).toHaveText('Passwords do not match.');
+  await expect(
+    page.getByRole('heading', { name: 'Set up FlanTerminal' }),
+  ).toBeVisible();
+
+  await newPassword.fill(password);
+  await confirmation.fill(password);
+  await page.getByRole('button', { name: 'Create administrator' }).click();
+  await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+  await signInLocal(page, password);
+}
+
 export async function signInLocal(
   page: Page,
   password = localPassword(),

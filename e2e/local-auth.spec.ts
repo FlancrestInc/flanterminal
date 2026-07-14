@@ -52,7 +52,7 @@ test('signs out without terminating the container-local tmux session', async ({
     .toContain(`RESTORED_${marker}`);
 });
 
-test('changes the local password and restores the bootstrap credential', async ({
+test('changes and restores the enrolled administrator password', async ({
   page,
 }) => {
   const original = localPassword();

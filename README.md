@@ -34,6 +34,12 @@ flowchart LR
   Shell -. user runs ssh gospel .-> Remote
 ```
 
+Local authentication has two persistent states: without `auth.json`, the
+public session endpoint advertises setup-required state and the one-time setup
+endpoint accepts enrollment; with a valid `auth.json`, setup is closed and
+ordinary sign-in is required. An invalid existing record is a startup error,
+not a reason to reopen enrollment.
+
 ## Features
 
 - Full-viewport xterm.js terminal with ANSI colors, Unicode, mouse support,
@@ -60,30 +66,29 @@ flowchart LR
 
 ## Quick start: local authentication
 
-Requirements are Docker Engine, the Docker Compose plugin, and OpenSSL on the
-host. The default Compose file publishes only on `127.0.0.1` and enables local
+Requirements are Docker Engine and the Docker Compose plugin. The default
+Compose file publishes only on loopback (`127.0.0.1`) and enables local
 authentication.
 
 ```sh
 cp .env.example .env
-install -d -m 700 secrets
-(umask 077; openssl rand -base64 32 > secrets/local_auth_password)
-# The secret owner must be root or match PUID. Adjust 1000:1000 if needed.
-sudo chown 1000:1000 secrets/local_auth_password
-chmod 600 secrets/local_auth_password
 docker compose up -d --build --wait
 docker compose ps
 ```
 
-Open <http://localhost:3000> and sign in as `webterm` with the password in the
-local secret file. Review `.env` before starting and keep the password out of
-`.env`, Compose YAML, shell arguments, and image build arguments.
+Before changing the bind address or enabling a reverse proxy, open
+<http://localhost:3000>. The first browser to reach a new local deployment can
+claim its configured `LOCAL_AUTH_USERNAME` (`webterm` by default) by choosing
+and confirming the administrator password. Complete this enrollment while the
+service is reachable only from a trusted machine. Passwords must contain 12 to
+72 UTF-8 bytes and no NUL byte; characters may use more than one byte.
 
-On first startup, FlanTerminal hashes the bootstrap password with bcrypt and
-writes `/app/data/auth.json` with mode `0600`. Once that file exists, changing
-the bootstrap secret does not reset the password. Use the in-app password
-change control. A password change revokes every application session but does
-not terminate tmux sessions.
+Successful enrollment bcrypt-hashes the password and atomically writes
+`/app/data/auth.json` with mode `0600`. Later visits show the normal sign-in
+form. The password is never supplied through Compose, an environment variable,
+a command argument, or an application log. Change it from **Settings**; a
+password change revokes every application session but does not terminate tmux
+sessions.
 
 To deliberately run without application authentication on a trusted network,
 set `AUTH_MODE=none` in `.env`, then recreate the container so it receives the
@@ -454,11 +459,14 @@ overwrites a trusted identity header.
 
 ## Authentication modes
 
-- `local`: supplied by `docker-compose.yml`. The bootstrap secret is read only
-  when no credential record exists. Passwords are bcrypt-hashed at cost 10-15.
+- `local`: supplied by `docker-compose.yml`. With no `auth.json`,
+  `GET /api/auth/session` returns the setup-required state and the first browser
+  can submit the password to `POST /api/auth/setup`. Enrollment creates the
+  only local administrator credential; later requests use normal sign-in.
+  Passwords are bcrypt-hashed at cost 10-15.
 - `cloudflare-access`: supplied by `docker-compose.cloudflare.yml`. Every HTTP
   bootstrap and WebSocket upgrade requires a valid Access JWT. There is no
-  local password file or generic trusted identity header.
+  local enrollment, `auth.json`, password, or generic trusted identity header.
 - `trusted-header`: for an existing authentication proxy. Set an explicit
   `TRUST_PROXY` IP/CIDR list and one `TRUSTED_AUTH_HEADER`. The proxy must remove
   every client-supplied copy, authenticate the user, and set exactly one
@@ -479,46 +487,44 @@ Environment variables override an optional strict JSON file named by
 read-only yourself; the supplied Compose files do not add another writable
 path.
 
-| Variable                           | Default                            | Bounds or purpose                                      |
-| ---------------------------------- | ---------------------------------- | ------------------------------------------------------ |
-| `APP_PORT`                         | `3000`                             | Internal port, `1..65535`                              |
-| `HOST_PORT`                        | `3000`                             | Published host port                                    |
-| `HOST_BIND_ADDRESS`                | `127.0.0.1`                        | Specific host address for publishing                   |
-| `APP_BIND_HOST`                    | `0.0.0.0`                          | Container listener address                             |
-| `APP_BASE_PATH`                    | `/`                                | Root or a canonical path such as `/terminal`           |
-| `APP_PUBLIC_URL`                   | `http://localhost:3000`            | Exact browser origin, without a path                   |
-| `DATA_DIR`                         | `/app/data`                        | Fixed persistent application mount in Compose          |
-| `HOME_DIR`                         | `/home/webterm`                    | Fixed persistent shell home in Compose                 |
-| `SESSION_MAX_COUNT`                | `10`                               | Tab/session limit, `1..20`                             |
-| `DEFAULT_SHELL`                    | `/bin/bash`                        | Initial shell; must be in `ALLOWED_SHELLS`             |
-| `ALLOWED_SHELLS`                   | `/bin/bash`                        | Comma-separated absolute executable paths              |
-| `DEFAULT_FONT_SIZE`                | `14`                               | Initial setting, `8..32`                               |
-| `MAX_FONT_SIZE`                    | `32`                               | Browser setting ceiling, `8..32`                       |
-| `XTERM_SCROLLBACK`                 | `10000`                            | Initial browser lines, clamped to `0..100000`          |
-| `MAX_XTERM_SCROLLBACK`             | `100000`                           | Browser safety ceiling                                 |
-| `TMUX_HISTORY_LIMIT`               | `20000`                            | Initial tmux lines, `0..1000000`                       |
-| `MAX_TMUX_HISTORY_LIMIT`           | `1000000`                          | tmux safety ceiling                                    |
-| `MAX_STALE_SESSION_CLEANUP_HOURS`  | `8760`                             | Cleanup setting ceiling                                |
-| `SESSION_CLEANUP_INTERVAL_MINUTES` | `15`                               | Background interval, `5..1440`                         |
-| `WS_HEARTBEAT_SECONDS`             | `30`                               | Ping interval, `5..300`                                |
-| `WS_MAX_BUFFER_BYTES`              | `1048576`                          | Pending output, `65536..1048576`                       |
-| `RESIZE_DEBOUNCE_MS`               | `100`                              | Resize debounce, `25..1000`                            |
-| `RECONNECT_MAX_SECONDS`            | `15`                               | Backoff cap, `1..60`                                   |
-| `AUTH_MODE`                        | `local`                            | `local`, `cloudflare-access`, `trusted-header`, `none` |
-| `LOCAL_AUTH_USERNAME`              | `webterm`                          | Stable local username, 1-64 characters                 |
-| `LOCAL_AUTH_PASSWORD_FILE`         | `/run/secrets/local_auth_password` | In-container bootstrap path                            |
-| `LOCAL_AUTH_PASSWORD_FILE_HOST`    | `./secrets/local_auth_password`    | Host Compose secret path                               |
-| `BCRYPT_COST`                      | `12`                               | bcrypt cost, `10..15`                                  |
-| `AUTH_IDLE_MINUTES`                | `60`                               | Idle application-session lifetime, `1..10080`          |
-| `AUTH_ABSOLUTE_HOURS`              | `24`                               | Absolute lifetime, `1..8760`                           |
-| `AUTH_SESSION_MAX_COUNT`           | `32`                               | Concurrent application sessions, `1..256`              |
-| `CLOUDFLARE_TEAM_DOMAIN`           | unset                              | Required HTTPS `*.cloudflareaccess.com` origin         |
-| `CLOUDFLARE_ACCESS_AUD`            | unset                              | Required Access application AUD                        |
-| `TRUST_PROXY`                      | `false`                            | `false`, hop count `1..8`, or up to 16 IP/CIDRs        |
-| `TRUSTED_AUTH_HEADER`              | `X-Auth-User`                      | Header name for trusted-header mode only               |
-| `LOG_LEVEL`                        | `info`                             | Pino level or `silent`                                 |
-| `PUID` / `PGID`                    | `1000`                             | Build-time runtime identity; rebuild to change         |
-| `TZ`                               | `UTC`                              | `.env.example` shows `America/Denver` as an example    |
+| Variable                           | Default                 | Bounds or purpose                                      |
+| ---------------------------------- | ----------------------- | ------------------------------------------------------ |
+| `APP_PORT`                         | `3000`                  | Internal port, `1..65535`                              |
+| `HOST_PORT`                        | `3000`                  | Published host port                                    |
+| `HOST_BIND_ADDRESS`                | `127.0.0.1`             | Specific host address for publishing                   |
+| `APP_BIND_HOST`                    | `0.0.0.0`               | Container listener address                             |
+| `APP_BASE_PATH`                    | `/`                     | Root or a canonical path such as `/terminal`           |
+| `APP_PUBLIC_URL`                   | `http://localhost:3000` | Exact browser origin, without a path                   |
+| `DATA_DIR`                         | `/app/data`             | Fixed persistent application mount in Compose          |
+| `HOME_DIR`                         | `/home/webterm`         | Fixed persistent shell home in Compose                 |
+| `SESSION_MAX_COUNT`                | `10`                    | Tab/session limit, `1..20`                             |
+| `DEFAULT_SHELL`                    | `/bin/bash`             | Initial shell; must be in `ALLOWED_SHELLS`             |
+| `ALLOWED_SHELLS`                   | `/bin/bash`             | Comma-separated absolute executable paths              |
+| `DEFAULT_FONT_SIZE`                | `14`                    | Initial setting, `8..32`                               |
+| `MAX_FONT_SIZE`                    | `32`                    | Browser setting ceiling, `8..32`                       |
+| `XTERM_SCROLLBACK`                 | `10000`                 | Initial browser lines, clamped to `0..100000`          |
+| `MAX_XTERM_SCROLLBACK`             | `100000`                | Browser safety ceiling                                 |
+| `TMUX_HISTORY_LIMIT`               | `20000`                 | Initial tmux lines, `0..1000000`                       |
+| `MAX_TMUX_HISTORY_LIMIT`           | `1000000`               | tmux safety ceiling                                    |
+| `MAX_STALE_SESSION_CLEANUP_HOURS`  | `8760`                  | Cleanup setting ceiling                                |
+| `SESSION_CLEANUP_INTERVAL_MINUTES` | `15`                    | Background interval, `5..1440`                         |
+| `WS_HEARTBEAT_SECONDS`             | `30`                    | Ping interval, `5..300`                                |
+| `WS_MAX_BUFFER_BYTES`              | `1048576`               | Pending output, `65536..1048576`                       |
+| `RESIZE_DEBOUNCE_MS`               | `100`                   | Resize debounce, `25..1000`                            |
+| `RECONNECT_MAX_SECONDS`            | `15`                    | Backoff cap, `1..60`                                   |
+| `AUTH_MODE`                        | `local`                 | `local`, `cloudflare-access`, `trusted-header`, `none` |
+| `LOCAL_AUTH_USERNAME`              | `webterm`               | Enrolled local administrator, 1-64 characters          |
+| `BCRYPT_COST`                      | `12`                    | bcrypt cost, `10..15`                                  |
+| `AUTH_IDLE_MINUTES`                | `60`                    | Idle application-session lifetime, `1..10080`          |
+| `AUTH_ABSOLUTE_HOURS`              | `24`                    | Absolute lifetime, `1..8760`                           |
+| `AUTH_SESSION_MAX_COUNT`           | `32`                    | Concurrent application sessions, `1..256`              |
+| `CLOUDFLARE_TEAM_DOMAIN`           | unset                   | Required HTTPS `*.cloudflareaccess.com` origin         |
+| `CLOUDFLARE_ACCESS_AUD`            | unset                   | Required Access application AUD                        |
+| `TRUST_PROXY`                      | `false`                 | `false`, hop count `1..8`, or up to 16 IP/CIDRs        |
+| `TRUSTED_AUTH_HEADER`              | `X-Auth-User`           | Header name for trusted-header mode only               |
+| `LOG_LEVEL`                        | `info`                  | Pino level or `silent`                                 |
+| `PUID` / `PGID`                    | `1000`                  | Build-time runtime identity; rebuild to change         |
+| `TZ`                               | `UTC`                   | `.env.example` shows `America/Denver` as an example    |
 
 ## Performance bounds
 
@@ -657,7 +663,8 @@ docker compose ps
 This is an overlay restore. For an exact rollback, restore into empty volumes
 in a separate Compose project, verify, then switch deployments. Encrypt backups
 because the home archive may contain private SSH keys and the app archive
-contains the password hash.
+contains `auth.json` and its password hash. Restoring `auth.json` restores the
+enrolled local credential; keep its configured username consistent.
 
 ## Upgrades
 
@@ -672,11 +679,13 @@ curl --fail http://127.0.0.1:3000/health
 curl --fail http://127.0.0.1:3000/ready
 ```
 
-An upgrade ends active tmux processes. Phase 2 `tabs.json` is retained; Phase 3
-creates `auth.json` and `settings.json` on first authenticated startup. Prepare
-the local password secret before the first Phase 3 local-auth start. Changing a
-deployed local username after `auth.json` exists is rejected rather than
-silently creating another account.
+An upgrade ends active tmux processes. Existing `auth.json`, `settings.json`,
+and `tabs.json` files continue to work unchanged, and no reenrollment is
+required. Changing a deployed local username after `auth.json` exists is
+rejected rather than silently creating another account. An obsolete
+`secrets/local_auth_password` file from an older deployment is unused and may
+be securely removed after the upgraded deployment passes sign-in and health
+checks.
 
 ## Security considerations
 
@@ -684,31 +693,47 @@ silently creating another account.
   `webterm` and every SSH key available in its home.
 - Prefer Cloudflare Access or local auth over trusted headers. A trusted-header
   deployment is only as strong as its source-IP restriction and header rewrite.
+- Complete local administrator enrollment before exposing the service beyond a
+  trusted machine. An uninitialized local deployment is a first-visitor claim
+  window, not a login screen.
 - Keep public Origin exact. Do not use wildcards for `APP_PUBLIC_URL` or trusted
   proxies.
 - Keep `.ssh` mode `0700`, private keys/config/known-host files `0600`, and
   public keys `0644`.
-- Keep `/app/data` and the bootstrap password `0600`; never serve either volume
-  through another web server.
+- Keep `/app/data/auth.json` and other application metadata private; never serve
+  either persistent volume through another web server.
 - The container is non-root with a read-only application filesystem, but its
   persistent home intentionally permits arbitrary user scripts and SSH data.
 - Protect and encrypt backups. Test restores away from production.
 - Do not put secrets in tab display names. Names are validated and never used
   as tmux names, but they are persisted and displayed.
 - No supplied container mounts the Docker socket or requires privileged mode.
+- Use `AUTH_MODE=none` only on a trusted, isolated network. Setup passwords and
+  other secrets do not belong in URLs, route parameters, environment files,
+  command arguments, or logs.
 
 ## Troubleshooting
 
-**Container fails before listening:** check strict environment values, password
-file owner/mode/length, persisted username consistency, and writable volume
-ownership. Startup errors intentionally omit secret details.
+**Container fails before listening:** check strict environment values,
+persisted username consistency, writable volume ownership, and structured logs.
+A missing `auth.json` is valid setup state, but an existing malformed, unsafe,
+oversized, symlinked, or unreadable file fails closed. Startup errors
+intentionally omit credential details.
 
-**Login always fails:** confirm the running container received the intended mode
-with `docker compose exec app printenv AUTH_MODE`. The bootstrap password file
-is ignored once `auth.json` exists. If the current password is unknown, stop the
-application, back up `/app/data`, replace the bootstrap secret, remove only
-`/app/data/auth.json`, and recreate the container. Removing that file resets the
-authentication boundary; it does not remove tabs, settings, or home data.
+**The setup screen appears:** this is expected only when local mode has no
+`auth.json`. The configured username is read-only. Complete enrollment from a
+trusted machine before exposing the service. If another browser enrolls first,
+the setup request reports that setup was already completed and returns to normal
+sign-in.
+
+**Login always fails or the password is lost:** first confirm the running mode
+with `docker compose exec app printenv AUTH_MODE`. For local credential recovery,
+stop the service or block every untrusted network and proxy path, retain a full
+app-data backup, delete only `auth.json`, restart while still isolated, complete
+first-browser enrollment, verify normal sign-in, and only then restore proxy or
+network exposure. Deleting `auth.json` reopens the first-visitor claim window.
+Restarting the container also terminates its tmux processes, although tab
+metadata and home data remain.
 
 ```sh
 docker compose stop app
@@ -720,12 +745,14 @@ docker compose run --rm --no-deps --entrypoint sh app \
 docker compose up -d --build --force-recreate --wait
 ```
 
-The replacement `secrets/local_auth_password` must be in place before the
-one-off and startup commands. Its owner must be root or `PUID`, its group/other
-write bits must be clear, and its password must contain 12 to 72 UTF-8 bytes.
+Keep the deployment isolated after the final command. Browse to its trusted
+local address, enroll a 12 to 72 UTF-8-byte, NUL-free password, sign out and
+back in, and only then re-enable public routing.
 
 **Cookie or mutation failure behind HTTPS:** `APP_PUBLIC_URL` must exactly match
-the browser scheme, host, and port. Mutations also require that exact Origin.
+the browser scheme, host, and port. `APP_BASE_PATH` is not included in that
+origin. Mutations require the exact Origin, and cookies are scoped to the base
+path and marked Secure when the public URL uses HTTPS.
 
 **WebSocket 401/403 or reconnect loop:** verify the public Origin, base path,
 proxy upgrade support, application cookie, and authentication headers. In
