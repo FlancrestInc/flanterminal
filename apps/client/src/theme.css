@@ -28,6 +28,8 @@
   --ui-code-bg: #141617;
   --login-page-bg: #101112;
   --login-input-bg: #181a1b;
+  --login-readonly-bg: #202223;
+  --login-readonly-fg: #c7c5bf;
   --login-control-border: #666a67;
   --login-button-bg: #73531f;
   --login-button-hover-bg: #815d25;
@@ -65,6 +67,8 @@
   --ui-positive-bg: #e6f2e9;
   --ui-warning: #80570f;
   --ui-code-bg: #f0f0ec;
+  --login-readonly-bg: #202223;
+  --login-readonly-fg: #c7c5bf;
   color-scheme: light;
 }
 
@@ -87,6 +91,8 @@
   --ui-positive-bg: #263b2d;
   --ui-warning: #f0af72;
   --ui-code-bg: #271823;
+  --login-readonly-bg: #202223;
+  --login-readonly-fg: #c7c5bf;
   color-scheme: dark;
 }
 
@@ -1194,8 +1200,8 @@ button {
 }
 
 .login-form input[readonly] {
-  background: var(--ui-raised);
-  color: #b9b8b3;
+  background: var(--login-readonly-bg);
+  color: var(--login-readonly-fg);
 }
 
 .login-form .login-help {

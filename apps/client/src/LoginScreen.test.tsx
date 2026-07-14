@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 
+// @ts-expect-error Node types are intentionally excluded from the browser app.
+import { readFileSync } from 'node:fs';
+
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -98,6 +101,16 @@ describe('LoginScreen', () => {
       'aria-invalid',
       'true',
     );
+    expect(screen.getByLabelText('New Password')).toHaveAttribute(
+      'aria-describedby',
+      'setup-requirement setup-error',
+    );
+    expect(screen.getByLabelText('Confirm password')).not.toHaveAttribute(
+      'aria-invalid',
+    );
+    expect(screen.getByLabelText('Confirm password')).not.toHaveAttribute(
+      'aria-describedby',
+    );
     expect(screen.getByLabelText('New Password')).toHaveFocus();
   });
 
@@ -145,6 +158,21 @@ describe('LoginScreen', () => {
     expect(screen.getByLabelText('Confirm password')).toHaveValue(
       'second-password',
     );
+    expect(screen.getByLabelText('New Password')).not.toHaveAttribute(
+      'aria-invalid',
+    );
+    expect(screen.getByLabelText('New Password')).toHaveAttribute(
+      'aria-describedby',
+      'setup-requirement',
+    );
+    expect(screen.getByLabelText('Confirm password')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+    expect(screen.getByLabelText('Confirm password')).toHaveAttribute(
+      'aria-describedby',
+      'setup-error',
+    );
     expect(screen.getByLabelText('New Password')).toHaveFocus();
   });
 
@@ -185,21 +213,48 @@ describe('LoginScreen', () => {
     expect(screen.getByLabelText('Confirm password')).toHaveValue('');
   });
 
-  it.each([
-    'Too many setup attempts. Try again shortly.',
-    'Password could not be accepted.',
-    'Setup could not be completed. Try again.',
-    'Setup status could not be verified. Try again.',
-    'Administrator already created. Sign in to continue.',
-    'Administrator created. Sign in to continue.',
-  ])('announces the bounded controller setup error: %s', (error) => {
+  it('targets a controller password rejection to the password field', () => {
+    const error = 'Password could not be accepted.';
     render(<LoginScreen {...props({ bootstrap: setupRequired, error })} />);
 
     expect(screen.getByRole('alert')).toHaveTextContent(error);
     expect(screen.getByLabelText('New Password')).toHaveFocus();
     expect(screen.getByLabelText('New Password')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+    expect(screen.getByLabelText('New Password')).toHaveAttribute(
       'aria-describedby',
-      expect.stringContaining('setup-error'),
+      'setup-requirement setup-error',
+    );
+    expect(screen.getByLabelText('Confirm password')).not.toHaveAttribute(
+      'aria-invalid',
+    );
+  });
+
+  it.each([
+    'Too many setup attempts. Try again shortly.',
+    'Setup could not be completed. Try again.',
+    'Setup status could not be verified. Try again.',
+    'Administrator already created. Sign in to continue.',
+    'Administrator created. Sign in to continue.',
+  ])('keeps the operational controller error at form level: %s', (error) => {
+    render(<LoginScreen {...props({ bootstrap: setupRequired, error })} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent(error);
+    expect(screen.getByLabelText('New Password')).toHaveFocus();
+    expect(screen.getByLabelText('New Password')).not.toHaveAttribute(
+      'aria-invalid',
+    );
+    expect(screen.getByLabelText('New Password')).toHaveAttribute(
+      'aria-describedby',
+      'setup-requirement',
+    );
+    expect(screen.getByLabelText('Confirm password')).not.toHaveAttribute(
+      'aria-invalid',
+    );
+    expect(screen.getByLabelText('Confirm password')).not.toHaveAttribute(
+      'aria-describedby',
     );
   });
 
@@ -350,5 +405,21 @@ describe('LoginScreen', () => {
       />,
     );
     expect(screen.getByRole('button', { name: 'Retry' })).toBeDisabled();
+  });
+
+  it('keeps readonly username colors on auth-surface tokens in light theme', () => {
+    const css = readFileSync('src/theme.css', 'utf8');
+    const lightTheme = css.match(
+      /:root\[data-theme='light'\]\s*{([^}]*)}/s,
+    )?.[1];
+    const readonlyRule = css.match(
+      /\.login-form input\[readonly\]\s*{([^}]*)}/s,
+    )?.[1];
+
+    expect(lightTheme).toMatch(/--login-readonly-bg:\s*#[0-9a-f]{6}/i);
+    expect(lightTheme).toMatch(/--login-readonly-fg:\s*#[0-9a-f]{6}/i);
+    expect(readonlyRule).toContain('background: var(--login-readonly-bg)');
+    expect(readonlyRule).toContain('color: var(--login-readonly-fg)');
+    expect(readonlyRule).not.toContain('--ui-raised');
   });
 });

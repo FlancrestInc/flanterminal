@@ -86,9 +86,11 @@ export function LoginScreen({
     const controllerError = boundedSetupError(error);
     const localError = setupErrorMessage(setupError);
     const visibleError = localError ?? controllerError;
-    const passwordInvalid = visibleError !== null;
+    const passwordInvalid =
+      setupError === 'password' ||
+      controllerError === 'Password could not be accepted.';
     const confirmationInvalid = setupError === 'mismatch';
-    const passwordDescription = visibleError
+    const passwordDescription = passwordInvalid
       ? 'setup-requirement setup-error'
       : 'setup-requirement';
 
