@@ -98,7 +98,7 @@ export function createAuthApi(options: CreateAuthApiOptions = {}): AuthApi {
       try {
         parsed = parseSetupRequest(input);
       } catch {
-        throw new AuthApiError();
+        throw new AuthApiError('invalid_request', 400);
       }
       return await bootstrapResponse('setup', 'POST', signal, parsed);
     },

@@ -119,7 +119,11 @@ describe('createAuthApi', () => {
       .catch((reason: unknown) => reason);
 
     expect(fetchImpl).not.toHaveBeenCalled();
-    expect(error).toBeInstanceOf(AuthApiError);
+    expect(error).toMatchObject({
+      name: 'AuthApiError',
+      code: 'invalid_request',
+      status: 400,
+    });
     expect(String(error)).not.toContain('too-short');
   });
 

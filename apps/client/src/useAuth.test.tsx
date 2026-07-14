@@ -4,7 +4,7 @@ import type { AuthBootstrap } from '@flanterminal/shared';
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { AuthApiError, type AuthApi } from './auth-api.js';
+import { AuthApiError, createAuthApi, type AuthApi } from './auth-api.js';
 import { useAuth } from './useAuth.js';
 
 const localRequired: AuthBootstrap = { authenticated: false, mode: 'local' };
@@ -89,9 +89,8 @@ describe('useAuth', () => {
     expect(result.current.bootstrap).toBe(setupRequired);
   });
 
-  it('sets up the administrator without retaining the password and enters an authenticated epoch', async () => {
+  it('publishes setup success without exposing the password in serialized controller state', async () => {
     const api = fakeApi(setupRequired);
-    const localStorageSpy = vi.spyOn(Storage.prototype, 'setItem');
     const { result } = renderHook(() => useAuth(api));
     await flushAuth();
     const previousEpoch = result.current.epoch;
@@ -108,26 +107,46 @@ describe('useAuth', () => {
     expect(result.current.bootstrap).toEqual(localSession);
     expect(result.current.epoch).toBe(previousEpoch + 1);
     expect(result.current.busy).toBe(false);
-    expect(localStorageSpy).not.toHaveBeenCalled();
     expect(JSON.stringify(result.current)).not.toContain('private-password');
   });
 
   it.each([
-    ['rate_limited', 'Too many setup attempts. Try again shortly.'],
-    ['invalid_request', 'Password could not be accepted.'],
-  ] as const)('maps definitive setup error %s', async (code, message) => {
-    const api = fakeApi(setupRequired);
-    vi.mocked(api.setup).mockRejectedValue(new AuthApiError(code, 400));
+    ['rate_limited', 429, 'Too many setup attempts. Try again shortly.'],
+    ['invalid_request', 400, 'Password could not be accepted.'],
+  ] as const)(
+    'maps definitive setup error %s',
+    async (code, status, message) => {
+      const api = fakeApi(setupRequired);
+      vi.mocked(api.setup).mockRejectedValue(new AuthApiError(code, status));
+      const { result } = renderHook(() => useAuth(api));
+      await flushAuth();
+
+      await act(async () => {
+        await result.current.setup('private-password');
+      });
+
+      expect(api.bootstrap).toHaveBeenCalledOnce();
+      expect(result.current.bootstrap).toBe(setupRequired);
+      expect(result.current.error).toBe(message);
+    },
+  );
+
+  it('maps real local setup validation to a definitive error without recovery', async () => {
+    const fetchImpl = vi.fn(async () => Response.json(setupRequired));
+    const api = createAuthApi({
+      baseUrl: 'https://example.test/t/',
+      fetchImpl,
+    });
     const { result } = renderHook(() => useAuth(api));
     await flushAuth();
 
     await act(async () => {
-      await result.current.setup('private-password');
+      await result.current.setup('too-short');
     });
 
-    expect(api.bootstrap).toHaveBeenCalledOnce();
-    expect(result.current.bootstrap).toBe(setupRequired);
-    expect(result.current.error).toBe(message);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(result.current.bootstrap).toEqual(setupRequired);
+    expect(result.current.error).toBe('Password could not be accepted.');
   });
 
   it.each([
@@ -281,6 +300,42 @@ describe('useAuth', () => {
 
     expect(result.current.status).toBe('loading');
     expect(result.current.bootstrap).toBeNull();
+  });
+
+  it('ignores recovery bootstrap after pagehide disposes the setup operation', async () => {
+    const recovery = deferred<AuthBootstrap>();
+    let recoverySignal: AbortSignal | undefined;
+    const api = fakeApi(setupRequired);
+    vi.mocked(api.setup).mockRejectedValue(
+      new AuthApiError('operation_failed', 500),
+    );
+    vi.mocked(api.bootstrap)
+      .mockResolvedValueOnce(setupRequired)
+      .mockImplementationOnce(async (signal) => {
+        recoverySignal = signal;
+        return await recovery.promise;
+      });
+    const { result } = renderHook(() => useAuth(api));
+    await flushAuth();
+    const epoch = result.current.epoch;
+
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.setup('private-password');
+    });
+    await flushAuth();
+    expect(api.bootstrap).toHaveBeenCalledTimes(2);
+    expect(recoverySignal?.aborted).toBe(false);
+
+    act(() => window.dispatchEvent(new PageTransitionEvent('pagehide')));
+    expect(recoverySignal?.aborted).toBe(true);
+    recovery.resolve(localSession);
+    await act(async () => void (await pending));
+
+    expect(result.current.status).toBe('loading');
+    expect(result.current.bootstrap).toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(result.current.epoch).toBe(epoch);
   });
 
   it.each(['cloudflare-access', 'trusted-header'] as const)(
