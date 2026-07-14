@@ -18,6 +18,7 @@ bootstrap_secret=
 empty_secret=
 invalid_secret=
 local_config=
+none_config=
 cloudflare_config=
 negative_containers=
 negative_volumes=
@@ -51,6 +52,7 @@ cleanup() {
   [ -z "$empty_secret" ] || rm -f "$empty_secret"
   [ -z "$invalid_secret" ] || rm -f "$invalid_secret"
   [ -z "$local_config" ] || rm -f "$local_config"
+  [ -z "$none_config" ] || rm -f "$none_config"
   [ -z "$cloudflare_config" ] || rm -f "$cloudflare_config"
   for negative_container in $negative_containers; do
     docker rm -f "$negative_container" >/dev/null 2>&1 || true
@@ -125,16 +127,19 @@ verify_static_hardening() {
 
 verify_compose_models() {
   local_config=$(mktemp)
+  none_config=$(mktemp)
   cloudflare_config=$(mktemp)
   docker compose -f docker-compose.yml config --format json >"$local_config"
+  AUTH_MODE=none docker compose -f docker-compose.yml config --format json >"$none_config"
   LOCAL_AUTH_PASSWORD_FILE_HOST=/definitely/missing \
     docker compose -f docker-compose.cloudflare.yml config --format json >"$cloudflare_config"
   rg -qi 'local_auth_password|LOCAL_AUTH_PASSWORD|"secrets"' "$cloudflare_config" &&
     fail 'Cloudflare resolved configuration contains a local secret dependency'
-  node - "$local_config" "$cloudflare_config" <<'NODE'
+  node - "$local_config" "$none_config" "$cloudflare_config" <<'NODE'
 const fs = require('node:fs');
-const [localPath, cloudflarePath] = process.argv.slice(2);
+const [localPath, nonePath, cloudflarePath] = process.argv.slice(2);
 const local = JSON.parse(fs.readFileSync(localPath, 'utf8'));
+const none = JSON.parse(fs.readFileSync(nonePath, 'utf8'));
 const cloudflare = JSON.parse(fs.readFileSync(cloudflarePath, 'utf8'));
 const hardeningKeys = [
   'build', 'cap_drop', 'healthcheck', 'mem_limit', 'pids_limit', 'ports',
@@ -156,6 +161,7 @@ for (const service of [local.services.app, cloudflare.services.app]) {
   }
 }
 if (local.services.app.environment.AUTH_MODE !== 'local') throw new Error('Local auth is not enabled');
+if (none.services.app.environment.AUTH_MODE !== 'none') throw new Error('AUTH_MODE does not override the local default');
 if (cloudflare.services.app.environment.AUTH_MODE !== 'cloudflare-access') throw new Error('Cloudflare auth is not enabled');
 if (cloudflare.services.app.environment.TRUST_PROXY !== 'false') throw new Error('Cloudflare generic trust is enabled');
 if (local.services.app.ports[0].host_ip !== '127.0.0.1' || cloudflare.services.app.ports[0].host_ip !== '127.0.0.1') {

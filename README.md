@@ -85,6 +85,17 @@ the bootstrap secret does not reset the password. Use the in-app password
 change control. A password change revokes every application session but does
 not terminate tmux sessions.
 
+To deliberately run without application authentication on a trusted network,
+set `AUTH_MODE=none` in `.env`, then recreate the container so it receives the
+new environment:
+
+```sh
+docker compose up -d --build --force-recreate --wait
+```
+
+Mode `none` must not be exposed directly to an untrusted network. Authentication
+can instead be enforced with the documented Cloudflare Access deployment.
+
 Follow structured logs with:
 
 ```sh
@@ -692,9 +703,26 @@ silently creating another account.
 file owner/mode/length, persisted username consistency, and writable volume
 ownership. Startup errors intentionally omit secret details.
 
-**Login always fails:** the bootstrap file is ignored once `auth.json` exists.
-Use the current password or restore the matching app-data backup. Do not delete
-`auth.json` casually because doing so resets the authentication boundary.
+**Login always fails:** confirm the running container received the intended mode
+with `docker compose exec app printenv AUTH_MODE`. The bootstrap password file
+is ignored once `auth.json` exists. If the current password is unknown, stop the
+application, back up `/app/data`, replace the bootstrap secret, remove only
+`/app/data/auth.json`, and recreate the container. Removing that file resets the
+authentication boundary; it does not remove tabs, settings, or home data.
+
+```sh
+docker compose stop app
+mkdir -p backups
+docker compose run --rm --no-deps -T app \
+  tar -C /app/data -cpf - . > backups/app-data-before-password-reset.tar
+docker compose run --rm --no-deps --entrypoint sh app \
+  -c 'rm -f /app/data/auth.json'
+docker compose up -d --build --force-recreate --wait
+```
+
+The replacement `secrets/local_auth_password` must be in place before the
+one-off and startup commands. Its owner must be root or `PUID`, its group/other
+write bits must be clear, and its password must contain 12 to 72 UTF-8 bytes.
 
 **Cookie or mutation failure behind HTTPS:** `APP_PUBLIC_URL` must exactly match
 the browser scheme, host, and port. Mutations also require that exact Origin.

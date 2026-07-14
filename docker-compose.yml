@@ -12,7 +12,7 @@ services:
       APP_BIND_HOST: ${APP_BIND_HOST:-0.0.0.0}
       APP_BASE_PATH: ${APP_BASE_PATH:-/}
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3000}
-      AUTH_MODE: local
+      AUTH_MODE: ${AUTH_MODE:-local}
       LOCAL_AUTH_USERNAME: ${LOCAL_AUTH_USERNAME:-webterm}
       LOCAL_AUTH_PASSWORD_FILE: /run/secrets/local_auth_password
       BCRYPT_COST: ${BCRYPT_COST:-12}
