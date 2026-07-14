@@ -28,7 +28,6 @@ describe('loadConfig', () => {
       sessionMaxCount: 10,
       authMode: 'local',
       localAuthUsername: 'webterm',
-      localAuthPasswordFile: '/run/secrets/local_auth_password',
       bcryptCost: 12,
       authIdleMinutes: 60,
       authAbsoluteHours: 24,
@@ -48,6 +47,15 @@ describe('loadConfig', () => {
   it('uses only the supplied env object', () => {
     expect(loadConfig({}).port).toBe(3000);
     expect(loadConfig({ APP_PORT: '3456' }).port).toBe(3456);
+  });
+
+  it('ignores the obsolete local password-file environment variable', () => {
+    const config = loadConfig({
+      LOCAL_AUTH_PASSWORD_FILE: 'arbitrary obsolete value',
+    });
+
+    expect(config).toEqual(loadConfig({}));
+    expect(config).not.toHaveProperty('localAuthPasswordFile');
   });
 
   it('merges defaults, config file, then environment and normalizes once', () => {
@@ -267,7 +275,6 @@ describe('loadConfig', () => {
   it('normalizes and validates proxy CIDRs, shells, and environment-only paths', () => {
     const config = loadConfig({
       APP_CONFIG_FILE: '/etc/flanterminal.json',
-      LOCAL_AUTH_PASSWORD_FILE: '/run/secrets/password',
       TRUST_PROXY: ' 10.0.0.0/8,2001:DB8::/32 ',
       DEFAULT_SHELL: '/bin/zsh',
       ALLOWED_SHELLS: ' /bin/bash,/bin/zsh ',
@@ -275,14 +282,10 @@ describe('loadConfig', () => {
 
     expect(config).toMatchObject({
       appConfigFile: '/etc/flanterminal.json',
-      localAuthPasswordFile: '/run/secrets/password',
       trustProxy: ['10.0.0.0/8', '2001:db8::/32'],
       allowedShells: ['/bin/bash', '/bin/zsh'],
     });
     expect(() => loadConfig({ APP_CONFIG_FILE: 'config.json' })).toThrow();
-    expect(() =>
-      loadConfig({ LOCAL_AUTH_PASSWORD_FILE: 'password' }),
-    ).toThrow();
     expect(() => loadConfig({ TRUST_PROXY: 'not-an-ip' })).toThrow();
     expect(() =>
       loadConfig({ ALLOWED_SHELLS: '/bin/bash,/bin/bash' }),

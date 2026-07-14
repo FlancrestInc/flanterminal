@@ -19,7 +19,7 @@ import { loadOptionalConfigFile } from './config-file.js';
 import { loadConfig, type ConfigEnvironment } from './config.js';
 import { CredentialStore } from './credential-store.js';
 import { CsrfService } from './csrf-service.js';
-import { createLifecycleLogger } from './logger.js';
+import { createLifecycleLogger, type LifecycleLogger } from './logger.js';
 import { NodePtyFactory } from './pty.js';
 import { LoginRateLimiter } from './rate-limiter.js';
 import { createSecureJsonFile } from './secure-json-file.js';
@@ -626,9 +626,10 @@ export type ProductionAuthentication = Readonly<{
 type AuthenticationStage = ProductionAuthentication;
 
 export type ProductionAuthenticationDependencies = Readonly<{
+  logger?: Pick<LifecycleLogger, 'error'>;
   createCredentialStore?: (
     config: ReturnType<typeof loadConfig>,
-  ) => CredentialStore;
+  ) => ProductionCredentialStore;
   createCloudflareAccessProvider?: (
     config: ReturnType<typeof loadConfig>,
   ) => CloudflareAccessProvider;
@@ -636,6 +637,21 @@ export type ProductionAuthenticationDependencies = Readonly<{
     config: ReturnType<typeof loadConfig>,
   ) => TrustedHeaderAuthProvider;
 }>;
+
+type ProductionCredentialAuthority = Pick<
+  CredentialStore,
+  'isInitialized' | 'enroll' | 'verify' | 'replacePassword'
+>;
+type ProductionCredentialStore = ProductionCredentialAuthority &
+  Pick<CredentialStore, 'initializeLocal'>;
+
+const nonLocalCredentialAuthority: ProductionCredentialAuthority =
+  Object.freeze({
+    isInitialized: () => true,
+    enroll: async () => Object.freeze({ outcome: 'already_initialized' }),
+    verify: async () => false,
+    replacePassword: async () => Object.freeze({ state: 'not_committed' }),
+  });
 
 type TabsStage = Readonly<{ store: TabStore }>;
 
@@ -765,32 +781,25 @@ export async function initializeProductionAuthentication(
   config: ReturnType<typeof loadConfig>,
   dependencies: ProductionAuthenticationDependencies = {},
 ): Promise<ProductionAuthentication> {
-  const credentialStore =
-    config.authMode === 'local'
-      ? (dependencies.createCredentialStore?.(config) ??
-        new CredentialStore({
-          dataDir: config.dataDir,
-          secureFile: createSecureJsonFile(),
-        }))
-      : undefined;
-  if (credentialStore !== undefined) {
+  let credentialAuthority: ProductionCredentialAuthority;
+  if (config.authMode === 'local') {
+    const credentialStore =
+      dependencies.createCredentialStore?.(config) ??
+      new CredentialStore({
+        dataDir: config.dataDir,
+        secureFile: createSecureJsonFile(),
+      });
     await credentialStore.initializeLocal(
       config.localAuthUsername,
-      config.localAuthPasswordFile,
       config.bcryptCost,
     );
+    credentialAuthority = credentialStore;
+  } else {
+    credentialAuthority = nonLocalCredentialAuthority;
   }
-  const authService = new AuthService({
-    mode: config.authMode,
+  const sharedAuthServiceOptions = {
     clock: Date.now,
-    credentialStore:
-      credentialStore !== undefined
-        ? credentialStore
-        : Object.freeze({
-            verify: () => false,
-            replacePassword: async () =>
-              Object.freeze({ state: 'not_committed' as const }),
-          }),
+    credentialStore: credentialAuthority,
     csrfService: new CsrfService(),
     rateLimiter: new LoginRateLimiter({
       clock: Date.now,
@@ -801,7 +810,22 @@ export async function initializeProductionAuthentication(
     idleDurationMs: config.authIdleMinutes * 60_000,
     absoluteDurationMs: config.authAbsoluteHours * 60 * 60_000,
     maxSessions: config.authSessionMaxCount,
-  });
+  };
+  const authService =
+    config.authMode === 'local'
+      ? new AuthService({
+          ...sharedAuthServiceOptions,
+          mode: 'local',
+          localUsername: config.localAuthUsername,
+          onDurabilityUncertain: () =>
+            dependencies.logger?.error('authentication_activity_failed', {
+              category: 'durability_uncertain',
+            }),
+        })
+      : new AuthService({
+          ...sharedAuthServiceOptions,
+          mode: config.authMode,
+        });
   const cloudflareAccessProvider =
     config.authMode === 'cloudflare-access'
       ? (dependencies.createCloudflareAccessProvider?.(config) ??
@@ -884,7 +908,9 @@ const defaultProductionRuntimeFactory: ProductionRuntimeFactory = {
     return Object.freeze({ store, constraints });
   },
   async initializeAuthentication(context) {
-    return await initializeProductionAuthentication(context.config);
+    return await initializeProductionAuthentication(context.config, {
+      logger: context.logger,
+    });
   },
   async initializeTabs(context) {
     const { config, logger } = context;

@@ -628,7 +628,7 @@ describe('production composition', () => {
     expect(sockets.connectedCount).toHaveBeenCalledOnce();
   });
 
-  it('constructs Cloudflare authentication without creating or reading local credentials', async () => {
+  it('constructs Cloudflare authentication without creating or exposing local setup', async () => {
     const createCredentialStore = vi.fn();
     const createCloudflareAccessProvider = vi.fn(() => ({}) as never);
     const config = loadConfig({
@@ -645,9 +645,116 @@ describe('production composition', () => {
     expect(createCredentialStore).not.toHaveBeenCalled();
     expect(createCloudflareAccessProvider).toHaveBeenCalledOnce();
     expect(authentication.cloudflareAccessProvider).toBeDefined();
+    await expect(
+      authentication.authService.setup({
+        password: 'not-used-password',
+        address: '192.0.2.1',
+      }),
+    ).rejects.toThrow('Authentication operation failed');
   });
 
-  it('propagates local credential bootstrap failure before composition can listen', async () => {
+  it('starts fresh local credentials uninitialized after two-argument initialization', async () => {
+    const initialized = false;
+    const initializeLocal = vi.fn(async () => undefined);
+    const config = loadConfig({ AUTH_MODE: 'local' });
+
+    const authentication = await initializeProductionAuthentication(config, {
+      createCredentialStore: () => ({
+        initializeLocal,
+        isInitialized: () => initialized,
+        enroll: vi.fn(async () => ({ outcome: 'not_committed' as const })),
+        verify: vi.fn(async () => false),
+        replacePassword: vi.fn(async () => ({
+          state: 'not_committed' as const,
+        })),
+      }),
+    });
+
+    expect(initializeLocal).toHaveBeenCalledWith(
+      config.localAuthUsername,
+      config.bcryptCost,
+    );
+    await expect(
+      authentication.authService.bootstrap({ type: 'none' }),
+    ).resolves.toMatchObject({
+      bootstrap: {
+        authenticated: false,
+        mode: 'local',
+        setupRequired: true,
+        username: config.localAuthUsername,
+      },
+    });
+  });
+
+  it('retains existing local credential authority loaded during initialization', async () => {
+    let initialized = false;
+    const initializeLocal = vi.fn(async () => {
+      initialized = true;
+    });
+    const verify = vi.fn(async () => true);
+    const config = loadConfig({
+      AUTH_MODE: 'local',
+      LOCAL_AUTH_USERNAME: 'existing-admin',
+    });
+
+    const authentication = await initializeProductionAuthentication(config, {
+      createCredentialStore: () => ({
+        initializeLocal,
+        isInitialized: () => initialized,
+        enroll: vi.fn(async () => ({
+          outcome: 'already_initialized' as const,
+        })),
+        verify,
+        replacePassword: vi.fn(async () => ({ state: 'committed' as const })),
+      }),
+    });
+    const result = await authentication.authService.login({
+      username: 'existing-admin',
+      password: 'existing-password',
+      address: '192.0.2.2',
+    });
+
+    expect(initializeLocal).toHaveBeenCalledWith('existing-admin', 12);
+    expect(verify).toHaveBeenCalledWith('existing-admin', 'existing-password');
+    expect(result.bootstrap).toMatchObject({
+      authenticated: true,
+      mode: 'local',
+      identityLabel: 'existing-admin',
+    });
+  });
+
+  it('logs only the durability category when local enrollment commitment is uncertain', async () => {
+    const error = vi.fn();
+    const config = loadConfig({ AUTH_MODE: 'local' });
+    const authentication = await initializeProductionAuthentication(config, {
+      logger: { error },
+      createCredentialStore: () => ({
+        initializeLocal: vi.fn(async () => undefined),
+        isInitialized: () => false,
+        enroll: vi.fn(async () => ({
+          outcome: 'enrolled' as const,
+          persistence: 'committed_durability_uncertain' as const,
+        })),
+        verify: vi.fn(async () => false),
+        replacePassword: vi.fn(async () => ({
+          state: 'not_committed' as const,
+        })),
+      }),
+    });
+
+    await expect(
+      authentication.authService.setup({
+        password: 'new-admin-password',
+        address: '192.0.2.3',
+      }),
+    ).resolves.toMatchObject({ bootstrap: { authenticated: true } });
+    expect(error).toHaveBeenCalledOnce();
+    expect(error).toHaveBeenCalledWith('authentication_activity_failed', {
+      category: 'durability_uncertain',
+    });
+  });
+
+  it('propagates local credential initialization failure before composition can listen', async () => {
     const primary = new Error('local credential bootstrap failed');
     const initializeLocal = vi.fn(async () => {
       throw primary;
@@ -656,20 +763,20 @@ describe('production composition', () => {
 
     await expect(
       initializeProductionAuthentication(config, {
-        createCredentialStore: () =>
-          ({
-            initializeLocal,
-            verify: vi.fn(async () => false),
-            replacePassword: vi.fn(async () => ({
-              state: 'not_committed' as const,
-            })),
-          }) as never,
+        createCredentialStore: () => ({
+          initializeLocal,
+          isInitialized: () => false,
+          enroll: vi.fn(async () => ({ outcome: 'not_committed' as const })),
+          verify: vi.fn(async () => false),
+          replacePassword: vi.fn(async () => ({
+            state: 'not_committed' as const,
+          })),
+        }),
       }),
     ).rejects.toBe(primary);
 
     expect(initializeLocal).toHaveBeenCalledWith(
       config.localAuthUsername,
-      config.localAuthPasswordFile,
       config.bcryptCost,
     );
   });

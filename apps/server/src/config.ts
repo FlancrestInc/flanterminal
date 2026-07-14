@@ -226,7 +226,6 @@ const mergedSchema = z
     SESSION_MAX_COUNT: integerInput(1, 20),
     AUTH_MODE: z.enum(['local', 'cloudflare-access', 'trusted-header', 'none']),
     LOCAL_AUTH_USERNAME: localUsernameSchema,
-    LOCAL_AUTH_PASSWORD_FILE: safeAbsolutePathSchema,
     BCRYPT_COST: integerInput(10, 15),
     AUTH_IDLE_MINUTES: integerInput(5, 1_440),
     AUTH_ABSOLUTE_HOURS: integerInput(1, 168),
@@ -303,7 +302,6 @@ export type AppConfig = Readonly<{
   appConfigFile?: string;
   authMode: AuthMode;
   localAuthUsername: string;
-  localAuthPasswordFile: string;
   bcryptCost: number;
   authIdleMinutes: number;
   authAbsoluteHours: number;
@@ -380,8 +378,6 @@ export function loadConfig(
         'localAuthUsername',
         'webterm',
       ),
-      LOCAL_AUTH_PASSWORD_FILE:
-        env.LOCAL_AUTH_PASSWORD_FILE ?? '/run/secrets/local_auth_password',
       BCRYPT_COST: pick('BCRYPT_COST', 'bcryptCost', 12),
       AUTH_IDLE_MINUTES: pick('AUTH_IDLE_MINUTES', 'authIdleMinutes', 60),
       AUTH_ABSOLUTE_HOURS: pick('AUTH_ABSOLUTE_HOURS', 'authAbsoluteHours', 24),
@@ -464,7 +460,6 @@ export function loadConfig(
         : { appConfigFile: parsed.APP_CONFIG_FILE }),
       authMode: parsed.AUTH_MODE,
       localAuthUsername: parsed.LOCAL_AUTH_USERNAME,
-      localAuthPasswordFile: parsed.LOCAL_AUTH_PASSWORD_FILE,
       bcryptCost: parsed.BCRYPT_COST,
       authIdleMinutes: parsed.AUTH_IDLE_MINUTES,
       authAbsoluteHours: parsed.AUTH_ABSOLUTE_HOURS,
