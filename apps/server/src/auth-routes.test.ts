@@ -140,6 +140,7 @@ describe('createAuthRouter', () => {
   it.each([
     ['authentication_failed', 401, 'authentication_failed'],
     ['rate_limited', 429, 'rate_limited'],
+    ['setup_required', 409, 'setup_required'],
   ] as const)(
     'maps internal login %s without serializing it',
     async (failure, status, error) => {
@@ -194,6 +195,217 @@ describe('createAuthRouter', () => {
       vi.mocked(options.workspaceBootstrap.ensureForAuthenticatedSession),
     );
   });
+
+  it('enrolls the first local password and publishes an authenticated workspace', async () => {
+    vi.mocked(options.authService.setup).mockResolvedValue(
+      authenticatedResult('local', 'admin'),
+    );
+
+    const response = await mutation('/terminal/api/auth/setup', {
+      password: 'private-password',
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      authenticated: true,
+      mode: 'local',
+      identityLabel: 'admin',
+      csrfToken: CSRF,
+    });
+    expect(options.authService.setup).toHaveBeenCalledWith({
+      password: 'private-password',
+      address: '127.0.0.1',
+    });
+    expect(response.headers.get('set-cookie')).toBe(
+      `flanterminal_session=${COOKIE}; Path=/terminal; HttpOnly; Secure; SameSite=Strict`,
+    );
+    expect(
+      options.workspaceBootstrap.ensureForAuthenticatedSession,
+    ).toHaveBeenCalledOnce();
+    expect(options.authService.authenticateCookie).toHaveBeenCalledBefore(
+      vi.mocked(options.workspaceBootstrap.ensureForAuthenticatedSession),
+    );
+    expect(options.authService.touch).toHaveBeenCalledWith(
+      'session-id',
+      'http',
+    );
+  });
+
+  it.each([
+    ['already_initialized', 409, 'setup_already_completed'],
+    ['rate_limited', 429, 'rate_limited'],
+  ] as const)(
+    'maps internal setup %s without serializing it',
+    async (failure, status, error) => {
+      vi.mocked(options.authService.setup).mockResolvedValue({
+        bootstrap: { authenticated: false, mode: 'local' },
+        failure,
+      });
+
+      const response = await mutation('/terminal/api/auth/setup', {
+        password: 'private-password',
+      });
+
+      expect(response.status).toBe(status);
+      const text = await response.text();
+      expect(JSON.parse(text)).toEqual({ error });
+      expect(text).not.toContain('failure');
+      expect(text).not.toContain('private-password');
+      expect(response.headers.get('set-cookie')).toBeNull();
+    },
+  );
+
+  it.each([
+    ['unexpected outcome', undefined],
+    ['service exception', new Error('private enrollment failure')],
+  ] as const)(
+    'bounds a setup %s as a generic operation failure',
+    async (_description, failure) => {
+      if (failure === undefined) {
+        vi.mocked(options.authService.setup).mockResolvedValue({
+          bootstrap: { authenticated: false, mode: 'local' },
+        });
+      } else {
+        vi.mocked(options.authService.setup).mockRejectedValue(failure);
+      }
+
+      const response = await mutation('/terminal/api/auth/setup', {
+        password: 'private-password',
+      });
+
+      expect(response.status).toBe(500);
+      const text = await response.text();
+      expect(JSON.parse(text)).toEqual({ error: 'operation_failed' });
+      expect(text.length).toBeLessThan(100);
+      expect(text).not.toContain('private');
+      expect(response.headers.get('set-cookie')).toBeNull();
+    },
+  );
+
+  it('keeps committed credentials when postcommit workspace bootstrap fails', async () => {
+    let credentialsInitialized = false;
+    vi.mocked(options.authService.setup).mockImplementation(async () => {
+      credentialsInitialized = true;
+      return authenticatedResult('local', 'admin');
+    });
+    vi.mocked(options.authService.login).mockImplementation(async (input) => {
+      if (!credentialsInitialized || input.password !== 'private-password') {
+        return {
+          bootstrap: { authenticated: false, mode: 'local' },
+          failure: 'authentication_failed',
+        };
+      }
+      return authenticatedResult('local', 'admin');
+    });
+    vi.mocked(
+      options.workspaceBootstrap.ensureForAuthenticatedSession,
+    ).mockRejectedValueOnce(new Error('private tab storage failure'));
+
+    const setup = await mutation('/terminal/api/auth/setup', {
+      password: 'private-password',
+    });
+
+    expect(setup.status).toBe(500);
+    expect(await setup.json()).toEqual({ error: 'operation_failed' });
+    expect(setup.headers.get('set-cookie')).toBeNull();
+    expect(credentialsInitialized).toBe(true);
+    expect(options.authService.logout).toHaveBeenCalledWith('session-id');
+    expect(options.authService.touch).not.toHaveBeenCalled();
+
+    const login = await mutation('/terminal/api/auth/login', {
+      username: 'admin',
+      password: 'private-password',
+    });
+
+    expect(login.status).toBe(200);
+    expect(await login.json()).toMatchObject({ authenticated: true });
+    expect(login.headers.get('set-cookie')).not.toBeNull();
+    expect(credentialsInitialized).toBe(true);
+  });
+
+  it.each([
+    ['missing password', { body: JSON.stringify({}) }],
+    [
+      'extra property',
+      {
+        body: JSON.stringify({
+          password: 'private-password',
+          username: 'admin',
+        }),
+      },
+    ],
+    [
+      'NUL password',
+      { body: JSON.stringify({ password: 'private\0password' }) },
+    ],
+    ['short password', { body: JSON.stringify({ password: 'too-short' }) }],
+    ['long password', { body: JSON.stringify({ password: 'x'.repeat(73) }) }],
+    ['malformed JSON', { body: '{"password":' }],
+    [
+      'oversized JSON',
+      { body: JSON.stringify({ password: 'x'.repeat(17 * 1024) }) },
+    ],
+  ] as const)('rejects a setup %s body', async (_description, request) => {
+    const response = await call('/terminal/api/auth/setup', {
+      method: 'POST',
+      headers: { Origin: ORIGIN, 'Content-Type': 'application/json' },
+      ...request,
+    });
+
+    expect(response.status).toBe(400);
+    const text = await response.text();
+    expect(JSON.parse(text)).toEqual({ error: 'invalid_request' });
+    expect(text.length).toBeLessThan(100);
+    expect(options.authService.setup).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ Origin: ORIGIN, 'Content-Type': 'text/plain' }, 415, 'json_required'],
+    [
+      { Origin: 'https://wrong.example', 'Content-Type': 'application/json' },
+      403,
+      'origin_forbidden',
+    ],
+  ] as const)(
+    'rejects setup admission before credentials',
+    async (headers, status, error) => {
+      const response = await call('/terminal/api/auth/setup', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ password: 'private-password' }),
+      });
+
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({ error });
+      expect(options.authService.setup).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects setup outside local mode before calling the service', async () => {
+    options = routerOptions({
+      mode: 'none',
+      session: session({ mode: 'none', identityLabel: 'anonymous' }),
+    });
+
+    const response = await mutation('/terminal/api/auth/setup', {
+      password: 'private-password',
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'invalid_session_state' });
+    expect(options.authService.setup).not.toHaveBeenCalled();
+  });
+
+  it.each(['GET', 'PUT'] as const)(
+    'does not expose %s setup',
+    async (method) => {
+      const response = await call('/terminal/api/auth/setup', { method });
+
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'not_found' });
+      expect(options.authService.setup).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['cloudflare-access', 'trusted-header'] as const)(
     'coordinates a successful %s bootstrap after application authority exists',
@@ -486,6 +698,7 @@ function routerOptions(
         bootstrap: { authenticated: false, mode: 'local' },
       })),
       login: vi.fn(),
+      setup: vi.fn(),
       authenticateCookie: vi.fn(() => current),
       resume: vi.fn((): AuthBootstrapResult => ({
         bootstrap: {

@@ -138,7 +138,7 @@ describe('createApp', () => {
   });
 
   it.each(['/terminal', '/'])(
-    'keeps only health, readiness, auth bootstrap, login, and the data-free shell public for %s',
+    'keeps only health, readiness, auth bootstrap, login, setup, and the data-free shell public for %s',
     async (basePath) => {
       const api = apiPath(basePath);
       const http = httpDependencies();
@@ -155,6 +155,17 @@ describe('createApp', () => {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({ username: 'admin', password: 'correct' }),
+          },
+        ],
+        [
+          `${api}/auth/setup`,
+          {
+            method: 'POST',
+            headers: {
+              Origin: PUBLIC_ORIGIN,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ password: 'private-password' }),
           },
         ],
         [basePath === '/' ? '/' : `${basePath}/`],
@@ -270,11 +281,16 @@ describe('createApp', () => {
     expect(http.auth.authService.authenticateCookie).not.toHaveBeenCalled();
   });
 
-  it.each(['/terminal', '/'])(
-    'passes the forwarded client IP to local login only through a configured trusted proxy at %s',
-    async (basePath) => {
+  it.each([
+    ['/terminal', 'login', { username: 'admin', password: 'correct' }],
+    ['/', 'login', { username: 'admin', password: 'correct' }],
+    ['/terminal', 'setup', { password: 'private-password' }],
+    ['/', 'setup', { password: 'private-password' }],
+  ] as const)(
+    'passes the forwarded client IP at %s to local %s only through a configured trusted proxy',
+    async (basePath, endpoint, body) => {
       const http = httpDependencies();
-      const response = await request(`${apiPath(basePath)}/auth/login`, {
+      const response = await request(`${apiPath(basePath)}/auth/${endpoint}`, {
         basePath,
         trustProxy: '127.0.0.1/32',
         http,
@@ -285,12 +301,12 @@ describe('createApp', () => {
             'Content-Type': 'application/json',
             'X-Forwarded-For': '198.51.100.7',
           },
-          body: JSON.stringify({ username: 'admin', password: 'correct' }),
+          body: JSON.stringify(body),
         },
       });
 
       expect(response.status).toBe(200);
-      expect(http.auth.authService.login).toHaveBeenCalledWith(
+      expect(http.auth.authService[endpoint]).toHaveBeenCalledWith(
         expect.objectContaining({ address: '198.51.100.7' }),
       );
     },
@@ -845,7 +861,16 @@ function httpDependencies(failure?: AppTabFailure): AppHttpDependencies {
       },
       cookieValue: COOKIE,
     })),
-    resume: vi.fn(() => ({
+    setup: vi.fn(async (): Promise<AuthBootstrapResult> => ({
+      bootstrap: {
+        authenticated: true,
+        mode: 'local',
+        identityLabel: 'admin',
+        csrfToken: CSRF,
+      },
+      cookieValue: COOKIE,
+    })),
+    resume: vi.fn((): AuthBootstrapResult => ({
       bootstrap: {
         authenticated: true,
         mode: 'local' as const,

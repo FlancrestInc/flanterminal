@@ -1,6 +1,7 @@
 import {
   loginRequestSchema,
   passwordChangeRequestSchema,
+  setupRequestSchema,
   type ApiErrorCode,
 } from '@flanterminal/shared';
 import express, {
@@ -27,6 +28,7 @@ import type {
   AuthBootstrapResult,
   AuthenticatedSession,
   LocalLoginAttempt,
+  LocalSetupAttempt,
   UpstreamAuthentication,
   UpstreamIdentity,
 } from './auth-types.js';
@@ -44,6 +46,7 @@ const INVALID_BODY_ERROR_TYPES = new Set([
 export interface AuthRouterService extends AuthMiddlewareService {
   bootstrap(input: UpstreamAuthentication): Promise<AuthBootstrapResult>;
   login(input: LocalLoginAttempt): Promise<AuthBootstrapResult>;
+  setup(input: LocalSetupAttempt): Promise<AuthBootstrapResult>;
   resume(id: string): AuthBootstrapResult | undefined;
   refresh(
     id: string,
@@ -132,8 +135,42 @@ export function createAuthRouter(options: AuthRouterOptions): Router {
           sendError(response, 429, 'rate_limited');
           return;
         }
+        if (result.failure === 'setup_required') {
+          sendError(response, 409, 'setup_required');
+          return;
+        }
         sendError(response, 401, 'authentication_failed');
         return;
+      }
+      await publishBootstrap(options, response, result);
+    },
+  );
+
+  router.post(
+    '/auth/setup',
+    requirePublicMutationSecurity(options),
+    parseBody(parseJson),
+    async (request, response) => {
+      if (options.mode !== 'local') {
+        sendError(response, 409, 'invalid_session_state');
+        return;
+      }
+      const parsed = setupRequestSchema.safeParse(request.body);
+      if (!parsed.success) throw new InvalidRequestError();
+      const result = await options.authService.setup({
+        password: parsed.data.password,
+        address: request.ip || request.socket.remoteAddress || 'unknown',
+      });
+      if (!result.bootstrap.authenticated) {
+        if (result.failure === 'already_initialized') {
+          sendError(response, 409, 'setup_already_completed');
+          return;
+        }
+        if (result.failure === 'rate_limited') {
+          sendError(response, 429, 'rate_limited');
+          return;
+        }
+        throw new Error('Invalid setup result');
       }
       await publishBootstrap(options, response, result);
     },
