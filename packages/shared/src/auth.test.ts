@@ -4,6 +4,8 @@ import {
   parseAuthBootstrap,
   parseLoginRequest,
   parsePasswordChangeRequest,
+  parseSetupRequest,
+  setupRequestSchema,
 } from './index.js';
 
 describe('authentication contracts', () => {
@@ -16,6 +18,85 @@ describe('authentication contracts', () => {
       });
     },
   );
+
+  it('parses and freezes the exact local setup bootstrap', () => {
+    const parsed = parseAuthBootstrap({
+      authenticated: false,
+      mode: 'local',
+      setupRequired: true,
+      username: 'webterm',
+    });
+
+    expect(parsed).toEqual({
+      authenticated: false,
+      mode: 'local',
+      setupRequired: true,
+      username: 'webterm',
+    });
+    expect(Object.isFrozen(parsed)).toBe(true);
+  });
+
+  it('normalizes safe configured usernames in setup bootstraps', () => {
+    expect(
+      parseAuthBootstrap({
+        authenticated: false,
+        mode: 'local',
+        setupRequired: true,
+        username: 'Cafe\u0301',
+      }),
+    ).toEqual({
+      authenticated: false,
+      mode: 'local',
+      setupRequired: true,
+      username: 'Caf\u00e9',
+    });
+  });
+
+  it.each([
+    {
+      authenticated: false,
+      mode: 'local',
+      setupRequired: true,
+      username: 'webterm',
+      csrfToken: 'leak',
+    },
+    {
+      authenticated: false,
+      mode: 'cloudflare-access',
+      setupRequired: true,
+      username: 'webterm',
+    },
+    {
+      authenticated: false,
+      mode: 'trusted-header',
+      setupRequired: true,
+      username: 'webterm',
+    },
+    {
+      authenticated: false,
+      mode: 'local',
+      setupRequired: false,
+    },
+    {
+      authenticated: false,
+      mode: 'local',
+      username: 'webterm',
+    },
+    {
+      authenticated: false,
+      mode: 'local',
+      setupRequired: true,
+      username: 'line\nfeed',
+    },
+    {
+      authenticated: false,
+      mode: 'local',
+      setupRequired: true,
+      username: 'a'.repeat(129),
+    },
+  ])('rejects malformed setup bootstrap %#', (value) => {
+    expect(() => parseAuthBootstrap(value)).toThrow();
+  });
 
   it.each(['local', 'cloudflare-access', 'trusted-header', 'none'] as const)(
     'parses and freezes authenticated %s bootstrap',
@@ -147,6 +228,35 @@ describe('authentication contracts', () => {
         newPassword: 'new',
         hash: 'leak',
       }),
+    ).toThrow();
+  });
+
+  it.each([
+    'a'.repeat(12),
+    'a'.repeat(72),
+    '\ud83d\ude80'.repeat(3),
+    '\ud83d\ude80'.repeat(18),
+  ])('accepts a NUL-free setup password at a UTF-8 boundary', (password) => {
+    expect(setupRequestSchema.parse({ password })).toEqual({ password });
+  });
+
+  it.each([
+    'a'.repeat(11),
+    'a'.repeat(73),
+    `${'\ud83d\ude80'.repeat(2)}abc`,
+    `${'\ud83d\ude80'.repeat(18)}a`,
+    `valid-password\0`,
+  ])('rejects an invalid setup password', (password) => {
+    expect(() => parseSetupRequest({ password })).toThrow();
+  });
+
+  it('parses and freezes exact setup requests', () => {
+    const parsed = parseSetupRequest({ password: 'valid-password' });
+
+    expect(parsed).toEqual({ password: 'valid-password' });
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(() =>
+      parseSetupRequest({ password: 'valid-password', hash: 'leak' }),
     ).toThrow();
   });
 });

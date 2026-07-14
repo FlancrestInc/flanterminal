@@ -164,6 +164,8 @@ export const apiErrorCodeSchema = z.enum([
   'csrf_invalid',
   'rate_limited',
   'password_invalid',
+  'setup_required',
+  'setup_already_completed',
   'settings_invalid',
   'durability_uncertain',
   'cleanup_disabled',

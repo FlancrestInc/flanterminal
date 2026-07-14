@@ -33,6 +33,15 @@ const unauthenticatedBootstrapSchema = z
   })
   .strict();
 
+const setupBootstrapSchema = z
+  .object({
+    authenticated: z.literal(false),
+    mode: z.literal('local'),
+    setupRequired: z.literal(true),
+    username: boundedDisplayString(128),
+  })
+  .strict();
+
 const authenticatedBootstrapSchema = z
   .object({
     authenticated: z.literal(true),
@@ -43,15 +52,24 @@ const authenticatedBootstrapSchema = z
   })
   .strict();
 
-export const authBootstrapSchema = z.discriminatedUnion('authenticated', [
-  unauthenticatedBootstrapSchema,
-  authenticatedBootstrapSchema,
+export const authBootstrapSchema = z.union([
+  setupBootstrapSchema,
+  z.discriminatedUnion('authenticated', [
+    unauthenticatedBootstrapSchema,
+    authenticatedBootstrapSchema,
+  ]),
 ]);
 
 export type AuthBootstrap =
   | Readonly<{
       authenticated: false;
       mode: 'local' | 'cloudflare-access' | 'trusted-header';
+    }>
+  | Readonly<{
+      authenticated: false;
+      mode: 'local';
+      setupRequired: true;
+      username: string;
     }>
   | Readonly<{
       authenticated: true;
@@ -69,6 +87,25 @@ export const loginRequestSchema = z
   .strict();
 
 export type LoginRequest = Readonly<z.infer<typeof loginRequestSchema>>;
+
+export const setupRequestSchema = z
+  .object({
+    password: z
+      .string()
+      .refine((value) => !value.includes('\0'), {
+        message: 'Password must not contain NUL',
+      })
+      .refine(
+        (value) => {
+          const byteLength = utf8ByteLength(value);
+          return byteLength >= 12 && byteLength <= 72;
+        },
+        { message: 'Password must be between 12 and 72 UTF-8 bytes' },
+      ),
+  })
+  .strict();
+
+export type SetupRequest = Readonly<z.infer<typeof setupRequestSchema>>;
 
 export const passwordChangeRequestSchema = z
   .object({
@@ -97,6 +134,10 @@ export function parseAuthBootstrap(value: unknown): AuthBootstrap {
 
 export function parseLoginRequest(value: unknown): LoginRequest {
   return immutableCopy(loginRequestSchema.parse(value));
+}
+
+export function parseSetupRequest(value: unknown): SetupRequest {
+  return immutableCopy(setupRequestSchema.parse(value));
 }
 
 export function parsePasswordChangeRequest(
