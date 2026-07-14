@@ -1,6 +1,4 @@
 import bcrypt from 'bcrypt';
-import { constants } from 'node:fs';
-import * as fs from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { inspect } from 'node:util';
 
@@ -11,7 +9,6 @@ import {
 } from './secure-json-file.js';
 
 const AUTH_FILENAME = 'auth.json';
-const MAX_BOOTSTRAP_BYTES = 4_096;
 const MAX_PASSWORD_BYTES = 72;
 const MIN_PASSWORD_BYTES = 12;
 const GENERIC_ERROR_MESSAGE = 'Credential store operation failed';
@@ -22,37 +19,20 @@ export interface PasswordHasher {
   compare(password: string, hash: string): Promise<boolean>;
 }
 
-export interface BootstrapSecretStat {
-  uid: number;
-  mode: number;
-  size: number;
-  isFile(): boolean;
-}
-
-export interface BootstrapSecretHandle {
-  stat(): Promise<BootstrapSecretStat>;
-  read(
-    buffer: Uint8Array,
-    offset: number,
-    length: number,
-    position: null,
-  ): Promise<{ bytesRead: number }>;
-  close(): Promise<void>;
-}
-
-export interface BootstrapSecretFileSystem {
-  open(path: string, flags: number): Promise<BootstrapSecretHandle>;
-}
-
 export type CredentialStoreOptions = Readonly<{
   dataDir: string;
   secureFile: SecureJsonFile;
   hasher?: PasswordHasher;
-  bootstrapFileSystem?: BootstrapSecretFileSystem;
-  runtimeUid?: number;
   clock?: () => Date;
-  bufferAllocator?: (length: number) => Uint8Array;
 }>;
+
+export type EnrollmentResult =
+  | Readonly<{
+      outcome: 'enrolled';
+      persistence: 'committed' | 'committed_durability_uncertain';
+    }>
+  | Readonly<{ outcome: 'already_initialized' }>
+  | Readonly<{ outcome: 'not_committed' }>;
 
 type CredentialRecord = Readonly<{
   version: 1;
@@ -66,9 +46,12 @@ const defaultHasher: PasswordHasher = {
   compare: (password, hash) => bcrypt.compare(password, hash),
 };
 
-const defaultBootstrapFileSystem: BootstrapSecretFileSystem = {
-  open: (path, flags) => fs.open(path, flags),
-};
+const ALREADY_INITIALIZED_RESULT: EnrollmentResult = Object.freeze({
+  outcome: 'already_initialized',
+});
+const NOT_COMMITTED_RESULT: EnrollmentResult = Object.freeze({
+  outcome: 'not_committed',
+});
 
 export class CredentialStoreError extends Error {
   constructor() {
@@ -81,45 +64,27 @@ export class CredentialStore {
   readonly #authPath: string;
   readonly #secureFile: SecureJsonFile;
   readonly #hasher: PasswordHasher;
-  readonly #bootstrapFileSystem: BootstrapSecretFileSystem;
-  readonly #runtimeUid: number;
   readonly #clock: () => Date;
-  readonly #bufferAllocator: (length: number) => Uint8Array;
   #operationTail: Promise<void> = Promise.resolve();
   #current: CredentialRecord | undefined;
+  #username = '';
   #cost = 0;
   #initializeAttempted = false;
+  #initializationComplete = false;
 
   constructor(options: CredentialStoreOptions) {
     try {
-      const runtimeUid = options.runtimeUid ?? process.getuid?.();
-      if (
-        !isAbsolute(options.dataDir) ||
-        runtimeUid === undefined ||
-        !Number.isInteger(runtimeUid) ||
-        runtimeUid < 0
-      ) {
-        throw new Error('invalid options');
-      }
+      if (!isAbsolute(options.dataDir)) throw new Error('invalid options');
       this.#authPath = join(options.dataDir, AUTH_FILENAME);
       this.#secureFile = options.secureFile;
       this.#hasher = options.hasher ?? defaultHasher;
-      this.#bootstrapFileSystem =
-        options.bootstrapFileSystem ?? defaultBootstrapFileSystem;
-      this.#runtimeUid = runtimeUid;
       this.#clock = options.clock ?? (() => new Date());
-      this.#bufferAllocator =
-        options.bufferAllocator ?? ((length) => new Uint8Array(length));
     } catch {
       throw new CredentialStoreError();
     }
   }
 
-  initializeLocal(
-    username: string,
-    passwordFile: string,
-    cost: number,
-  ): Promise<void> {
+  initializeLocal(username: string, cost: number): Promise<void> {
     return this.#enqueue(async () => {
       if (this.#initializeAttempted) throw new CredentialStoreError();
       this.#initializeAttempted = true;
@@ -136,27 +101,50 @@ export class CredentialStore {
             throw new Error('username mismatch');
           }
           this.#current = record;
-          this.#cost = cost;
-          return;
         }
+        this.#username = normalizedUsername;
+        this.#cost = cost;
+        this.#initializationComplete = true;
+      } catch {
+        throw new CredentialStoreError();
+      }
+    });
+  }
 
-        if (!isAbsolute(passwordFile)) throw new Error('invalid secret path');
-        const password = await this.#readBootstrapPassword(passwordFile);
-        const passwordHash = await this.#hasher.hash(password, cost);
-        if (bcryptCost(passwordHash) !== cost) throw new Error('invalid hash');
-        const record = makeRecord(
-          normalizedUsername,
+  isInitialized(): boolean {
+    if (!this.#initializationComplete) throw new CredentialStoreError();
+    return this.#current !== undefined;
+  }
+
+  enroll(password: string): Promise<EnrollmentResult> {
+    if (!this.#initializationComplete) {
+      return Promise.reject(new CredentialStoreError());
+    }
+    return this.#enqueue(async () => {
+      if (!this.#initializationComplete) throw new CredentialStoreError();
+      if (this.#current) return ALREADY_INITIALIZED_RESULT;
+      try {
+        validatePassword(password);
+        const passwordHash = await this.#hasher.hash(password, this.#cost);
+        if (bcryptCost(passwordHash) !== this.#cost) {
+          throw new Error('invalid hash');
+        }
+        const next = makeRecord(
+          this.#username,
           passwordHash,
           currentTimestamp(this.#clock),
         );
         const result = await this.#secureFile.replace(
           this.#authPath,
-          record,
+          next,
           0o600,
         );
-        if (result.state !== 'committed') throw new Error('not durable');
-        this.#current = record;
-        this.#cost = cost;
+        if (result.state === 'not_committed') return NOT_COMMITTED_RESULT;
+        this.#current = next;
+        return Object.freeze({
+          outcome: 'enrolled',
+          persistence: result.state,
+        });
       } catch {
         throw new CredentialStoreError();
       }
@@ -230,78 +218,6 @@ export class CredentialStore {
     );
     return result;
   }
-
-  async #readBootstrapPassword(path: string): Promise<string> {
-    let handle: BootstrapSecretHandle | undefined;
-    let buffer: Uint8Array | undefined;
-    let bytes: Uint8Array | undefined;
-    let failed = false;
-    try {
-      handle = await this.#bootstrapFileSystem.open(
-        path,
-        constants.O_RDONLY | constants.O_NOFOLLOW,
-      );
-      const stat = await handle.stat();
-      if (
-        !stat.isFile() ||
-        (stat.uid !== 0 && stat.uid !== this.#runtimeUid) ||
-        (stat.mode & 0o022) !== 0 ||
-        !Number.isSafeInteger(stat.size) ||
-        stat.size < 0 ||
-        stat.size > MAX_BOOTSTRAP_BYTES
-      ) {
-        throw new Error('unsafe secret');
-      }
-      buffer = this.#bufferAllocator(MAX_BOOTSTRAP_BYTES + 1);
-      if (
-        !(buffer instanceof Uint8Array) ||
-        buffer.byteLength !== MAX_BOOTSTRAP_BYTES + 1
-      ) {
-        throw new Error('invalid buffer');
-      }
-      bytes = await readBounded(handle, buffer, MAX_BOOTSTRAP_BYTES);
-    } catch {
-      failed = true;
-    }
-    try {
-      await handle?.close();
-    } catch {
-      failed = true;
-    }
-    try {
-      if (failed || !bytes) throw new Error('secret read failed');
-      let password = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-      if (password.endsWith('\r\n')) password = password.slice(0, -2);
-      else if (password.endsWith('\n')) password = password.slice(0, -1);
-      validatePassword(password);
-      return password;
-    } finally {
-      buffer?.fill(0);
-    }
-  }
-}
-
-async function readBounded(
-  handle: BootstrapSecretHandle,
-  buffer: Uint8Array,
-  maximumBytes: number,
-): Promise<Uint8Array> {
-  let offset = 0;
-  while (offset < buffer.byteLength) {
-    const { bytesRead } = await handle.read(
-      buffer,
-      offset,
-      buffer.byteLength - offset,
-      null,
-    );
-    if (bytesRead === 0) break;
-    if (bytesRead < 0 || bytesRead > buffer.byteLength - offset) {
-      throw new Error('invalid read');
-    }
-    offset += bytesRead;
-  }
-  if (offset > maximumBytes) throw new Error('oversized');
-  return buffer.subarray(0, offset);
 }
 
 function normalizeUsername(username: string): string {

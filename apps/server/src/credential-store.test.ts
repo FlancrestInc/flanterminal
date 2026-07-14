@@ -1,4 +1,3 @@
-import { constants } from 'node:fs';
 import { inspect } from 'node:util';
 
 import { describe, expect, it } from 'vitest';
@@ -7,232 +6,51 @@ import { type ReplaceResult, type SecureJsonFile } from './secure-json-file.js';
 import {
   CredentialStore,
   CredentialStoreError,
-  type BootstrapSecretFileSystem,
-  type BootstrapSecretHandle,
+  type EnrollmentResult,
   type PasswordHasher,
 } from './credential-store.js';
 
 const DATA_DIR = '/data';
 const AUTH_PATH = '/data/auth.json';
-const SECRET_PATH = '/run/secrets/password';
-const UID = 1000;
 const NOW = new Date('2026-07-12T12:34:56.000Z');
 const HASH = '$2b$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ01234';
 const NEXT_HASH = `${HASH.slice(0, -1)}5`;
 const THIRD_HASH = `${HASH.slice(0, -1)}6`;
 
-describe('CredentialStore bootstrap', () => {
-  it('bootstraps a root-owned read-only Compose secret and commits strict credentials', async () => {
-    const { store, secureFile, hasher, bootstrap } = harness();
-    bootstrap.content = Buffer.from('correct horse battery\n');
-    bootstrap.uid = 0;
-    bootstrap.mode = 0o444;
-    secureFile.readResults.push(undefined);
-    secureFile.replaceResults.push({ state: 'committed' });
-    hasher.hashResults.push(HASH);
+describe('CredentialStore initialization', () => {
+  it('fails closed before initialization has completed', async () => {
+    const { store, hasher } = harness();
 
-    await store.initializeLocal('admin', SECRET_PATH, 12);
-
-    expect(bootstrap.openFlags).toBe(constants.O_RDONLY | constants.O_NOFOLLOW);
-    expect(bootstrap.operations).toEqual([
-      'open',
-      'stat',
-      'read',
-      'read',
-      'close',
-    ]);
-    expect(hasher.hashCalls).toEqual([
-      { password: 'correct horse battery', cost: 12 },
-    ]);
-    expect(secureFile.replacedValues).toEqual([
-      {
-        version: 1,
-        username: 'admin',
-        passwordHash: HASH,
-        passwordChangedAt: NOW.toISOString(),
-      },
-    ]);
-    expect(secureFile.calls).toEqual([
-      `read ${AUTH_PATH} 1048576`,
-      `replace ${AUTH_PATH} 384`,
-    ]);
-  });
-
-  it.each([
-    ['runtime owner', UID, 0o400],
-    ['root Compose secret', 0, 0o444],
-  ])('accepts a %s secret', async (_name, uid, mode) => {
-    const { store, secureFile, hasher, bootstrap } = harness();
-    bootstrap.uid = uid;
-    bootstrap.mode = mode;
-    secureFile.readResults.push(undefined);
-    secureFile.replaceResults.push({ state: 'committed' });
-    hasher.hashResults.push(HASH);
-    await expect(
-      store.initializeLocal('admin', SECRET_PATH, 12),
-    ).resolves.toBeUndefined();
-  });
-
-  it.each([
-    ['symlink', { openError: errno('ELOOP') }],
-    ['nonregular', { kind: 'directory' as const }],
-    ['writable', { mode: 0o446 }],
-    ['wrong owner', { uid: UID + 1 }],
-    ['oversized stat', { statSize: 4097 }],
-    ['grows after stat', { statSize: 12, content: Buffer.alloc(4097, 0x61) }],
-    [
-      'fatal UTF-8',
-      {
-        content: Buffer.from([
-          0xc3, 0x28, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61,
-          0x61,
-        ]),
-      },
-    ],
-    ['close failure', { failStage: 'close' as const }],
-  ])('rejects a %s bootstrap secret generically', async (_name, changes) => {
-    const { store, secureFile, hasher, bootstrap } = harness();
-    Object.assign(bootstrap, changes);
-    secureFile.readResults.push(undefined);
-
-    const error = await captureError(
-      store.initializeLocal('admin', SECRET_PATH, 12),
+    expectGeneric(captureSyncError(() => store.isInitialized()));
+    expectGeneric(await captureError(store.enroll('password-password')));
+    expectGeneric(
+      await captureError(store.verify('admin', 'password-password')),
     );
-    expectGeneric(error);
-    expect(hasher.hashCalls).toEqual([]);
-    expect(secureFile.replacedValues).toEqual([]);
-    expect(bootstrap.operations.at(-1)).toBe(
-      'openError' in changes ? 'open' : 'close',
+    expectGeneric(
+      await captureError(store.replacePassword('password-password')),
     );
-  });
-
-  it.each([
-    ['LF', 'password-password\n', 'password-password'],
-    ['CRLF', 'password-password\r\n', 'password-password'],
-    ['one ending only', 'password-pass\n\n', 'password-pass\n'],
-  ])('strips %s exactly', async (_name, input, expected) => {
-    const { store, secureFile, hasher, bootstrap } = harness();
-    bootstrap.content = Buffer.from(input);
-    secureFile.readResults.push(undefined);
-    secureFile.replaceResults.push({ state: 'committed' });
-    hasher.hashResults.push(HASH);
-    await store.initializeLocal('admin', SECRET_PATH, 12);
-    expect(hasher.hashCalls[0]?.password).toBe(expected);
-  });
-
-  it.each([
-    ['NUL', `password\0password`],
-    ['11 bytes', 'a'.repeat(11)],
-    ['73 bytes', 'a'.repeat(73)],
-    ['73 multibyte bytes', `${'é'.repeat(36)}a`],
-  ])('rejects %s before bcrypt', async (_name, password) => {
-    const { store, secureFile, hasher, bootstrap } = harness();
-    bootstrap.content = Buffer.from(password);
-    secureFile.readResults.push(undefined);
-    await expect(
-      store.initializeLocal('admin', SECRET_PATH, 12),
-    ).rejects.toBeInstanceOf(CredentialStoreError);
     expect(hasher.hashCalls).toEqual([]);
+  });
+
+  it('accepts a missing auth record as an uninitialized state', async () => {
+    const { store, secureFile, hasher } = harness();
+    secureFile.readResults.push(undefined);
+
+    await expect(store.initializeLocal('admin', 12)).resolves.toBeUndefined();
+
+    expect(store.isInitialized()).toBe(false);
+    expect(secureFile.calls).toEqual([`read ${AUTH_PATH} 1048576`]);
     expect(secureFile.replacedValues).toEqual([]);
+    expect(hasher.hashCalls).toEqual([]);
   });
 
-  it.each(['a'.repeat(12), 'a'.repeat(72), 'é'.repeat(6)])(
-    'accepts a boundary password of %s UTF-8 bytes',
-    async (password) => {
-      const { store, secureFile, hasher, bootstrap } = harness();
-      bootstrap.content = Buffer.from(password);
-      secureFile.readResults.push(undefined);
-      secureFile.replaceResults.push({ state: 'committed' });
-      hasher.hashResults.push(HASH);
-      await store.initializeLocal('admin', SECRET_PATH, 12);
-      expect(hasher.hashCalls[0]).toEqual({ password, cost: 12 });
-    },
-  );
-
-  it('zeros the injected bootstrap byte buffer after successful transfer', async () => {
-    const allocated: Uint8Array[] = [];
-    const { store, secureFile, hasher } = harness((length) => {
-      const buffer = new Uint8Array(length);
-      allocated.push(buffer);
-      return buffer;
-    });
-    secureFile.readResults.push(undefined);
-    secureFile.replaceResults.push({ state: 'committed' });
-    hasher.hashResults.push(HASH);
-
-    await store.initializeLocal('admin', SECRET_PATH, 12);
-
-    expect(allocated).toHaveLength(1);
-    expect(allocated[0]?.every((byte) => byte === 0)).toBe(true);
-  });
-
-  it('zeros the injected bootstrap byte buffer after fatal decoding fails', async () => {
-    const allocated: Uint8Array[] = [];
-    const { store, secureFile, bootstrap } = harness((length) => {
-      const buffer = new Uint8Array(length);
-      allocated.push(buffer);
-      return buffer;
-    });
-    bootstrap.content = Buffer.from([
-      0xc3, 0x28, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61,
-    ]);
-    secureFile.readResults.push(undefined);
-
-    await expect(
-      store.initializeLocal('admin', SECRET_PATH, 12),
-    ).rejects.toBeInstanceOf(CredentialStoreError);
-
-    expect(allocated).toHaveLength(1);
-    expect(allocated[0]?.every((byte) => byte === 0)).toBe(true);
-  });
-
-  it.each(['not_committed', 'committed_durability_uncertain'] as const)(
-    'fails initialization for %s without becoming usable',
-    async (state) => {
-      const { store, secureFile, hasher } = harness();
-      secureFile.readResults.push(undefined);
-      secureFile.replaceResults.push({ state });
-      hasher.hashResults.push(HASH);
-      await expect(
-        store.initializeLocal('admin', SECRET_PATH, 12),
-      ).rejects.toBeInstanceOf(CredentialStoreError);
-      await expect(
-        store.verify('admin', 'password-password'),
-      ).rejects.toBeInstanceOf(CredentialStoreError);
-    },
-  );
-
-  it('contains hasher failures and invalid returned hashes before persistence', async () => {
-    for (const result of [
-      new Error('password /secret/path'),
-      'invalid-hash',
-      HASH.replace('$2b$', '$2y$'),
-    ]) {
-      const { store, secureFile, hasher } = harness();
-      secureFile.readResults.push(undefined);
-      hasher.hashResults.push(result);
-      expectGeneric(
-        await captureError(store.initializeLocal('admin', SECRET_PATH, 12)),
-      );
-      expect(secureFile.replacedValues).toEqual([]);
-    }
-  });
-
-  it('rejects invalid configured cost before filesystem access', async () => {
+  it('loads a valid existing auth record as initialized', async () => {
     const { store, secureFile } = harness();
-    await expect(
-      store.initializeLocal('admin', SECRET_PATH, 9),
-    ).rejects.toBeInstanceOf(CredentialStoreError);
-    expect(secureFile.calls).toEqual([]);
-  });
-});
-
-describe('CredentialStore existing records', () => {
-  it('loads strict credentials without accessing the bootstrap file', async () => {
-    const { store, secureFile, bootstrap } = harness();
     secureFile.readResults.push(record());
-    await store.initializeLocal('admin', '/missing/secret', 12);
-    expect(bootstrap.operations).toEqual([]);
+
+    await store.initializeLocal('admin', 12);
+
+    expect(store.isInitialized()).toBe(true);
     expect(secureFile.replacedValues).toEqual([]);
   });
 
@@ -249,26 +67,251 @@ describe('CredentialStore existing records', () => {
       'low hash cost',
       { ...record(), passwordHash: HASH.replace('$12$', '$09$') },
     ],
+    [
+      'high hash cost',
+      { ...record(), passwordHash: HASH.replace('$12$', '$16$') },
+    ],
     ['bad timestamp', { ...record(), passwordChangedAt: 'yesterday' }],
-  ])('rejects %s without overwriting', async (_name, value) => {
-    const { store, secureFile, bootstrap } = harness();
+  ])('rejects a %s record without reopening setup', async (_name, value) => {
+    const { store, secureFile, hasher } = harness();
     secureFile.readResults.push(value);
-    const error = await captureError(
-      store.initializeLocal('admin', SECRET_PATH, 12),
+
+    expectGeneric(await captureError(store.initializeLocal('admin', 12)));
+    expectGeneric(captureSyncError(() => store.isInitialized()));
+    expectGeneric(await captureError(store.enroll('password-password')));
+    expect(secureFile.replacedValues).toEqual([]);
+    expect(hasher.hashCalls).toEqual([]);
+  });
+
+  it('keeps an unreadable or unsafe auth record fatal', async () => {
+    const { store, secureFile, hasher } = harness();
+    secureFile.readResults.push(new Error('/data/auth.json raw errno'));
+
+    expectGeneric(await captureError(store.initializeLocal('admin', 12)));
+    expectGeneric(captureSyncError(() => store.isInitialized()));
+    expectGeneric(await captureError(store.enroll('password-password')));
+    expect(secureFile.replacedValues).toEqual([]);
+    expect(hasher.hashCalls).toEqual([]);
+  });
+
+  it('validates configured username and cost before filesystem access', async () => {
+    for (const [username, cost] of [
+      ['', 12],
+      ['Cafe\u0301', 12],
+      ['line\nfeed', 12],
+      ['admin', 9],
+      ['admin', 16],
+      ['admin', 12.5],
+    ] as const) {
+      const { store, secureFile } = harness();
+      expectGeneric(await captureError(store.initializeLocal(username, cost)));
+      expect(secureFile.calls).toEqual([]);
+      expectGeneric(captureSyncError(() => store.isInitialized()));
+    }
+  });
+
+  it('permits initialization exactly once', async () => {
+    const { store, secureFile } = harness();
+    secureFile.readResults.push(undefined);
+    await store.initializeLocal('admin', 12);
+
+    expectGeneric(await captureError(store.initializeLocal('admin', 12)));
+    expect(secureFile.calls).toEqual([`read ${AUTH_PATH} 1048576`]);
+    expect(store.isInitialized()).toBe(false);
+  });
+});
+
+describe('CredentialStore enrollment', () => {
+  it('persists the configured identity with mode 0600 and becomes initialized', async () => {
+    const { store, secureFile, hasher } = await uninitializedHarness();
+    hasher.hashResults.push(HASH);
+    secureFile.replaceResults.push({ state: 'committed' });
+
+    const result: EnrollmentResult = await store.enroll(
+      'correct horse battery',
     );
-    expectGeneric(error);
-    expect(bootstrap.operations).toEqual([]);
+
+    expect(result).toEqual({
+      outcome: 'enrolled',
+      persistence: 'committed',
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(store.isInitialized()).toBe(true);
+    expect(hasher.hashCalls).toEqual([
+      { password: 'correct horse battery', cost: 12 },
+    ]);
+    expect(secureFile.calls).toEqual([
+      `read ${AUTH_PATH} 1048576`,
+      `replace ${AUTH_PATH} 384`,
+    ]);
+    expect(secureFile.replacedValues).toEqual([
+      {
+        version: 1,
+        username: 'admin',
+        passwordHash: HASH,
+        passwordChangedAt: NOW.toISOString(),
+      },
+    ]);
+    expect(JSON.stringify(secureFile.replacedValues)).not.toContain(
+      'correct horse battery',
+    );
+  });
+
+  it.each([
+    ['non-string', 12],
+    ['NUL', `password\0password`],
+    ['11 bytes', 'a'.repeat(11)],
+    ['73 bytes', 'a'.repeat(73)],
+    ['11 multibyte bytes', `${'é'.repeat(5)}a`],
+    ['73 multibyte bytes', `${'é'.repeat(36)}a`],
+  ])('rejects a %s password before bcrypt', async (_name, password) => {
+    const { store, secureFile, hasher } = await uninitializedHarness();
+
+    expectGeneric(await captureError(store.enroll(password as string)));
+    expect(store.isInitialized()).toBe(false);
+    expect(hasher.hashCalls).toEqual([]);
     expect(secureFile.replacedValues).toEqual([]);
   });
 
-  it('preserves an existing file after an unsafe read failure', async () => {
-    const { store, secureFile } = harness();
-    secureFile.readResults.push(new Error('/secret/auth.json raw errno'));
-    const error = await captureError(
-      store.initializeLocal('admin', SECRET_PATH, 12),
-    );
-    expectGeneric(error);
+  it.each([
+    ['12 ASCII bytes', 'a'.repeat(12)],
+    ['72 ASCII bytes', 'a'.repeat(72)],
+    ['12 multibyte bytes', 'é'.repeat(6)],
+    ['72 multibyte bytes', '🚀'.repeat(18)],
+    ['non-normalized input', `${'e\u0301'.repeat(4)}`],
+  ])('accepts %s without normalization', async (_name, password) => {
+    const { store, secureFile, hasher } = await uninitializedHarness();
+    hasher.hashResults.push(HASH);
+    secureFile.replaceResults.push({ state: 'committed' });
+
+    await store.enroll(password);
+
+    expect(hasher.hashCalls).toEqual([{ password, cost: 12 }]);
+  });
+
+  it.each([
+    new Error('password /secret/path'),
+    'invalid-hash',
+    HASH.replace('$2b$', '$2y$'),
+    HASH.replace('$12$', '$13$'),
+  ])('contains bcrypt failure %# and remains retryable', async (hashResult) => {
+    const { store, secureFile, hasher } = await uninitializedHarness();
+    hasher.hashResults.push(hashResult);
+
+    expectGeneric(await captureError(store.enroll('password-password')));
+    expect(store.isInitialized()).toBe(false);
     expect(secureFile.replacedValues).toEqual([]);
+
+    hasher.hashResults.push(HASH);
+    secureFile.replaceResults.push({ state: 'committed' });
+    await expect(store.enroll('retry-password')).resolves.toEqual({
+      outcome: 'enrolled',
+      persistence: 'committed',
+    });
+  });
+
+  it.each(['committed', 'committed_durability_uncertain'] as const)(
+    'treats %s as an irreversible initialized claim',
+    async (persistence) => {
+      const { store, secureFile, hasher } = await uninitializedHarness();
+      hasher.hashResults.push(HASH);
+      secureFile.replaceResults.push({ state: persistence });
+
+      const first = await store.enroll('first-password');
+      const second = await store.enroll('second-password');
+
+      expect(first).toEqual({ outcome: 'enrolled', persistence });
+      expect(Object.isFrozen(first)).toBe(true);
+      expect(second).toEqual({ outcome: 'already_initialized' });
+      expect(Object.isFrozen(second)).toBe(true);
+      expect(store.isInitialized()).toBe(true);
+      expect(hasher.hashCalls.map(({ password }) => password)).toEqual([
+        'first-password',
+      ]);
+      expect(secureFile.replacedValues).toHaveLength(1);
+    },
+  );
+
+  it('returns already_initialized for a loaded record without hashing', async () => {
+    const { store, secureFile, hasher } = harness();
+    secureFile.readResults.push(record());
+    await store.initializeLocal('admin', 12);
+
+    const result = await store.enroll('replacement-password');
+
+    expect(result).toEqual({ outcome: 'already_initialized' });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(hasher.hashCalls).toEqual([]);
+    expect(secureFile.replacedValues).toEqual([]);
+  });
+
+  it('serializes concurrent enrollment and rechecks state before bcrypt', async () => {
+    const { store, secureFile, hasher } = await uninitializedHarness();
+    const hashGate = deferred<string>();
+    hasher.hashResults.push(hashGate.promise);
+    secureFile.replaceResults.push({ state: 'committed' });
+
+    const first = store.enroll('first-password');
+    const second = store.enroll('second-password');
+    const third = store.enroll('third-password');
+    await tick();
+    expect(hasher.hashCalls.map(({ password }) => password)).toEqual([
+      'first-password',
+    ]);
+    expect(secureFile.replacedValues).toEqual([]);
+
+    hashGate.resolve(HASH);
+
+    await expect(first).resolves.toEqual({
+      outcome: 'enrolled',
+      persistence: 'committed',
+    });
+    await expect(second).resolves.toEqual({ outcome: 'already_initialized' });
+    await expect(third).resolves.toEqual({ outcome: 'already_initialized' });
+    expect(hasher.hashCalls.map(({ password }) => password)).toEqual([
+      'first-password',
+    ]);
+    expect(secureFile.replacedValues).toHaveLength(1);
+  });
+
+  it('allows a queued attempt to retry after not_committed', async () => {
+    const { store, secureFile, hasher } = await uninitializedHarness();
+    const replaceGate = deferred<ReplaceResult>();
+    const secondHashGate = deferred<string>();
+    hasher.hashResults.push(HASH, secondHashGate.promise);
+    secureFile.replaceResults.push(replaceGate.promise, { state: 'committed' });
+
+    const first = store.enroll('first-password');
+    const second = store.enroll('second-password');
+    await tick();
+    expect(hasher.hashCalls.map(({ password }) => password)).toEqual([
+      'first-password',
+    ]);
+
+    replaceGate.resolve({ state: 'not_committed' });
+
+    const firstResult = await first;
+    expect(firstResult).toEqual({ outcome: 'not_committed' });
+    expect(Object.isFrozen(firstResult)).toBe(true);
+    expect(store.isInitialized()).toBe(false);
+    await tick();
+    expect(hasher.hashCalls.map(({ password }) => password)).toEqual([
+      'first-password',
+      'second-password',
+    ]);
+
+    secondHashGate.resolve(NEXT_HASH);
+
+    await expect(second).resolves.toEqual({
+      outcome: 'enrolled',
+      persistence: 'committed',
+    });
+    expect(hasher.hashCalls.map(({ password }) => password)).toEqual([
+      'first-password',
+      'second-password',
+    ]);
+    expect(secureFile.replacedValues).toHaveLength(2);
+    expect(store.isInitialized()).toBe(true);
   });
 });
 
@@ -276,7 +319,7 @@ describe('CredentialStore verification and replacement', () => {
   it('keeps all reflection and string representations bounded and secret-free', async () => {
     const { store, secureFile } = harness();
     secureFile.readResults.push(record());
-    await store.initializeLocal('admin', SECRET_PATH, 12);
+    await store.initializeLocal('admin', 12);
     expect(Reflect.ownKeys(store)).toEqual([]);
     expect({ ...store }).toEqual({});
     for (const representation of [
@@ -292,6 +335,7 @@ describe('CredentialStore verification and replacement', () => {
       expect(representation).not.toContain('password-password');
     }
   });
+
   it.each([
     ['correct', 'admin', true, true],
     ['wrong username', 'other', true, false],
@@ -301,8 +345,9 @@ describe('CredentialStore verification and replacement', () => {
     async (_name, username, match, expected) => {
       const { store, secureFile, hasher } = harness();
       secureFile.readResults.push(record());
-      await store.initializeLocal('admin', SECRET_PATH, 12);
+      await store.initializeLocal('admin', 12);
       hasher.compareResults.push(match);
+
       await expect(store.verify(username, 'password-password')).resolves.toBe(
         expected,
       );
@@ -315,7 +360,7 @@ describe('CredentialStore verification and replacement', () => {
   it('rejects invalid attempted passwords before compare and contains compare failures', async () => {
     const { store, secureFile, hasher } = harness();
     secureFile.readResults.push(record());
-    await store.initializeLocal('admin', SECRET_PATH, 12);
+    await store.initializeLocal('admin', 12);
     await expect(store.verify('admin', 'short')).resolves.toBe(false);
     expect(hasher.compareCalls).toEqual([]);
     hasher.compareResults.push(new Error('hash secret path'));
@@ -333,9 +378,10 @@ describe('CredentialStore verification and replacement', () => {
     async (state, expectedHash, expectedTime) => {
       const { store, secureFile, hasher } = harness();
       secureFile.readResults.push(record());
-      await store.initializeLocal('admin', SECRET_PATH, 12);
+      await store.initializeLocal('admin', 12);
       hasher.hashResults.push(NEXT_HASH);
       secureFile.replaceResults.push({ state });
+
       await expect(
         store.replacePassword('new-password-value'),
       ).resolves.toEqual({ state });
@@ -355,7 +401,7 @@ describe('CredentialStore verification and replacement', () => {
   it('serializes concurrent replacements deterministically', async () => {
     const { store, secureFile, hasher } = harness();
     secureFile.readResults.push(record());
-    await store.initializeLocal('admin', SECRET_PATH, 12);
+    await store.initializeLocal('admin', 12);
     const gate = deferred<ReplaceResult>();
     hasher.hashResults.push(NEXT_HASH, THIRD_HASH);
     secureFile.replaceResults.push(gate.promise, { state: 'committed' });
@@ -375,7 +421,7 @@ describe('CredentialStore verification and replacement', () => {
   it('validates and hashes before filesystem access and never persists plaintext', async () => {
     const { store, secureFile, hasher } = harness();
     secureFile.readResults.push(record());
-    await store.initializeLocal('admin', SECRET_PATH, 12);
+    await store.initializeLocal('admin', 12);
     secureFile.calls.length = 0;
     await expect(store.replacePassword('too-short')).rejects.toBeInstanceOf(
       CredentialStoreError,
@@ -392,20 +438,23 @@ describe('CredentialStore verification and replacement', () => {
   });
 });
 
-function harness(bufferAllocator?: (length: number) => Uint8Array) {
+function harness() {
   const secureFile = new ScriptedSecureJsonFile();
   const hasher = new ScriptedHasher();
-  const bootstrap = new MemoryBootstrapFileSystem();
   const store = new CredentialStore({
     dataDir: DATA_DIR,
     secureFile,
     hasher,
-    bootstrapFileSystem: bootstrap,
-    runtimeUid: UID,
     clock: () => new Date(NOW),
-    ...(bufferAllocator ? { bufferAllocator } : {}),
   });
-  return { store, secureFile, hasher, bootstrap };
+  return { store, secureFile, hasher };
+}
+
+async function uninitializedHarness() {
+  const result = harness();
+  result.secureFile.readResults.push(undefined);
+  await result.store.initializeLocal('admin', 12);
+  return result;
 }
 
 class ScriptedSecureJsonFile implements SecureJsonFile {
@@ -461,64 +510,6 @@ class ScriptedHasher implements PasswordHasher {
   }
 }
 
-class MemoryBootstrapFileSystem implements BootstrapSecretFileSystem {
-  content = Buffer.from('password-password');
-  uid = UID;
-  mode = 0o400;
-  kind: 'file' | 'directory' = 'file';
-  statSize: number | undefined;
-  openError: Error | undefined;
-  failStage: 'stat' | 'read' | 'close' | undefined;
-  maximumRead = Number.POSITIVE_INFINITY;
-  openFlags: number | undefined;
-  readonly operations: string[] = [];
-
-  async open(_path: string, flags: number): Promise<BootstrapSecretHandle> {
-    this.operations.push('open');
-    this.openFlags = flags;
-    if (this.openError) throw this.openError;
-    return new MemoryBootstrapHandle(this);
-  }
-}
-
-class MemoryBootstrapHandle implements BootstrapSecretHandle {
-  private offset = 0;
-
-  constructor(private readonly fileSystem: MemoryBootstrapFileSystem) {}
-
-  async stat() {
-    this.fileSystem.operations.push('stat');
-    if (this.fileSystem.failStage === 'stat') throw new Error('secret stat');
-    return {
-      uid: this.fileSystem.uid,
-      mode: this.fileSystem.mode,
-      size: this.fileSystem.statSize ?? this.fileSystem.content.byteLength,
-      isFile: () => this.fileSystem.kind === 'file',
-    };
-  }
-
-  async read(buffer: Uint8Array, offset: number, length: number) {
-    this.fileSystem.operations.push('read');
-    if (this.fileSystem.failStage === 'read') throw new Error('secret read');
-    const bytesRead = Math.min(
-      length,
-      this.fileSystem.maximumRead,
-      this.fileSystem.content.byteLength - this.offset,
-    );
-    buffer.set(
-      this.fileSystem.content.subarray(this.offset, this.offset + bytesRead),
-      offset,
-    );
-    this.offset += bytesRead;
-    return { bytesRead };
-  }
-
-  async close(): Promise<void> {
-    this.fileSystem.operations.push('close');
-    if (this.fileSystem.failStage === 'close') throw new Error('secret close');
-  }
-}
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((accept) => {
@@ -549,13 +540,18 @@ async function captureError(promise: Promise<unknown>): Promise<unknown> {
   }
 }
 
+function captureSyncError(operation: () => unknown): unknown {
+  try {
+    operation();
+    return new Error('expected error');
+  } catch (error) {
+    return error;
+  }
+}
+
 function expectGeneric(error: unknown): void {
   expect(error).toBeInstanceOf(CredentialStoreError);
   expect(error).toMatchObject({ message: 'Credential store operation failed' });
   expect(String(error)).not.toContain('/');
   expect(error).not.toHaveProperty('cause');
-}
-
-function errno(code: string): NodeJS.ErrnoException {
-  return Object.assign(new Error(code), { code });
 }
