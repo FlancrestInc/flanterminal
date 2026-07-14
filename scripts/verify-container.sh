@@ -43,6 +43,8 @@ dc() {
 }
 
 cleanup() {
+  status=$?
+  trap - EXIT INT TERM
   if [ -n "$hold_pid" ]; then
     kill "$hold_pid" >/dev/null 2>&1 || true
     wait "$hold_pid" >/dev/null 2>&1 || true
@@ -61,8 +63,11 @@ cleanup() {
   done
   dc exec -T app rm -f "$hold_stop" >/dev/null 2>&1 || true
   dc down -v --remove-orphans >/dev/null 2>&1 || true
+  exit "$status"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fail() {
   printf 'container verification failed: %s\n' "$1" >&2
@@ -82,6 +87,37 @@ reject_file_pattern() {
   message=$3
   rg -qi -- "$pattern" "$file" && fail "$message"
   return 0
+}
+
+script_line() {
+  statement=$1
+  awk -v statement="$statement" '$0 == statement { print NR; exit }' scripts/verify-container.sh
+}
+
+verify_script_lifecycle() {
+  lifecycle_errors=
+  exit_trap=$(script_line 'trap cleanup EXIT')
+  int_trap=$(script_line "trap 'exit 130' INT")
+  term_trap=$(script_line "trap 'exit 143' TERM")
+  combined_trap=$(script_line 'trap cleanup EXIT INT TERM')
+  [ -n "$exit_trap" ] && [ -n "$int_trap" ] && [ -n "$term_trap" ] && [ -z "$combined_trap" ] ||
+    lifecycle_errors='dedicated EXIT/INT/TERM traps are unavailable; '
+  unset_traps=$(script_line '  trap - EXIT INT TERM')
+  preserve_status=$(script_line '  exit "$status"')
+  [ -n "$unset_traps" ] && [ -n "$preserve_status" ] && [ "$unset_traps" -lt "$preserve_status" ] ||
+    lifecycle_errors="${lifecycle_errors}cleanup traps or exit status are not bounded; "
+
+  stop_line=$(script_line 'dc stop app >/dev/null')
+  logs_line=$(script_line 'pre_recreate_logs=$(dc logs app 2>&1)')
+  remove_line=$(script_line 'dc rm -f app >/dev/null')
+  combined_logs_line=$(awk 'index($0, "container_logs=$(") == 1 && index($0, "$pre_recreate_logs") { print NR; exit }' scripts/verify-container.sh)
+  if [ -z "$stop_line" ] || [ -z "$logs_line" ] || [ -z "$remove_line" ] ||
+    [ -z "$combined_logs_line" ] || [ "$stop_line" -ge "$logs_line" ] ||
+    [ "$remove_line" -ne "$((logs_line + 1))" ] || [ "$remove_line" -ge "$combined_logs_line" ]; then
+    lifecycle_errors="${lifecycle_errors}old container logs are not captured after stop and before removal; "
+  fi
+
+  [ -z "$lifecycle_errors" ] || fail "verification lifecycle structure is unsafe: $lifecycle_errors"
 }
 
 verify_static_hardening() {
@@ -158,6 +194,11 @@ for (const key of hardeningKeys) {
     throw new Error(`Compose hardening differs for ${key}`);
   }
 }
+for (const key of hardeningKeys.filter((key) => key !== 'volumes')) {
+  if (JSON.stringify(local.services.app[key]) !== JSON.stringify(example.services.app[key])) {
+    throw new Error(`Example Compose weakens inherited hardening for ${key}`);
+  }
+}
 const expectedMounts = ['/app/data', '/home/webterm'];
 for (const service of [local.services.app, cloudflare.services.app]) {
   const mounts = service.volumes.map(({ target }) => target).sort();
@@ -175,6 +216,33 @@ for (const service of [example.services.app, e2e.services.app]) {
     throw new Error(`Unexpected local app volumes: ${mounts.join(', ')}`);
   }
   if (service.secrets !== undefined) throw new Error('Local app mounts a secret');
+  if (service.read_only !== true) throw new Error('Local app root filesystem is writable');
+  if (JSON.stringify(service.cap_drop) !== JSON.stringify(['ALL'])) {
+    throw new Error('Local app does not drop all capabilities');
+  }
+  if (!service.security_opt?.includes('no-new-privileges:true')) {
+    throw new Error('Local app permits privilege escalation');
+  }
+  if (service.pids_limit !== 256) throw new Error('Local app process limit is weakened');
+  if (service.mem_limit !== '536870912') throw new Error('Local app memory limit is weakened');
+  if (service.healthcheck?.disable === true || !Array.isArray(service.healthcheck?.test) || !service.healthcheck.test.join(' ').includes('/health')) {
+    throw new Error('Local app healthcheck is unavailable');
+  }
+  const tmpfs = new Map(service.tmpfs.map((entry) => {
+    const [target, ...options] = entry.split(':');
+    return [target, options.join(':').split(',')];
+  }));
+  for (const [target, required] of [
+    ['/tmp', ['rw', 'noexec', 'nosuid', 'nodev', 'size=16m', 'mode=1777']],
+    ['/run', ['rw', 'noexec', 'nosuid', 'nodev', 'size=1m', 'mode=0755', 'uid=1000', 'gid=1000']],
+  ]) {
+    if (!required.every((option) => tmpfs.get(target)?.includes(option))) {
+      throw new Error(`Local app ${target} tmpfs is weakened`);
+    }
+  }
+  if (service.cap_add !== undefined || service.privileged === true) {
+    throw new Error('Local app adds privileges');
+  }
   if (Object.keys(service.environment ?? {}).some((key) => /password|secret/i.test(key))) {
     throw new Error('Local app receives password or secret environment');
   }
@@ -500,6 +568,7 @@ wait_for_bridge_count() {
 printf 'checking: hardening\n'
 [ -f Dockerfile ] || fail 'Dockerfile is unavailable'
 rg -q "JetBrainsMonoNerdFont-Regular.ttf" apps/client/src/theme.css || fail 'bundled font unavailable'
+verify_script_lifecycle
 verify_static_hardening
 verify_compose_models
 dc down -v --remove-orphans >/dev/null 2>&1 || true
@@ -631,7 +700,6 @@ dc exec -T -e VERIFY_MARKER="$terminal_secret" app sh -c '
   fail 'password rotation failed'
 auth_login "$replacement_password"
 pre_recreate_cookie=$auth_cookie
-pre_recreate_logs=$(dc logs app 2>&1)
 
 dc stop app >/dev/null
 dc run --rm --no-deps --entrypoint node app --input-type=module - "$second_id" <<'NODE'
@@ -646,6 +714,7 @@ document.tabs = document.tabs.map((tab) =>
 );
 await writeFile(path, JSON.stringify(document), { mode: 0o600 });
 NODE
+pre_recreate_logs=$(dc logs app 2>&1)
 dc rm -f app >/dev/null
 dc up -d --wait
 
