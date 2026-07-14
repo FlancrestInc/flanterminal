@@ -9,6 +9,13 @@ const authenticated = {
   csrfToken: 'csrf-token',
 };
 
+const setupRequired = {
+  authenticated: false as const,
+  mode: 'local' as const,
+  setupRequired: true as const,
+  username: 'operator',
+};
+
 describe('createAuthApi', () => {
   it('uses the mounted document base with included credentials and no-store', async () => {
     const fetchImpl = vi.fn(
@@ -63,6 +70,112 @@ describe('createAuthApi', () => {
     expect(new Headers(init?.headers).get('Content-Type')).toBe(
       'application/json',
     );
+  });
+
+  it('sends strict setup JSON without a CSRF token and parses the bootstrap', async () => {
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        void input;
+        void init;
+        return Response.json(authenticated);
+      },
+    );
+    const api = createAuthApi({
+      baseUrl: 'https://example.test/t/',
+      fetchImpl,
+    });
+    const controller = new AbortController();
+
+    await expect(
+      api.setup({ password: 'private-password' }, controller.signal),
+    ).resolves.toEqual(authenticated);
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(String(fetchImpl.mock.calls[0]![0])).toBe(
+      'https://example.test/t/api/auth/setup',
+    );
+    const init = fetchImpl.mock.calls[0]![1];
+    expect(init).toMatchObject({
+      cache: 'no-store',
+      credentials: 'include',
+      method: 'POST',
+      body: JSON.stringify({ password: 'private-password' }),
+      signal: controller.signal,
+    });
+    const headers = new Headers(init?.headers);
+    expect(headers.get('Content-Type')).toBe('application/json');
+    expect(headers.has('X-CSRF-Token')).toBe(false);
+  });
+
+  it('rejects invalid setup input locally without sending the password', async () => {
+    const fetchImpl = vi.fn(async () => Response.json(setupRequired));
+    const api = createAuthApi({
+      baseUrl: 'https://example.test/t/',
+      fetchImpl,
+    });
+
+    const error = await api
+      .setup({ password: 'too-short' })
+      .catch((reason: unknown) => reason);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(error).toBeInstanceOf(AuthApiError);
+    expect(String(error)).not.toContain('too-short');
+  });
+
+  it('strictly parses setup responses and bounds server and network errors', async () => {
+    const invalid = createAuthApi({
+      baseUrl: 'https://example.test/t/',
+      fetchImpl: vi.fn(async () =>
+        Response.json({ ...authenticated, privateKey: 'private-value' }),
+      ),
+    });
+    const rejected = createAuthApi({
+      baseUrl: 'https://example.test/t/',
+      fetchImpl: vi.fn(async () =>
+        Response.json({ error: 'setup_already_completed' }, { status: 409 }),
+      ),
+    });
+    const network = createAuthApi({
+      baseUrl: 'https://example.test/t/',
+      fetchImpl: vi.fn(async () => {
+        throw new Error('private network detail');
+      }),
+    });
+
+    await expect(
+      invalid.setup({ password: 'private-password' }),
+    ).rejects.toMatchObject({ name: 'AuthApiError' });
+    await expect(
+      rejected.setup({ password: 'private-password' }),
+    ).rejects.toMatchObject({
+      name: 'AuthApiError',
+      code: 'setup_already_completed',
+      status: 409,
+    });
+    const networkError = await network
+      .setup({ password: 'private-password' })
+      .catch((reason: unknown) => reason);
+    expect(String(networkError)).toBe(
+      'AuthApiError: Authentication request failed.',
+    );
+    expect(String(networkError)).not.toMatch(/private|network/i);
+  });
+
+  it('passes setup abort cancellation through unchanged', async () => {
+    const controller = new AbortController();
+    const abort = new DOMException('private cancellation detail', 'AbortError');
+    const api = createAuthApi({
+      baseUrl: 'https://example.test/t/',
+      fetchImpl: vi.fn(async (_input, init) => {
+        expect(init?.signal).toBe(controller.signal);
+        throw abort;
+      }),
+    });
+
+    await expect(
+      api.setup({ password: 'private-password' }, controller.signal),
+    ).rejects.toBe(abort);
   });
 
   it('protects refresh, logout, and password change with the in-memory CSRF token', async () => {

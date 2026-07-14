@@ -3,10 +3,12 @@ import {
   parseAuthBootstrap,
   parseLoginRequest,
   parsePasswordChangeRequest,
+  parseSetupRequest,
   type ApiErrorCode,
   type AuthBootstrap,
   type LoginRequest,
   type PasswordChangeRequest,
+  type SetupRequest,
 } from '@flanterminal/shared';
 
 const SAFE_ERROR = 'Authentication request failed.';
@@ -25,6 +27,7 @@ export class AuthApiError extends Error {
 
 export interface AuthApi {
   bootstrap(signal?: AbortSignal): Promise<AuthBootstrap>;
+  setup(input: SetupRequest, signal?: AbortSignal): Promise<AuthBootstrap>;
   login(input: LoginRequest, signal?: AbortSignal): Promise<AuthBootstrap>;
   refresh(csrfToken: string, signal?: AbortSignal): Promise<AuthBootstrap>;
   logout(csrfToken: string, signal?: AbortSignal): Promise<void>;
@@ -90,6 +93,15 @@ export function createAuthApi(options: CreateAuthApiOptions = {}): AuthApi {
 
   return {
     bootstrap: (signal) => bootstrapResponse('session', 'GET', signal),
+    async setup(input, signal) {
+      let parsed: SetupRequest;
+      try {
+        parsed = parseSetupRequest(input);
+      } catch {
+        throw new AuthApiError();
+      }
+      return await bootstrapResponse('setup', 'POST', signal, parsed);
+    },
     login: (input, signal) => {
       try {
         return bootstrapResponse(

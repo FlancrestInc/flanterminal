@@ -2,6 +2,7 @@ import type {
   AuthBootstrap,
   LoginRequest,
   PasswordChangeRequest,
+  SetupRequest,
 } from '@flanterminal/shared';
 import { createContext, useCallback, useEffect, useRef, useState } from 'react';
 
@@ -23,6 +24,14 @@ const SIGN_IN_ERROR = 'Sign-in failed.';
 const RATE_LIMIT_ERROR = 'Too many attempts. Try again later.';
 const REQUEST_ERROR = 'Unable to complete the request.';
 const PASSWORD_ERROR = 'Unable to change password.';
+const SETUP_RATE_LIMIT_ERROR = 'Too many setup attempts. Try again shortly.';
+const SETUP_PASSWORD_ERROR = 'Password could not be accepted.';
+const SETUP_RETRY_ERROR = 'Setup could not be completed. Try again.';
+const SETUP_VERIFY_ERROR = 'Setup status could not be verified. Try again.';
+const SETUP_COMPLETED_ERROR =
+  'Administrator already created. Sign in to continue.';
+const SETUP_AMBIGUOUS_COMPLETED_ERROR =
+  'Administrator created. Sign in to continue.';
 
 export type AuthStatus =
   'loading' | 'unauthenticated' | 'authenticated' | 'access-error';
@@ -45,6 +54,7 @@ export interface AuthController {
   readonly passwordError: string | null;
   readonly busy: boolean;
   readonly epoch: number;
+  readonly setup: (password: string) => Promise<void>;
   readonly login: (username: string, password: string) => Promise<void>;
   readonly retry: () => Promise<void>;
   readonly logout: () => Promise<void>;
@@ -107,14 +117,14 @@ export function useAuth(
   );
 
   const publish = useCallback(
-    (next: AuthBootstrap) => {
+    (next: AuthBootstrap, message: string | null = null) => {
       if (!mountedRef.current) return;
       cancelRefresh();
       const continuesAuthenticatedEpoch =
         bootstrapRef.current?.authenticated === true && next.authenticated;
       bootstrapRef.current = next;
       setBootstrap(next);
-      setError(null);
+      setError(message);
       if (!continuesAuthenticatedEpoch) setPasswordError(null);
       if (next.authenticated) {
         if (!continuesAuthenticatedEpoch) {
@@ -281,6 +291,51 @@ export function useAuth(
     [api, isCurrentOperation, publish, replaceOperation],
   );
 
+  const setup = useCallback(
+    async (password: string) => {
+      if (!isSetupRequired(bootstrapRef.current)) return;
+      const operation = replaceOperation();
+      setBusy(true);
+      setError(null);
+      try {
+        const input: SetupRequest = { password };
+        const next = await api.setup(input, operation.signal);
+        if (isCurrentOperation(operation)) publish(next);
+      } catch (reason) {
+        if (isAbortError(reason) || !isCurrentOperation(operation)) return;
+        if (
+          reason instanceof AuthApiError &&
+          (reason.code === 'rate_limited' || reason.code === 'invalid_request')
+        ) {
+          setError(
+            reason.code === 'rate_limited'
+              ? SETUP_RATE_LIMIT_ERROR
+              : SETUP_PASSWORD_ERROR,
+          );
+          return;
+        }
+
+        const conflict =
+          reason instanceof AuthApiError &&
+          reason.code === 'setup_already_completed';
+        try {
+          const recovered = await api.bootstrap(operation.signal);
+          if (!isCurrentOperation(operation)) return;
+          publish(recovered, setupRecoveryMessage(recovered, conflict));
+        } catch (recoveryReason) {
+          if (isAbortError(recoveryReason) || !isCurrentOperation(operation))
+            return;
+          setError(SETUP_VERIFY_ERROR);
+        }
+      } finally {
+        const isCurrent = operationRef.current === operation;
+        if (isCurrent) operationRef.current = null;
+        if (isCurrent && mountedRef.current) setBusy(false);
+      }
+    },
+    [api, isCurrentOperation, publish, replaceOperation],
+  );
+
   const logout = useCallback(async () => {
     const current = bootstrapRef.current;
     if (!current?.authenticated) return;
@@ -403,6 +458,7 @@ export function useAuth(
     passwordError,
     busy,
     epoch,
+    setup,
     login,
     retry: bootstrapSession,
     logout,
@@ -410,6 +466,25 @@ export function useAuth(
     privateFetch,
     authenticationRequired,
   };
+}
+
+function isSetupRequired(
+  bootstrap: AuthBootstrap | null,
+): bootstrap is Extract<AuthBootstrap, { setupRequired: true }> {
+  return (
+    bootstrap?.authenticated === false &&
+    'setupRequired' in bootstrap &&
+    bootstrap.setupRequired
+  );
+}
+
+function setupRecoveryMessage(
+  bootstrap: AuthBootstrap,
+  conflict: boolean,
+): string | null {
+  if (bootstrap.authenticated) return null;
+  if (isSetupRequired(bootstrap)) return SETUP_RETRY_ERROR;
+  return conflict ? SETUP_COMPLETED_ERROR : SETUP_AMBIGUOUS_COMPLETED_ERROR;
 }
 
 function requestMethod(input: RequestInfo | URL, init?: RequestInit): string {
