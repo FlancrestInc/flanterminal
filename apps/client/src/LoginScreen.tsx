@@ -1,6 +1,7 @@
 import { parseSetupRequest, type AuthBootstrap } from '@flanterminal/shared';
 import { useEffect, useRef, useState } from 'react';
 
+import { AuthBrand } from './AuthBrand.js';
 import type { AuthStatus } from './useAuth.js';
 
 export type LoginScreenProps = Readonly<{
@@ -68,6 +69,7 @@ export function LoginScreen({
           aria-labelledby="access-title"
           aria-busy={isBusy}
         >
+          <AuthBrand />
           <h1 id="access-title">Terminal access</h1>
           <p role="alert">{error ?? 'Access could not be verified.'}</p>
           <button
@@ -126,6 +128,7 @@ export function LoginScreen({
             });
           }}
         >
+          <AuthBrand />
           <h1 id="setup-title">Set up FlanTerminal</h1>
           <label htmlFor="setup-username">Username</label>
           <input
@@ -207,6 +210,7 @@ export function LoginScreen({
           );
         }}
       >
+        <AuthBrand />
         <h1 id="login-title">Sign in</h1>
         <label htmlFor="login-username">Username</label>
         <input

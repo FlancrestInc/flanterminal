@@ -30,6 +30,23 @@ function props(override: Partial<LoginScreenProps> = {}): LoginScreenProps {
 }
 
 describe('LoginScreen', () => {
+  it.each([
+    ['access error', props({ status: 'access-error', error: 'Access denied.' })],
+    ['setup', props({ bootstrap: setupRequired })],
+    ['sign in', props()],
+  ])('renders one FlanTerminal brand lockup for %s', (_state, screenProps) => {
+    const { container } = render(<LoginScreen {...screenProps} />);
+
+    expect(screen.getAllByText('FlanTerminal')).toHaveLength(1);
+    const logos = container.querySelectorAll('img.auth-brand-mark');
+    expect(logos).toHaveLength(1);
+    expect(logos[0]).toHaveAttribute('alt', '');
+    expect(logos[0]).toHaveAttribute(
+      'src',
+      `${import.meta.env.BASE_URL}flanterminal.png`,
+    );
+  });
+
   it('renders a focused password-manager-friendly administrator setup form', () => {
     render(<LoginScreen {...props({ bootstrap: setupRequired })} />);
 

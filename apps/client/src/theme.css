@@ -1153,6 +1153,23 @@ button {
   border-bottom: 1px solid #343637;
 }
 
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: #e5e3de;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.auth-brand-mark {
+  width: 40px;
+  height: 40px;
+  flex: none;
+}
+
 .login-form h1,
 .access-state h1 {
   margin: 0 0 12px;
