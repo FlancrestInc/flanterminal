@@ -264,9 +264,12 @@ describe('Terminal', () => {
     expect(disconnected.socket.sendInput).not.toHaveBeenCalled();
   });
 
-  it('copies selected text for Ctrl+C on non-macOS', () => {
+  it.each([
+    ['Windows', 'Win32'],
+    ['Linux', 'Linux x86_64'],
+  ])('copies selected text for Ctrl+C on %s', (_name, platform) => {
     const clipboardWrite = setClipboard();
-    setPlatform('Win32');
+    setPlatform(platform);
     const result = setup();
     result.terminal.selection = 'copied terminal output';
     const event = keyEvent({ ctrlKey: true });
@@ -308,7 +311,8 @@ describe('Terminal', () => {
   });
 
   it.each([
-    ['Windows/Linux', 'Win32'],
+    ['Windows', 'Win32'],
+    ['Linux', 'Linux x86_64'],
     ['macOS', 'MacIntel'],
   ])('forwards unselected Ctrl+C on %s', (_name, platform) => {
     const clipboardWrite = setClipboard();
@@ -354,6 +358,7 @@ describe('Terminal', () => {
 
       expect(() => result.terminal.key(event)).not.toThrow();
       await act(async () => Promise.resolve());
+      expect(writeText).toHaveBeenCalledWith('copied terminal output');
       expect(event.defaultPrevented).toBe(true);
       expect(result.socket.sendInput).not.toHaveBeenCalled();
     },
@@ -376,7 +381,9 @@ describe('Terminal', () => {
 
   it.each([
     ['Alt+C', 'Win32', { altKey: true }],
+    ['Ctrl+Shift+C', 'Win32', { ctrlKey: true, shiftKey: true }],
     ['Cmd+Ctrl+C', 'MacIntel', { ctrlKey: true, metaKey: true }],
+    ['Cmd+Shift+C', 'MacIntel', { metaKey: true, shiftKey: true }],
   ])('does not intercept altered shortcut %s', (_name, platform, init) => {
     const clipboardWrite = setClipboard();
     setPlatform(platform);
