@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 // @ts-expect-error Node types are intentionally excluded from the browser app.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
@@ -515,6 +515,8 @@ describe('LoginScreen', () => {
     expect(html).toContain(
       '<link rel="icon" type="image/png" href="%BASE_URL%flanterminal.png" />',
     );
+    expect(existsSync('public/flanterminal.png')).toBe(true);
+    expect(statSync('public/flanterminal.png').size).toBeGreaterThan(0);
   });
 });
 
