@@ -70,12 +70,38 @@ test('copies selected terminal text', async ({ page, context }, testInfo) => {
     .filter({ hasText: copyMarker })
     .last();
   await expect(markerRow).toHaveText(copyMarker);
-  const markerRowBox = await markerRow.boundingBox();
+  const [screenBox, markerRowBox, cellWidth] = await Promise.all([
+    activePanel(page).locator('.xterm-screen').boundingBox(),
+    markerRow.boundingBox(),
+    activePanel(page)
+      .locator('.xterm-helper-textarea')
+      .evaluate((element) =>
+        Number.parseFloat(getComputedStyle(element).width),
+      ),
+  ]);
+  expect(screenBox).not.toBeNull();
   expect(markerRowBox).not.toBeNull();
-  await page.mouse.dblclick(
-    markerRowBox!.x + 4,
-    markerRowBox!.y + markerRowBox!.height / 2,
+  expect(cellWidth).toBeGreaterThan(0);
+  const markerY = markerRowBox!.y + markerRowBox!.height / 2;
+  await page.mouse.move(screenBox!.x + cellWidth / 2, markerY);
+  await page.mouse.down();
+  await page.mouse.move(
+    screenBox!.x + cellWidth * copyMarker.length - 1,
+    markerY,
   );
+  await page.mouse.up();
+  await expect
+    .poll(() =>
+      activePanel(page)
+        .locator('.xterm-selection')
+        .evaluateAll((elements) =>
+          elements.some((element) => {
+            const selection = element.getBoundingClientRect();
+            return selection.width > 0 && selection.height > 0;
+          }),
+        ),
+    )
+    .toBe(true);
 
   await page.evaluate(() => navigator.clipboard.writeText(''));
   await page.keyboard.press('Control+C');
