@@ -47,6 +47,7 @@ const settings: WorkspaceSettings = {
 class FakeTerminal implements TerminalLike {
   cols = 80;
   rows = 24;
+  selection = '';
   readonly loadAddon = vi.fn();
   readonly open = vi.fn();
   readonly focus = vi.fn();
@@ -55,6 +56,19 @@ class FakeTerminal implements TerminalLike {
   readonly dispose = vi.fn();
   readonly dataListeners = new Set<(data: string) => void>();
   readonly bellListeners = new Set<() => void>();
+  private customKeyEventHandler:
+    | ((event: KeyboardEvent) => boolean)
+    | undefined;
+
+  hasSelection() {
+    return this.selection.length > 0;
+  }
+  getSelection() {
+    return this.selection;
+  }
+  attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
+    this.customKeyEventHandler = handler;
+  }
 
   onData(listener: (data: string) => void) {
     this.dataListeners.add(listener);
@@ -71,6 +85,55 @@ class FakeTerminal implements TerminalLike {
   input(data: string) {
     for (const listener of this.dataListeners) listener(data);
   }
+
+  key(event: KeyboardEvent) {
+    return this.customKeyEventHandler?.(event) ?? true;
+  }
+
+  forwardAcceptedControlC(event: KeyboardEvent) {
+    const accepted = this.key(event);
+    if (accepted) this.input('\x03');
+    return accepted;
+  }
+}
+
+const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(
+  navigator,
+  'clipboard',
+);
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(
+  navigator,
+  'platform',
+);
+
+function setClipboard(writeText = vi.fn(async (_text: string) => undefined)) {
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: { writeText },
+  });
+  return writeText;
+}
+
+function setPlatform(platform: string) {
+  Object.defineProperty(navigator, 'platform', {
+    configurable: true,
+    value: platform,
+  });
+}
+
+function restoreNavigatorProperty(
+  property: 'clipboard' | 'platform',
+  descriptor: PropertyDescriptor | undefined,
+) {
+  if (descriptor === undefined) {
+    delete (navigator as Record<string, unknown>)[property];
+  } else {
+    Object.defineProperty(navigator, property, descriptor);
+  }
+}
+
+function keyEvent(init: KeyboardEventInit) {
+  return new KeyboardEvent('keydown', { cancelable: true, key: 'c', ...init });
 }
 
 function setup(
@@ -149,7 +212,11 @@ function setup(
 }
 
 beforeEach(() => vi.useFakeTimers());
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  restoreNavigatorProperty('clipboard', originalClipboardDescriptor);
+  restoreNavigatorProperty('platform', originalPlatformDescriptor);
+  vi.useRealTimers();
+});
 
 describe('Terminal', () => {
   it('opens a configured real-terminal surface and loads both addons', () => {
@@ -195,6 +262,133 @@ describe('Terminal', () => {
     const disconnected = setup('reconnecting');
     act(() => disconnected.terminal.input('do not replay'));
     expect(disconnected.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('copies selected text for Ctrl+C on non-macOS', () => {
+    const clipboardWrite = setClipboard();
+    setPlatform('Win32');
+    const result = setup();
+    result.terminal.selection = 'copied terminal output';
+    const event = keyEvent({ ctrlKey: true });
+
+    const accepted = result.terminal.key(event);
+
+    expect(clipboardWrite).toHaveBeenCalledWith('copied terminal output');
+    expect(event.defaultPrevented).toBe(true);
+    expect(accepted).toBe(false);
+  });
+
+  it('copies selected text for Cmd+C on macOS', () => {
+    const clipboardWrite = setClipboard();
+    setPlatform('MacIntel');
+    const result = setup();
+    result.terminal.selection = 'copied terminal output';
+    const event = keyEvent({ metaKey: true });
+
+    const accepted = result.terminal.key(event);
+
+    expect(clipboardWrite).toHaveBeenCalledWith('copied terminal output');
+    expect(event.defaultPrevented).toBe(true);
+    expect(accepted).toBe(false);
+  });
+
+  it('passes selected Ctrl+C through on macOS', () => {
+    const clipboardWrite = setClipboard();
+    setPlatform('MacIntel');
+    const result = setup();
+    result.terminal.selection = 'copied terminal output';
+    const event = keyEvent({ ctrlKey: true });
+
+    const accepted = result.terminal.forwardAcceptedControlC(event);
+
+    expect(accepted).toBe(true);
+    expect(event.defaultPrevented).toBe(false);
+    expect(clipboardWrite).not.toHaveBeenCalled();
+    expect(result.socket.sendInput).toHaveBeenCalledWith('\x03');
+  });
+
+  it.each([
+    ['Windows/Linux', 'Win32'],
+    ['macOS', 'MacIntel'],
+  ])('forwards unselected Ctrl+C on %s', (_name, platform) => {
+    const clipboardWrite = setClipboard();
+    setPlatform(platform);
+    const result = setup();
+    const event = keyEvent({ ctrlKey: true });
+
+    const accepted = result.terminal.forwardAcceptedControlC(event);
+
+    expect(accepted).toBe(true);
+    expect(event.defaultPrevented).toBe(false);
+    expect(clipboardWrite).not.toHaveBeenCalled();
+    expect(result.socket.sendInput).toHaveBeenCalledWith('\x03');
+  });
+
+  it('cancels unselected Cmd+C on macOS without copying or terminal input', () => {
+    const clipboardWrite = setClipboard();
+    setPlatform('MacIntel');
+    const result = setup();
+    const event = keyEvent({ metaKey: true });
+
+    const accepted = result.terminal.key(event);
+
+    expect(accepted).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+    expect(clipboardWrite).not.toHaveBeenCalled();
+    expect(result.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['rejects', vi.fn(async () => Promise.reject(new Error('denied')))],
+    ['throws synchronously', vi.fn(() => {
+      throw new Error('denied');
+    })],
+  ])(
+    'cancels selected copy when clipboard write %s',
+    async (_outcome, writeText) => {
+      setClipboard(writeText);
+      setPlatform('Win32');
+      const result = setup();
+      result.terminal.selection = 'copied terminal output';
+      const event = keyEvent({ ctrlKey: true });
+
+      expect(() => result.terminal.key(event)).not.toThrow();
+      await act(async () => Promise.resolve());
+      expect(event.defaultPrevented).toBe(true);
+      expect(result.socket.sendInput).not.toHaveBeenCalled();
+    },
+  );
+
+  it('cancels selected copy when the clipboard is unavailable', () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    setPlatform('Win32');
+    const result = setup();
+    result.terminal.selection = 'copied terminal output';
+    const event = keyEvent({ ctrlKey: true });
+
+    expect(() => result.terminal.key(event)).not.toThrow();
+    expect(event.defaultPrevented).toBe(true);
+    expect(result.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Alt+C', 'Win32', { altKey: true }],
+    ['Cmd+Ctrl+C', 'MacIntel', { ctrlKey: true, metaKey: true }],
+  ])('does not intercept altered shortcut %s', (_name, platform, init) => {
+    const clipboardWrite = setClipboard();
+    setPlatform(platform);
+    const result = setup();
+    result.terminal.selection = 'copied terminal output';
+    const event = keyEvent(init);
+
+    const accepted = result.terminal.key(event);
+
+    expect(accepted).toBe(true);
+    expect(event.defaultPrevented).toBe(false);
+    expect(clipboardWrite).not.toHaveBeenCalled();
   });
 
   it('fits after layout and observer changes, then debounces distinct dimensions', () => {
