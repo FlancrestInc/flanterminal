@@ -31,7 +31,10 @@ function props(override: Partial<LoginScreenProps> = {}): LoginScreenProps {
 
 describe('LoginScreen', () => {
   it.each([
-    ['access error', props({ status: 'access-error', error: 'Access denied.' })],
+    [
+      'access error',
+      props({ status: 'access-error', error: 'Access denied.' }),
+    ],
     ['setup', props({ bootstrap: setupRequired })],
     ['sign in', props()],
   ])('renders one FlanTerminal brand lockup for %s', (_state, screenProps) => {
