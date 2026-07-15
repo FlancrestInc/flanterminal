@@ -126,7 +126,7 @@ function restoreNavigatorProperty(
   descriptor: PropertyDescriptor | undefined,
 ) {
   if (descriptor === undefined) {
-    delete (navigator as Record<string, unknown>)[property];
+    delete (navigator as unknown as Record<string, unknown>)[property];
   } else {
     Object.defineProperty(navigator, property, descriptor);
   }

@@ -35,6 +35,11 @@ export interface TerminalLike extends DisposableLike {
   readonly rows: number;
   loadAddon(addon: TerminalAddonLike): void;
   open(element: HTMLElement): void;
+  hasSelection(): boolean;
+  getSelection(): string;
+  attachCustomKeyEventHandler(
+    handler: (event: KeyboardEvent) => boolean,
+  ): void;
   focus(): void;
   clear(): void;
   write(data: string): void;
@@ -79,6 +84,10 @@ const defaultDependencies: TerminalDependencies = {
       },
       loadAddon: (addon) => terminal.loadAddon(addon as ITerminalAddon),
       open: (element) => terminal.open(element),
+      hasSelection: () => terminal.hasSelection(),
+      getSelection: () => terminal.getSelection(),
+      attachCustomKeyEventHandler: (handler) =>
+        terminal.attachCustomKeyEventHandler(handler),
       focus: () => terminal.focus(),
       clear: () => terminal.clear(),
       write: (data) => terminal.write(data),
@@ -124,6 +133,14 @@ export interface TerminalHandle {
 const BELL_URL = new URL('./assets/sounds/terminal-bell.wav', import.meta.url)
   .href;
 const SOUND_BELL_MIN_INTERVAL_MS = 200;
+
+function copyToClipboard(text: string) {
+  try {
+    void navigator.clipboard?.writeText(text).catch(() => undefined);
+  } catch {
+    // Clipboard access may be unavailable or denied without affecting xterm.
+  }
+}
 
 export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
   function Terminal(
@@ -179,6 +196,30 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
       terminal.open(host);
+      terminal.attachCustomKeyEventHandler((event) => {
+        if (
+          event.key.toLowerCase() !== 'c' ||
+          event.altKey ||
+          event.shiftKey ||
+          (event.metaKey && event.ctrlKey)
+        ) {
+          return true;
+        }
+
+        const isMac = navigator.platform.toLowerCase().includes('mac');
+        const isCopyShortcut = isMac ? event.metaKey : event.ctrlKey;
+        if (!isCopyShortcut) return true;
+
+        if (!terminal.hasSelection()) {
+          if (!isMac) return true;
+          event.preventDefault();
+          return false;
+        }
+
+        event.preventDefault();
+        copyToClipboard(terminal.getSelection());
+        return false;
+      });
       focusTerminalRef.current = () => terminal.focus();
       clearTerminalRef.current = () => terminal.clear();
 
