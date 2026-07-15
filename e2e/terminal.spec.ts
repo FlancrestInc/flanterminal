@@ -29,10 +29,52 @@ async function expectTerminal(page: Page, text: string): Promise<void> {
   await expect.poll(() => terminalText(page)).toContain(text);
 }
 
+async function wheelUntilVisible(
+  page: Page,
+  text: string,
+  deltaY: number,
+): Promise<void> {
+  const screen = activePanel(page).locator('.xterm-screen');
+  const viewport = activePanel(page).locator('.xterm-viewport');
+  await expect(viewport).toBeVisible();
+  await screen.hover();
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.wheel(0, deltaY);
+        return terminalText(page);
+      },
+      { intervals: [50, 100, 200], timeout: 10_000 },
+    )
+    .toContain(text);
+}
+
 async function sessionAction(page: Page, name: string): Promise<void> {
   await page.getByRole('button', { name: 'Session actions' }).click();
   await page.getByRole('menuitem', { name }).click();
 }
+
+test('native xterm scrolling exposes managed-session history', async ({
+  page,
+}) => {
+  await openAuthenticatedWorkspace(page);
+  await waitConnected(page);
+
+  const earlyMarker = `SCROLLBACK_EARLY_${marker}`;
+  const finalMarker = `SCROLLBACK_FINAL_${marker}`;
+  await sendCommand(
+    page,
+    `printf '${earlyMarker}\\n'; i=1; while [ $i -le 200 ]; do printf 'SCROLLBACK_LINE_%03d\\n' "$i"; i=$((i + 1)); done; printf '${finalMarker}\\n'`,
+  );
+  await expectTerminal(page, finalMarker);
+
+  await wheelUntilVisible(page, earlyMarker, -120);
+  await wheelUntilVisible(page, finalMarker, 120);
+
+  const afterMarker = `SCROLLBACK_AFTER_${marker}`;
+  await sendCommand(page, `printf '${afterMarker}\\n'`);
+  await wheelUntilVisible(page, afterMarker, 120);
+});
 
 test('multiple terminal tabs preserve independent shells and lifecycle state', async ({
   page,

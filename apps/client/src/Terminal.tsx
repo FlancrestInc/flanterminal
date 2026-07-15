@@ -38,8 +38,6 @@ export interface TerminalLike extends DisposableLike {
   focus(): void;
   clear(): void;
   write(data: string): void;
-  scrollLines(amount: number): void;
-  attachCustomWheelEventHandler(handler: (event: WheelEvent) => boolean): void;
   onData(listener: (data: string) => void): DisposableLike;
   onBell(listener: () => void): DisposableLike;
 }
@@ -84,9 +82,6 @@ const defaultDependencies: TerminalDependencies = {
       focus: () => terminal.focus(),
       clear: () => terminal.clear(),
       write: (data) => terminal.write(data),
-      scrollLines: (amount) => terminal.scrollLines(amount),
-      attachCustomWheelEventHandler: (handler) =>
-        terminal.attachCustomWheelEventHandler(handler),
       onData: (listener) => terminal.onData(listener),
       onBell: (listener) => terminal.onBell(listener),
       dispose: () => terminal.dispose(),
@@ -129,7 +124,6 @@ export interface TerminalHandle {
 const BELL_URL = new URL('./assets/sounds/terminal-bell.wav', import.meta.url)
   .href;
 const SOUND_BELL_MIN_INTERVAL_MS = 200;
-const PIXELS_PER_SCROLL_LINE = 40;
 
 export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
   function Terminal(
@@ -185,31 +179,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
       terminal.open(host);
-      let pixelScrollRemainder = 0;
-      terminal.attachCustomWheelEventHandler((event) => {
-        if (
-          event.ctrlKey ||
-          event.metaKey ||
-          event.shiftKey ||
-          Math.abs(event.deltaX) >= Math.abs(event.deltaY)
-        ) {
-          return true;
-        }
-
-        let lines: number;
-        if (event.deltaMode === 1) {
-          lines = Math.round(event.deltaY);
-        } else if (event.deltaMode === 2) {
-          lines = Math.round(event.deltaY) * terminal.rows;
-        } else {
-          pixelScrollRemainder += event.deltaY;
-          lines = Math.trunc(pixelScrollRemainder / PIXELS_PER_SCROLL_LINE);
-          pixelScrollRemainder -= lines * PIXELS_PER_SCROLL_LINE;
-        }
-        if (lines !== 0) terminal.scrollLines(lines);
-        event.preventDefault();
-        return false;
-      });
       focusTerminalRef.current = () => terminal.focus();
       clearTerminalRef.current = () => terminal.clear();
 

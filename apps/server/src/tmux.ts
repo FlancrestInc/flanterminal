@@ -88,6 +88,7 @@ export class TmuxSessionPreparer implements SessionPreparer {
     if (settings === undefined) throw new Error('Invalid runtime settings');
     const buildName = tmuxBuildSessionName(this.randomUUID);
     const windowTarget = `${buildName}:`;
+    const initialWindowTarget = `${buildName}:0`;
     if (!(await this.exists(sessionId))) {
       try {
         const creation = await this.run([
@@ -115,6 +116,12 @@ export class TmuxSessionPreparer implements SessionPreparer {
           buildName,
           'default-command',
           '',
+          ';',
+          'set-window-option',
+          '-t',
+          initialWindowTarget,
+          'alternate-screen',
+          'off',
           ';',
           'split-window',
           '-d',
