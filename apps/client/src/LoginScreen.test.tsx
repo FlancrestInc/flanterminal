@@ -37,7 +37,9 @@ describe('LoginScreen', () => {
   ])('renders one FlanTerminal brand lockup for %s', (_state, screenProps) => {
     const { container } = render(<LoginScreen {...screenProps} />);
 
-    expect(screen.getAllByText('FlanTerminal')).toHaveLength(1);
+    const brands = screen.getAllByText('FlanTerminal');
+    expect(brands).toHaveLength(1);
+    expect(brands[0]).toBeVisible();
     const logos = container.querySelectorAll('img.auth-brand-mark');
     expect(logos).toHaveLength(1);
     expect(logos[0]).toHaveAttribute('alt', '');
