@@ -54,6 +54,35 @@ async function sessionAction(page: Page, name: string): Promise<void> {
   await page.getByRole('menuitem', { name }).click();
 }
 
+test('copies selected terminal text', async ({ page, context }, testInfo) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
+    origin: new URL(testInfo.project.use.baseURL as string).origin,
+  });
+  await openAuthenticatedWorkspace(page);
+  await waitConnected(page);
+
+  const copyMarker = `COPYSELECTED${Date.now()}`;
+  await sendCommand(page, `printf '${copyMarker}\\n'`);
+  await expectTerminal(page, copyMarker);
+
+  const markerRow = activePanel(page)
+    .locator('.xterm-rows > div')
+    .filter({ hasText: copyMarker })
+    .last();
+  await expect(markerRow).toHaveText(copyMarker);
+  const markerRowBox = await markerRow.boundingBox();
+  expect(markerRowBox).not.toBeNull();
+  await markerRow.dblclick({
+    position: { x: 4, y: markerRowBox!.height / 2 },
+  });
+
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  await page.keyboard.press('Control+C');
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(copyMarker);
+});
+
 test('native xterm scrolling exposes managed-session history', async ({
   page,
 }) => {
