@@ -509,6 +509,13 @@ describe('LoginScreen', () => {
     expect(readonlyRule).toContain('color: var(--login-readonly-fg)');
     expect(readonlyRule).not.toContain('--ui-raised');
   });
+
+  it('declares the Vite-served PNG favicon', () => {
+    const html = readFileSync('index.html', 'utf8');
+    expect(html).toContain(
+      '<link rel="icon" type="image/png" href="%BASE_URL%flanterminal.png" />',
+    );
+  });
 });
 
 function cssHexToken(block: string | undefined, token: string): string {
