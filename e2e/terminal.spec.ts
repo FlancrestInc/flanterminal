@@ -72,9 +72,10 @@ test('copies selected terminal text', async ({ page, context }, testInfo) => {
   await expect(markerRow).toHaveText(copyMarker);
   const markerRowBox = await markerRow.boundingBox();
   expect(markerRowBox).not.toBeNull();
-  await markerRow.dblclick({
-    position: { x: 4, y: markerRowBox!.height / 2 },
-  });
+  await page.mouse.dblclick(
+    markerRowBox!.x + 4,
+    markerRowBox!.y + markerRowBox!.height / 2,
+  );
 
   await page.evaluate(() => navigator.clipboard.writeText(''));
   await page.keyboard.press('Control+C');
