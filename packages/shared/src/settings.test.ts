@@ -217,20 +217,23 @@ describe('workspace settings contracts', () => {
     ['custom theme', { theme: 'custom' }],
     ['new preset', { theme: 'midnight-electric' }],
     ['new font', { fontFamily: 'dejavu-sans-mono' }],
-  ] as const)('rejects a palette-less document using a %s', (_name, changes) => {
-    const paletteLessSettings: Record<string, unknown> = {
-      ...settings,
-      ...changes,
-    };
-    delete paletteLessSettings.customTerminalPalette;
+  ] as const)(
+    'rejects a palette-less document using a %s',
+    (_name, changes) => {
+      const paletteLessSettings: Record<string, unknown> = {
+        ...settings,
+        ...changes,
+      };
+      delete paletteLessSettings.customTerminalPalette;
 
-    expect(
-      isLegacyWorkspaceSettingsMissingCustomTerminalPalette(
-        paletteLessSettings,
-      ),
-    ).toBe(false);
-    expect(() => parseWorkspaceSettings(paletteLessSettings)).toThrow();
-  });
+      expect(
+        isLegacyWorkspaceSettingsMissingCustomTerminalPalette(
+          paletteLessSettings,
+        ),
+      ).toBe(false);
+      expect(() => parseWorkspaceSettings(paletteLessSettings)).toThrow();
+    },
+  );
 
   it('requires a complete palette when custom is selected', () => {
     const incompletePalette: Record<string, unknown> = {
