@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isLegacyWorkspaceSettingsMissingCustomTerminalPalette,
   MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
   parseWorkspaceSettings,
   parseWorkspaceSettingsMutation,
@@ -200,12 +201,35 @@ describe('workspace settings contracts', () => {
     const legacySettings: Record<string, unknown> = { ...settings };
     delete legacySettings.customTerminalPalette;
 
+    expect(
+      isLegacyWorkspaceSettingsMissingCustomTerminalPalette(legacySettings),
+    ).toBe(true);
+
     const parsed = parseWorkspaceSettings(legacySettings);
 
     expect(parsed.customTerminalPalette).toEqual(
       MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
     );
     expect(Object.isFrozen(parsed.customTerminalPalette)).toBe(true);
+  });
+
+  it.each([
+    ['custom theme', { theme: 'custom' }],
+    ['new preset', { theme: 'midnight-electric' }],
+    ['new font', { fontFamily: 'dejavu-sans-mono' }],
+  ] as const)('rejects a palette-less document using a %s', (_name, changes) => {
+    const paletteLessSettings: Record<string, unknown> = {
+      ...settings,
+      ...changes,
+    };
+    delete paletteLessSettings.customTerminalPalette;
+
+    expect(
+      isLegacyWorkspaceSettingsMissingCustomTerminalPalette(
+        paletteLessSettings,
+      ),
+    ).toBe(false);
+    expect(() => parseWorkspaceSettings(paletteLessSettings)).toThrow();
   });
 
   it('requires a complete palette when custom is selected', () => {

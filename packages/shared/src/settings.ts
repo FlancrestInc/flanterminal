@@ -136,6 +136,15 @@ export const workspaceSettingsSchema = z
   })
   .strict();
 
+const legacyWorkspaceSettingsMissingCustomTerminalPaletteSchema =
+  workspaceSettingsSchema
+    .omit({ customTerminalPalette: true })
+    .extend({
+      fontFamily: z.enum(['jetbrains-mono-nerd', 'system-monospace']),
+      theme: z.enum(['dark', 'light', 'ubuntu']),
+    })
+    .strict();
+
 export type WorkspaceSettings = Readonly<
   z.infer<typeof workspaceSettingsSchema>
 >;
@@ -296,12 +305,11 @@ export function parseWorkspaceSettingsResponse(
 export function isLegacyWorkspaceSettingsMissingCustomTerminalPalette(
   value: unknown,
 ): value is Record<string, unknown> {
-  if (!isRecord(value) || 'customTerminalPalette' in value) return false;
-
-  return workspaceSettingsSchema.safeParse({
-    ...value,
-    customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
-  }).success;
+  return (
+    isRecord(value) &&
+    legacyWorkspaceSettingsMissingCustomTerminalPaletteSchema.safeParse(value)
+      .success
+  );
 }
 
 function normalizeLegacyPalette(value: unknown): unknown {
