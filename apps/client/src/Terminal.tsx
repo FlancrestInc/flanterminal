@@ -40,11 +40,14 @@ export interface FitAddonLike extends TerminalAddonLike {
 export interface TerminalLike extends DisposableLike {
   readonly cols: number;
   readonly rows: number;
+  readonly hasScrollback: boolean;
   loadAddon(addon: TerminalAddonLike): void;
   open(element: HTMLElement): void;
   hasSelection(): boolean;
   getSelection(): string;
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void;
+  attachCustomWheelEventHandler(handler: (event: WheelEvent) => boolean): void;
+  scrollLines(amount: number): void;
   focus(): void;
   clear(): void;
   write(data: string): void;
@@ -90,12 +93,18 @@ const defaultDependencies: TerminalDependencies = {
       get rows() {
         return terminal.rows;
       },
+      get hasScrollback() {
+        return terminal.buffer.active.baseY > 0;
+      },
       loadAddon: (addon) => terminal.loadAddon(addon as ITerminalAddon),
       open: (element) => terminal.open(element),
       hasSelection: () => terminal.hasSelection(),
       getSelection: () => terminal.getSelection(),
       attachCustomKeyEventHandler: (handler) =>
         terminal.attachCustomKeyEventHandler(handler),
+      attachCustomWheelEventHandler: (handler) =>
+        terminal.attachCustomWheelEventHandler(handler),
+      scrollLines: (amount) => terminal.scrollLines(amount),
       focus: () => terminal.focus(),
       clear: () => terminal.clear(),
       write: (data) => terminal.write(data),
@@ -238,6 +247,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         fontSize: settings.fontSize,
         letterSpacing: settings.letterSpacing,
         lineHeight: settings.lineHeight,
+        macOptionClickForcesSelection: true,
         rightClickSelectsWord: true,
         scrollback: settings.scrollback,
         theme: terminalTheme,
@@ -246,7 +256,88 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       const webLinksAddon = dependencies.webLinksAddonFactory();
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
+      const forceOrdinarySelection = (event: MouseEvent) => {
+        if (
+          event.button !== 0 ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          return;
+        }
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const screen = target.closest('.xterm-screen');
+        if (screen === null || !host.contains(screen)) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const isMac = navigator.platform.startsWith('Mac');
+        target.dispatchEvent(
+          new MouseEvent(event.type, {
+            bubbles: true,
+            cancelable: true,
+            detail: event.detail,
+            screenX: event.screenX,
+            screenY: event.screenY,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            button: event.button,
+            buttons: event.buttons,
+            relatedTarget: event.relatedTarget,
+            altKey: isMac,
+            shiftKey: !isMac,
+          }),
+        );
+      };
+      host.addEventListener('mousedown', forceOrdinarySelection, true);
       terminal.open(host);
+      let wheelLineRemainder = 0;
+      terminal.attachCustomWheelEventHandler((event) => {
+        if (
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          event.altKey ||
+          event.deltaY === 0 ||
+          Math.abs(event.deltaX) >= Math.abs(event.deltaY) ||
+          !terminal.hasScrollback
+        ) {
+          wheelLineRemainder = 0;
+          return true;
+        }
+
+        let deltaLines: number;
+        if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+          deltaLines = event.deltaY;
+        } else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+          deltaLines = event.deltaY * Math.max(terminal.rows - 1, 1);
+        } else {
+          const renderedRowHeight = host
+            .querySelector<HTMLElement>('.xterm-rows > div')
+            ?.getBoundingClientRect().height;
+          const rowHeight =
+            renderedRowHeight !== undefined &&
+            Number.isFinite(renderedRowHeight) &&
+            renderedRowHeight > 0
+              ? renderedRowHeight
+              : settings.fontSize * settings.lineHeight;
+          deltaLines = event.deltaY / rowHeight;
+        }
+
+        if (
+          wheelLineRemainder !== 0 &&
+          Math.sign(deltaLines) !== Math.sign(wheelLineRemainder)
+        ) {
+          wheelLineRemainder = 0;
+        }
+        wheelLineRemainder += deltaLines;
+        const wholeLines = Math.trunc(wheelLineRemainder);
+        wheelLineRemainder -= wholeLines;
+        if (wholeLines !== 0) terminal.scrollLines(wholeLines);
+        event.preventDefault();
+        return false;
+      });
       terminal.attachCustomKeyEventHandler((event) => {
         if (!isCopyShortcut(event)) return true;
         if (!terminal.hasSelection()) {
@@ -335,6 +426,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       });
 
       return () => {
+        host.removeEventListener('mousedown', forceOrdinarySelection, true);
         observer.disconnect();
         cancelInitialFit();
         cancelResize();

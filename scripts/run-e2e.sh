@@ -19,12 +19,16 @@ run_variant() {
   name=$1
   app_base=$2
   workspace_path=$3
+  shift 3
   printf 'running E2E variant: %s\n' "$name"
   docker compose -p "$project" -f "$e2e_compose" down -v --remove-orphans \
     >/dev/null 2>&1 || true
   E2E_APP_BASE_PATH=$app_base E2E_WORKSPACE_PATH=$workspace_path \
     docker compose -p "$project" -f "$e2e_compose" up --no-build --force-recreate \
-      --abort-on-container-exit --exit-code-from e2e
+      --wait -d app
+  E2E_APP_BASE_PATH=$app_base E2E_WORKSPACE_PATH=$workspace_path \
+    docker compose -p "$project" -f "$e2e_compose" run --rm e2e \
+      npm run test:e2e:run -- "$@"
 }
 
 case $mode in
@@ -42,8 +46,8 @@ if [ "$mode" = all ] || [ "$mode" = local ]; then
   export E2E_LOCAL_PASSWORD
   e2e_compose=docker-compose.e2e.yml
   docker compose -p "$project" -f "$e2e_compose" build
-  run_variant local-root / /
-  run_variant local-base-path /terminal /terminal/
+  run_variant local-root / / "$@"
+  run_variant local-base-path /terminal /terminal/ "$@"
   docker compose -p "$project" -f "$e2e_compose" down -v --remove-orphans \
     >/dev/null 2>&1 || true
 fi
@@ -77,6 +81,6 @@ if [ "$mode" = all ] || [ "$mode" = cloudflare ]; then
   chmod 0600 "$temporary_dir/cloudflare-ca.key" "$E2E_CLOUDFLARE_KEY_FILE"
   e2e_compose=docker-compose.cloudflare-e2e.yml
   docker compose -p "$project" -f "$e2e_compose" build
-  run_variant cloudflare-root / /
-  run_variant cloudflare-base-path /terminal /terminal/
+  run_variant cloudflare-root / / "$@"
+  run_variant cloudflare-base-path /terminal /terminal/ "$@"
 fi

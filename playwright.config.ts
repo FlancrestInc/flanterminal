@@ -13,11 +13,19 @@ export default defineConfig({
     {
       name: 'first-run-auth',
       testMatch: /first-run-auth\.setup\.ts/u,
+      use: { browserName: 'chromium' },
     },
     {
-      name: 'workflows',
+      name: 'workflows-chromium',
       testIgnore: /first-run-auth\.setup\.ts/u,
       dependencies: ['first-run-auth'],
+      use: { browserName: 'chromium' },
+    },
+    {
+      name: 'workflows-firefox',
+      testIgnore: /first-run-auth\.setup\.ts/u,
+      dependencies: ['first-run-auth'],
+      use: { browserName: 'firefox' },
     },
   ],
   expect: { timeout: 15_000 },

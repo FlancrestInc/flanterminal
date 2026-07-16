@@ -158,7 +158,7 @@ export class TmuxSessionPreparer implements SessionPreparer {
       ]);
       if (alternateScreen.exitCode !== 0) throw new Error();
 
-      const mouse = await this.run(['set-option', '-t', name, 'mouse', 'off']);
+      const mouse = await this.run(['set-option', '-t', name, 'mouse', 'on']);
       if (mouse.exitCode !== 0) throw new Error();
     } catch {
       throw new Error('Tmux command failed');
