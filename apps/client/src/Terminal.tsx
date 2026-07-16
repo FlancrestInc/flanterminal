@@ -165,6 +165,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
     const syncResizeRef = useRef<(force: boolean) => void>(() => undefined);
     const cancelResizeRef = useRef<() => void>(() => undefined);
     const { sendInput, sendResize, subscribeOutput } = socket;
+    const terminalTheme = terminalThemeFor(settings);
 
     useImperativeHandle(
       ref,
@@ -200,7 +201,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         lineHeight: settings.lineHeight,
         rightClickSelectsWord: true,
         scrollback: settings.scrollback,
-        theme: terminalThemeFor(settings),
+        theme: terminalTheme,
       });
       const fitAddon = dependencies.fitAddonFactory();
       const webLinksAddon = dependencies.webLinksAddonFactory();
@@ -318,7 +319,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       config.resizeDebounceMs,
       dependencies,
       settings.bellBehavior,
-      settings.customTerminalPalette,
       settings.cursorBlink,
       settings.cursorStyle,
       settings.fontFamily,
@@ -326,10 +326,10 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       settings.letterSpacing,
       settings.lineHeight,
       settings.scrollback,
-      settings.theme,
       sendInput,
       sendResize,
       subscribeOutput,
+      terminalTheme,
     ]);
 
     return (
