@@ -517,6 +517,9 @@ describe('LoginScreen', () => {
       css.match(/:root\s*{([^}]*)}/s)?.[1],
       css.match(/:root\[data-theme='light'\]\s*{([^}]*)}/s)?.[1],
       css.match(/:root\[data-theme='ubuntu'\]\s*{([^}]*)}/s)?.[1],
+      css.match(
+        /:root\[data-theme='midnight-electric'\],[\s\S]*?:root\[data-theme='custom'\]\s*\{([^}]*)}/s,
+      )?.[1],
     ];
     const readonlyRule = css.match(
       /\.login-form input\[readonly\]\s*{([^}]*)}/s,
@@ -530,6 +533,13 @@ describe('LoginScreen', () => {
     expect(readonlyRule).toContain('background: var(--login-readonly-bg)');
     expect(readonlyRule).toContain('color: var(--login-readonly-fg)');
     expect(readonlyRule).not.toContain('--ui-raised');
+  });
+
+  it('uses Midnight Electric UI tokens for every new dark terminal preset', () => {
+    const css = readFileSync('src/theme.css', 'utf8');
+    expect(css).toMatch(
+      /:root\[data-theme='midnight-electric'\],[\s\S]*?:root\[data-theme='custom'\]\s*\{/u,
+    );
   });
 
   it('declares the Vite-served PNG favicon', () => {

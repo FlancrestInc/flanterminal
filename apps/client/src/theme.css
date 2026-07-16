@@ -96,6 +96,33 @@
   color-scheme: dark;
 }
 
+:root[data-theme='midnight-electric'],
+:root[data-theme='aurora-night'],
+:root[data-theme='carbon-violet'],
+:root[data-theme='custom'] {
+  --ui-canvas: #101827;
+  --ui-surface: #17243a;
+  --ui-raised: #223452;
+  --ui-border: #3b5480;
+  --ui-text: #dce8ff;
+  --ui-muted: #a9bad6;
+  --ui-accent: #82b1ff;
+  --ui-danger: #ff7b8b;
+  --ui-danger-bg: #a63449;
+  --ui-danger-text: #ffffff;
+  --ui-danger-hover: #8e293d;
+  --ui-danger-border: #ff9eaa;
+  --ui-danger-focus: #ff9eaa;
+  --ui-error-text: #ff9eaa;
+  --ui-positive: #74d99f;
+  --ui-positive-bg: #173b35;
+  --ui-warning: #f6cb6c;
+  --ui-code-bg: #0d1421;
+  --login-readonly-bg: #202223;
+  --login-readonly-fg: #c7c5bf;
+  color-scheme: dark;
+}
+
 * {
   box-sizing: border-box;
 }
