@@ -76,6 +76,56 @@ test('native xterm scrolling exposes managed-session history', async ({
   await wheelUntilVisible(page, afterMarker, 120);
 });
 
+test('copies selected terminal text', async ({ page }) => {
+  await openAuthenticatedWorkspace(page);
+  await waitConnected(page);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
+    origin: new URL(page.url()).origin,
+  });
+
+  const selectionMarker = `TERMINAL_SELECTION_${marker}`;
+  await sendCommand(page, `printf '${selectionMarker}\\n'`);
+
+  const screen = activePanel(page).locator('.xterm-screen');
+  const markerRow = activePanel(page)
+    .locator('.xterm-rows > div')
+    .filter({ hasText: new RegExp(`^${selectionMarker}$`) });
+  await expect(markerRow).toHaveCount(1);
+  await expect(markerRow).toBeVisible();
+  const screenBox = await screen.boundingBox();
+  const markerRowBox = await markerRow.boundingBox();
+  expect(screenBox).not.toBeNull();
+  expect(markerRowBox).not.toBeNull();
+  if (screenBox === null || markerRowBox === null) {
+    throw new Error('Terminal selection target is not visible');
+  }
+
+  const rowCenter = markerRowBox.y + markerRowBox.height / 2;
+  await page.mouse.move(screenBox.x + 2, rowCenter);
+  await page.mouse.down();
+  await page.mouse.move(screenBox.x + screenBox.width - 2, rowCenter, {
+    steps: 8,
+  });
+  await page.mouse.up();
+
+  await expect
+    .poll(() =>
+      activePanel(page)
+        .locator('.xterm-selection > div')
+        .evaluateAll((rectangles) =>
+          rectangles.some((rectangle) => {
+            const bounds = rectangle.getBoundingClientRect();
+            return bounds.width > 0 && bounds.height > 0;
+          }),
+        ),
+    )
+    .toBe(true);
+  await page.keyboard.press('Control+C');
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(selectionMarker);
+});
+
 test('multiple terminal tabs preserve independent shells and lifecycle state', async ({
   page,
 }, testInfo) => {

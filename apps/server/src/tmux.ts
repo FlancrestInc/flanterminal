@@ -123,12 +123,6 @@ export class TmuxSessionPreparer implements SessionPreparer {
           'alternate-screen',
           'off',
           ';',
-          'set-option',
-          '-t',
-          buildName,
-          'mouse',
-          'on',
-          ';',
           'split-window',
           '-d',
           '-t',
@@ -152,6 +146,13 @@ export class TmuxSessionPreparer implements SessionPreparer {
         }
         throw new Error('Tmux command failed');
       }
+    }
+
+    try {
+      const mouse = await this.run(['set-option', '-t', name, 'mouse', 'off']);
+      if (mouse.exitCode !== 0) throw new Error();
+    } catch {
+      throw new Error('Tmux command failed');
     }
 
     return this.attachSpec(sessionId, settings);

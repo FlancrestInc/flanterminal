@@ -38,6 +38,9 @@ export interface TerminalLike extends DisposableLike {
   focus(): void;
   clear(): void;
   write(data: string): void;
+  hasSelection(): boolean;
+  getSelection(): string;
+  attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void;
   onData(listener: (data: string) => void): DisposableLike;
   onBell(listener: () => void): DisposableLike;
 }
@@ -82,6 +85,10 @@ const defaultDependencies: TerminalDependencies = {
       focus: () => terminal.focus(),
       clear: () => terminal.clear(),
       write: (data) => terminal.write(data),
+      hasSelection: () => terminal.hasSelection(),
+      getSelection: () => terminal.getSelection(),
+      attachCustomKeyEventHandler: (handler) =>
+        terminal.attachCustomKeyEventHandler(handler),
       onData: (listener) => terminal.onData(listener),
       onBell: (listener) => terminal.onBell(listener),
       dispose: () => terminal.dispose(),
@@ -124,6 +131,27 @@ export interface TerminalHandle {
 const BELL_URL = new URL('./assets/sounds/terminal-bell.wav', import.meta.url)
   .href;
 const SOUND_BELL_MIN_INTERVAL_MS = 200;
+
+function isSelectedCopyShortcut(event: KeyboardEvent) {
+  if (
+    event.key.toLowerCase() !== 'c' ||
+    event.altKey ||
+    event.shiftKey ||
+    (event.ctrlKey && event.metaKey)
+  ) {
+    return false;
+  }
+  const isMac = navigator.platform.startsWith('Mac');
+  return isMac ? event.metaKey : event.ctrlKey;
+}
+
+function copySelection(text: string) {
+  try {
+    void navigator.clipboard?.writeText(text)?.catch(() => undefined);
+  } catch {
+    // Clipboard permissions and browser support must not affect terminal input.
+  }
+}
 
 export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
   function Terminal(
@@ -179,6 +207,14 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
       terminal.open(host);
+      terminal.attachCustomKeyEventHandler((event) => {
+        if (!terminal.hasSelection() || !isSelectedCopyShortcut(event)) {
+          return true;
+        }
+        event.preventDefault();
+        copySelection(terminal.getSelection());
+        return false;
+      });
       focusTerminalRef.current = () => terminal.focus();
       clearTerminalRef.current = () => terminal.clear();
 
@@ -305,6 +341,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         onFocus={(event) => {
           if (event.target === event.currentTarget) focusTerminalRef.current();
         }}
+        onContextMenu={(event) => event.preventDefault()}
       />
     );
   },

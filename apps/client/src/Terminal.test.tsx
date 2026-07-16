@@ -47,6 +47,7 @@ const settings: WorkspaceSettings = {
 class FakeTerminal implements TerminalLike {
   cols = 80;
   rows = 24;
+  selection = '';
   readonly loadAddon = vi.fn();
   readonly open = vi.fn();
   readonly focus = vi.fn();
@@ -55,6 +56,7 @@ class FakeTerminal implements TerminalLike {
   readonly dispose = vi.fn();
   readonly dataListeners = new Set<(data: string) => void>();
   readonly bellListeners = new Set<() => void>();
+  keyHandler: ((event: KeyboardEvent) => boolean) | undefined;
 
   onData(listener: (data: string) => void) {
     this.dataListeners.add(listener);
@@ -64,6 +66,15 @@ class FakeTerminal implements TerminalLike {
     this.bellListeners.add(listener);
     return { dispose: () => this.bellListeners.delete(listener) };
   }
+  hasSelection() {
+    return this.selection.length > 0;
+  }
+  getSelection() {
+    return this.selection;
+  }
+  attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
+    this.keyHandler = handler;
+  }
   bell() {
     for (const listener of this.bellListeners) listener();
   }
@@ -71,6 +82,30 @@ class FakeTerminal implements TerminalLike {
   input(data: string) {
     for (const listener of this.dataListeners) listener(data);
   }
+  key(event: KeyboardEvent) {
+    return this.keyHandler?.(event) ?? true;
+  }
+  controlC(event: KeyboardEvent) {
+    const accepted = this.key(event);
+    if (accepted) this.input('\x03');
+    return accepted;
+  }
+}
+
+function keyEvent(modifiers: KeyboardEventInit = {}) {
+  return new KeyboardEvent('keydown', {
+    key: 'c',
+    bubbles: true,
+    cancelable: true,
+    ...modifiers,
+  });
+}
+
+function setPlatform(platform: string) {
+  Object.defineProperty(navigator, 'platform', {
+    configurable: true,
+    value: platform,
+  });
 }
 
 function setup(
@@ -195,6 +230,143 @@ describe('Terminal', () => {
     const disconnected = setup('reconnecting');
     act(() => disconnected.terminal.input('do not replay'));
     expect(disconnected.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('copies selected terminal output with Ctrl+C on Windows and Linux', () => {
+    setPlatform('Win32');
+    const clipboardWrite = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
+    const { terminal } = setup();
+    terminal.selection = 'copied terminal output';
+    const event = keyEvent({ ctrlKey: true });
+
+    expect(terminal.key(event)).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+    expect(clipboardWrite).toHaveBeenCalledWith('copied terminal output');
+  });
+
+  it('copies selected terminal output with Cmd+C on macOS', () => {
+    setPlatform('MacIntel');
+    const clipboardWrite = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
+    const { terminal } = setup();
+    terminal.selection = 'copied terminal output';
+    const event = keyEvent({ metaKey: true });
+
+    expect(terminal.key(event)).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+    expect(clipboardWrite).toHaveBeenCalledWith('copied terminal output');
+  });
+
+  it.each([
+    () => Promise.reject(new Error('permission denied')),
+    () => {
+      throw new Error('clipboard unavailable');
+    },
+  ])('keeps selected copy canceled when clipboard write fails', (writeText) => {
+    setPlatform('Linux x86_64');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(writeText) },
+    });
+    const { terminal } = setup();
+    terminal.selection = 'copied terminal output';
+    const event = keyEvent({ ctrlKey: true });
+
+    expect(terminal.key(event)).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('keeps selected copy canceled when the clipboard API is unavailable', () => {
+    setPlatform('Linux x86_64');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    const { terminal } = setup();
+    terminal.selection = 'copied terminal output';
+    const event = keyEvent({ ctrlKey: true });
+
+    expect(terminal.key(event)).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('forwards unselected Ctrl+C through xterm to the socket', () => {
+    setPlatform('Linux x86_64');
+    const { terminal, socket } = setup();
+    const event = keyEvent({ ctrlKey: true });
+
+    expect(terminal.controlC(event)).toBe(true);
+    expect(event.defaultPrevented).toBe(false);
+    expect(socket.sendInput).toHaveBeenCalledWith('\x03');
+  });
+
+  it('forwards Ctrl+C, but only copies Cmd+C, when macOS text is selected', () => {
+    setPlatform('MacIntel');
+    const clipboardWrite = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
+    const { terminal, socket } = setup();
+    terminal.selection = 'copied terminal output';
+    const controlEvent = keyEvent({ ctrlKey: true });
+    const commandEvent = keyEvent({ metaKey: true });
+
+    expect(terminal.controlC(controlEvent)).toBe(true);
+    expect(controlEvent.defaultPrevented).toBe(false);
+    expect(clipboardWrite).not.toHaveBeenCalled();
+    expect(socket.sendInput).toHaveBeenCalledWith('\x03');
+    expect(terminal.key(commandEvent)).toBe(false);
+    expect(commandEvent.defaultPrevented).toBe(true);
+    expect(clipboardWrite).toHaveBeenCalledWith('copied terminal output');
+  });
+
+  it('does not intercept unselected or altered copy shortcuts', () => {
+    setPlatform('MacIntel');
+    const clipboardWrite = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: clipboardWrite },
+    });
+    const { terminal } = setup();
+    terminal.selection = 'copied terminal output';
+    const altered = [
+      keyEvent({ metaKey: true, altKey: true }),
+      keyEvent({ metaKey: true, shiftKey: true }),
+      keyEvent({ metaKey: true, ctrlKey: true }),
+    ];
+
+    for (const event of altered) {
+      expect(terminal.key(event)).toBe(true);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    terminal.selection = '';
+    const commandEvent = keyEvent({ metaKey: true });
+    expect(terminal.key(commandEvent)).toBe(true);
+    expect(commandEvent.defaultPrevented).toBe(false);
+    expect(clipboardWrite).not.toHaveBeenCalled();
+  });
+
+  it('prevents the browser context menu without changing right-click word selection', () => {
+    const { getByLabelText, terminalFactory } = setup();
+    const event = new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    getByLabelText('Terminal').dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(terminalFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ rightClickSelectsWord: true }),
+    );
   });
 
   it('fits after layout and observer changes, then debounces distinct dimensions', () => {
