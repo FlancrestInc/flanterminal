@@ -11,12 +11,17 @@ The affected environment reports all expected prerequisites: workspace
 scrollback is 10,000 lines, tmux history is 20,000 lines, the managed window
 has `alternate-screen off`, and tmux has `mouse off`. The behavior reproduces
 in Firefox and Chrome, in new tabs, at a plain shell, and after explicitly
-selecting xterm's normal buffer. xterm's native wheel path is therefore the
-remaining boundary: without an application-owned wheel hook, it may translate
-or report wheel gestures as terminal input instead of scrolling the browser
-buffer. The current Chromium-only E2E
-configuration does not directly cover alternate browser engines, and the E2E
-wrapper silently ignores command-line filters.
+selecting xterm's normal buffer. These observations conflict with the two
+xterm 6 conditions that normally produce terminal input: no active scrollback
+buffer, or an active mouse protocol. The exact internal state discrepancy is
+not observable through the current application boundary.
+
+The architectural defect is that FlanTerminal delegates its required wheel
+policy to those internal heuristics. It has no application-level invariant
+that an ordinary vertical wheel gesture is browser-local, so any unexpected
+xterm state can leak the gesture into shell input. The current Chromium-only
+E2E configuration also does not directly cover alternate browser engines, and
+the E2E wrapper silently ignores command-line filters.
 
 ## Selected approach
 
@@ -50,8 +55,6 @@ configuration.
 2. Capture wheel events with a separate DOM listener. This duplicates xterm's
    event ownership and cleanup when its supported custom wheel hook already
    covers both processing paths.
-3. Use `attachCustomWheelEventHandler`. This is the narrow supported boundary
-   and restores the behavior removed by the native-scrollback regression.
 
 ## Testing
 
