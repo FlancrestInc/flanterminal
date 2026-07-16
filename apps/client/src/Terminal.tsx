@@ -17,7 +17,7 @@ import {
   type WorkspaceSettings,
 } from '@flanterminal/shared';
 
-import { FONT_STACKS, themeFor } from './themes.js';
+import { FONT_STACKS, terminalThemeFor } from './themes.js';
 import type { TerminalSocketController } from './useTerminalSocket.js';
 
 export interface DisposableLike {
@@ -200,7 +200,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         lineHeight: settings.lineHeight,
         rightClickSelectsWord: true,
         scrollback: settings.scrollback,
-        theme: themeFor(settings.theme).terminal,
+        theme: terminalThemeFor(settings),
       });
       const fitAddon = dependencies.fitAddonFactory();
       const webLinksAddon = dependencies.webLinksAddonFactory();
@@ -318,6 +318,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       config.resizeDebounceMs,
       dependencies,
       settings.bellBehavior,
+      settings.customTerminalPalette,
       settings.cursorBlink,
       settings.cursorStyle,
       settings.fontFamily,

@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
 
-import type { ClientConfig, WorkspaceSettings } from '@flanterminal/shared';
+import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+  type ClientConfig,
+  type WorkspaceSettings,
+} from '@flanterminal/shared';
 import { act, render } from '@testing-library/react';
 import { createRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -42,6 +46,7 @@ const settings: WorkspaceSettings = {
   defaultShell: '/bin/bash',
   tmuxHistoryLimit: 20_000,
   staleSessionCleanupHours: 0,
+  customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
 };
 
 class FakeTerminal implements TerminalLike {
@@ -513,6 +518,67 @@ describe('Terminal', () => {
     expect(result.terminalFactory).toHaveBeenCalledTimes(2);
     expect(result.socket.disconnect).not.toHaveBeenCalled();
     expect(result.socket.reconnect).not.toHaveBeenCalled();
+  });
+
+  it('applies changed custom terminal palettes by recreating xterm', () => {
+    const palette = {
+      ...MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+      background: '#123456',
+      foreground: '#ABCDEF',
+      cursor: '#FEDCBA',
+      selectionBackground: '#654321',
+      black: '#111111',
+      red: '#110000',
+      green: '#001100',
+      yellow: '#111100',
+      blue: '#000011',
+      magenta: '#110011',
+      cyan: '#001111',
+      white: '#EEEEEE',
+    };
+    const result = setup('connected', {
+      theme: 'custom',
+      customTerminalPalette: palette,
+    });
+
+    expect(result.terminalFactory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        theme: expect.objectContaining({
+          background: '#123456',
+          foreground: '#ABCDEF',
+          cursor: '#FEDCBA',
+          selectionBackground: '#654321',
+          black: '#111111',
+          red: '#110000',
+          green: '#001100',
+          yellow: '#111100',
+          blue: '#000011',
+          magenta: '#110011',
+          cyan: '#001111',
+          white: '#EEEEEE',
+        }),
+      }),
+    );
+
+    const replacementPalette = { ...palette, background: '#A1B2C3' };
+    result.rerender(
+      <Terminal
+        config={config}
+        settings={{
+          ...result.settings,
+          customTerminalPalette: replacementPalette,
+        }}
+        socket={result.socket}
+        dependencies={result.dependencies}
+      />,
+    );
+
+    expect(result.terminal.dispose).toHaveBeenCalledOnce();
+    expect(result.terminalFactory).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        theme: expect.objectContaining({ background: '#A1B2C3' }),
+      }),
+    );
   });
 
   it('uses only the local bell asset and never stores bell or output data', async () => {

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 
+import { MIDNIGHT_ELECTRIC_TERMINAL_PALETTE } from '@flanterminal/shared';
 import type {
   ClientConfig,
   SettingsResponse,
@@ -39,6 +40,7 @@ const settingsResponse = {
     defaultShell: '/bin/bash',
     tmuxHistoryLimit: 20_000,
     staleSessionCleanupHours: 0,
+    customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
   },
   limits: {
     fontFamilies: ['jetbrains-mono-nerd', 'system-monospace'],
@@ -169,6 +171,26 @@ function adminApi(): AdminApi {
 beforeEach(() => vi.clearAllMocks());
 
 describe('App', () => {
+  it('maps the custom terminal palette to the Midnight Electric UI theme', async () => {
+    render(
+      <App
+        config={config}
+        api={api()}
+        {...settingsProps}
+        settingsResponse={{
+          ...settingsResponse,
+          settings: { ...settingsResponse.settings, theme: 'custom' },
+        }}
+      />,
+    );
+
+    await screen.findByRole('tab', { name: 'Terminal 1' });
+    expect(document.documentElement).toHaveAttribute(
+      'data-theme',
+      'midnight-electric',
+    );
+  });
+
   it('loads tabs, lazily mounts selected terminals, and retains visited sessions', async () => {
     render(<App config={config} api={api()} {...settingsProps} />);
     await screen.findByRole('tab', { name: 'Terminal 1' });

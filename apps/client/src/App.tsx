@@ -97,7 +97,10 @@ export function App({
   }, [tabs.health]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = settingsResponse.settings.theme;
+    document.documentElement.dataset.theme =
+      settingsResponse.settings.theme === 'custom'
+        ? 'midnight-electric'
+        : settingsResponse.settings.theme;
   }, [settingsResponse.settings.theme]);
 
   useEffect(() => {
