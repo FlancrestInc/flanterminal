@@ -54,6 +54,62 @@ async function sessionAction(page: Page, name: string): Promise<void> {
   await page.getByRole('menuitem', { name }).click();
 }
 
+test('copies selected terminal text', async ({ page, context }, testInfo) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
+    origin: new URL(testInfo.project.use.baseURL as string).origin,
+  });
+  await openAuthenticatedWorkspace(page);
+  await waitConnected(page);
+
+  const copyMarker = `COPYSELECTED${Date.now()}`;
+  await sendCommand(page, `printf '${copyMarker}\\n'`);
+  await expectTerminal(page, copyMarker);
+
+  const markerRow = activePanel(page)
+    .locator('.xterm-rows > div')
+    .filter({ hasText: copyMarker })
+    .last();
+  await expect(markerRow).toHaveText(copyMarker);
+  const [screenBox, markerRowBox, cellWidth] = await Promise.all([
+    activePanel(page).locator('.xterm-screen').boundingBox(),
+    markerRow.boundingBox(),
+    activePanel(page)
+      .locator('.xterm-helper-textarea')
+      .evaluate((element) =>
+        Number.parseFloat(getComputedStyle(element).width),
+      ),
+  ]);
+  expect(screenBox).not.toBeNull();
+  expect(markerRowBox).not.toBeNull();
+  expect(cellWidth).toBeGreaterThan(0);
+  const markerY = markerRowBox!.y + markerRowBox!.height / 2;
+  await page.mouse.move(screenBox!.x + cellWidth / 2, markerY);
+  await page.mouse.down();
+  await page.mouse.move(
+    screenBox!.x + cellWidth * copyMarker.length - 1,
+    markerY,
+  );
+  await page.mouse.up();
+  await expect
+    .poll(() =>
+      activePanel(page)
+        .locator('.xterm-selection')
+        .evaluateAll((elements) =>
+          elements.some((element) => {
+            const selection = element.getBoundingClientRect();
+            return selection.width > 0 && selection.height > 0;
+          }),
+        ),
+    )
+    .toBe(true);
+
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  await page.keyboard.press('Control+C');
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(copyMarker);
+});
+
 test('native xterm scrolling exposes managed-session history', async ({
   page,
 }) => {

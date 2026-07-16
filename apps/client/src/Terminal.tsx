@@ -42,6 +42,11 @@ export interface TerminalLike extends DisposableLike {
   readonly rows: number;
   loadAddon(addon: TerminalAddonLike): void;
   open(element: HTMLElement): void;
+  hasSelection(): boolean;
+  getSelection(): string;
+  attachCustomKeyEventHandler(
+    handler: (event: KeyboardEvent) => boolean,
+  ): void;
   focus(): void;
   clear(): void;
   write(data: string): void;
@@ -89,13 +94,13 @@ const defaultDependencies: TerminalDependencies = {
       },
       loadAddon: (addon) => terminal.loadAddon(addon as ITerminalAddon),
       open: (element) => terminal.open(element),
-      focus: () => terminal.focus(),
-      clear: () => terminal.clear(),
-      write: (data) => terminal.write(data),
       hasSelection: () => terminal.hasSelection(),
       getSelection: () => terminal.getSelection(),
       attachCustomKeyEventHandler: (handler) =>
         terminal.attachCustomKeyEventHandler(handler),
+      focus: () => terminal.focus(),
+      clear: () => terminal.clear(),
+      write: (data) => terminal.write(data),
       onData: (listener) => terminal.onData(listener),
       onBell: (listener) => terminal.onBell(listener),
       dispose: () => terminal.dispose(),
@@ -157,7 +162,7 @@ function customPaletteFromSignature(
   ) as WorkspaceSettings['customTerminalPalette'];
 }
 
-function isSelectedCopyShortcut(event: KeyboardEvent) {
+function isCopyShortcut(event: KeyboardEvent) {
   if (
     event.key.toLowerCase() !== 'c' ||
     event.altKey ||
@@ -245,8 +250,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       terminal.loadAddon(webLinksAddon);
       terminal.open(host);
       terminal.attachCustomKeyEventHandler((event) => {
-        if (!terminal.hasSelection() || !isSelectedCopyShortcut(event)) {
-          return true;
+        if (!isCopyShortcut(event)) return true;
+        if (!terminal.hasSelection()) {
+          if (!navigator.platform.startsWith('Mac')) return true;
+          event.preventDefault();
+          return false;
         }
         event.preventDefault();
         copySelection(terminal.getSelection());
