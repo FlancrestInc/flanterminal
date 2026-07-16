@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
 
-import type { ClientConfig, WorkspaceSettings } from '@flanterminal/shared';
+import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+  type ClientConfig,
+  type WorkspaceSettings,
+} from '@flanterminal/shared';
 import { act, render } from '@testing-library/react';
 import { createRef } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -32,6 +36,7 @@ const settings = {
   defaultShell: '/bin/bash',
   tmuxHistoryLimit: 20_000,
   staleSessionCleanupHours: 0,
+  customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
 } satisfies WorkspaceSettings;
 const socket: TerminalSocketController = {
   status: 'connected',

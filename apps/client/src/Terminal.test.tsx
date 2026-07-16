@@ -118,8 +118,12 @@ function setup(
   overrides: Partial<WorkspaceSettings> = {},
   dependencyOverrides: Partial<TerminalDependencies> = {},
 ) {
-  const terminal = new FakeTerminal();
-  const terminalFactory = vi.fn(() => terminal);
+  const terminals: FakeTerminal[] = [];
+  const terminalFactory = vi.fn(() => {
+    const terminal = new FakeTerminal();
+    terminals.push(terminal);
+    return terminal;
+  });
   const fitAddon = { fit: vi.fn(), dispose: vi.fn() };
   const webLinksAddon = { dispose: vi.fn() };
   let resizeCallback: () => void = () => undefined;
@@ -171,6 +175,7 @@ function setup(
       dependencies={dependencies}
     />,
   );
+  const terminal = terminals[0]!;
   return {
     ...view,
     dependencies,
@@ -181,6 +186,7 @@ function setup(
     resize: () => resizeCallback(),
     socket,
     terminal,
+    terminals,
     terminalFactory,
     unsubscribe,
     webLinksAddon,
@@ -516,6 +522,7 @@ describe('Terminal', () => {
     );
     expect(result.terminal.dispose).toHaveBeenCalledOnce();
     expect(result.terminalFactory).toHaveBeenCalledTimes(2);
+    expect(result.terminals[1]).not.toBe(result.terminal);
     expect(result.socket.disconnect).not.toHaveBeenCalled();
     expect(result.socket.reconnect).not.toHaveBeenCalled();
   });
@@ -574,6 +581,7 @@ describe('Terminal', () => {
     );
 
     expect(result.terminal.dispose).toHaveBeenCalledOnce();
+    expect(result.terminals[1]).not.toBe(result.terminal);
     expect(result.terminalFactory).toHaveBeenLastCalledWith(
       expect.objectContaining({
         theme: expect.objectContaining({ background: '#A1B2C3' }),

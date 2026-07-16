@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
 
-import type { SettingsResponse, WorkspaceSettings } from '@flanterminal/shared';
+import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+  type SettingsResponse,
+  type WorkspaceSettings,
+} from '@flanterminal/shared';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -11,12 +15,12 @@ import { useSettings } from './useSettings.js';
 const base = {
   settings: {
     version: 1,
-    fontFamily: 'jetbrains-mono-nerd',
+    fontFamily: 'dejavu-sans-mono',
     fontSize: 14,
     lineHeight: 1.2,
     letterSpacing: 0,
     scrollback: 10_000,
-    theme: 'dark',
+    theme: 'midnight-electric',
     cursorStyle: 'block',
     cursorBlink: true,
     bellBehavior: 'visual',
@@ -26,14 +30,30 @@ const base = {
     defaultShell: '/bin/bash',
     tmuxHistoryLimit: 20_000,
     staleSessionCleanupHours: 0,
+    customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
   },
   limits: {
-    fontFamilies: ['jetbrains-mono-nerd', 'system-monospace'],
+    fontFamilies: [
+      'jetbrains-mono-nerd',
+      'system-monospace',
+      'dejavu-sans-mono',
+      'noto-sans-mono',
+      'liberation-mono',
+      'courier',
+    ],
     fontSize: { min: 8, max: 32, step: 1 },
     lineHeight: { min: 1, max: 2, step: 0.05 },
     letterSpacing: { min: 0, max: 4, step: 1 },
     scrollback: { min: 0, max: 100_000, step: 1 },
-    themes: ['dark', 'light', 'ubuntu'],
+    themes: [
+      'dark',
+      'light',
+      'ubuntu',
+      'midnight-electric',
+      'aurora-night',
+      'carbon-violet',
+      'custom',
+    ],
     cursorStyles: ['block', 'underline', 'bar'],
     bellBehaviors: ['none', 'visual', 'sound'],
     reconnectBehaviors: ['automatic', 'manual'],
