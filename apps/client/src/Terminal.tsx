@@ -40,6 +40,7 @@ export interface FitAddonLike extends TerminalAddonLike {
 export interface TerminalLike extends DisposableLike {
   readonly cols: number;
   readonly rows: number;
+  readonly hasScrollback: boolean;
   loadAddon(addon: TerminalAddonLike): void;
   open(element: HTMLElement): void;
   hasSelection(): boolean;
@@ -91,6 +92,9 @@ const defaultDependencies: TerminalDependencies = {
       },
       get rows() {
         return terminal.rows;
+      },
+      get hasScrollback() {
+        return terminal.buffer.active.baseY > 0;
       },
       loadAddon: (addon) => terminal.loadAddon(addon as ITerminalAddon),
       open: (element) => terminal.open(element),
@@ -260,7 +264,8 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
           event.shiftKey ||
           event.altKey ||
           event.deltaY === 0 ||
-          Math.abs(event.deltaX) >= Math.abs(event.deltaY)
+          Math.abs(event.deltaX) >= Math.abs(event.deltaY) ||
+          !terminal.hasScrollback
         ) {
           wheelLineRemainder = 0;
           return true;

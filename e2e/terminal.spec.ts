@@ -59,6 +59,18 @@ async function wheelUntilVisible(
     .toContain(text);
 }
 
+async function wheelToLiveView(page: Page): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.wheel(0, 120);
+        return terminalText(page);
+      },
+      { intervals: [50, 100, 200], timeout: 10_000 },
+    )
+    .not.toMatch(/\[\d+\/\d+\]/u);
+}
+
 async function sessionAction(page: Page, name: string): Promise<void> {
   await page.getByRole('button', { name: 'Session actions' }).click();
   await page.getByRole('menuitem', { name }).click();
@@ -143,6 +155,7 @@ test('native xterm scrolling exposes managed-session history', async ({
 
   await wheelUntilVisible(page, earlyMarker, -120);
   await wheelUntilVisible(page, finalMarker, 120);
+  await wheelToLiveView(page);
 
   const historyMarker = `SCROLLBACK_HISTORY_${marker}`;
   await sendCommand(page, printfEscaped(historyMarker));
@@ -152,7 +165,11 @@ test('native xterm scrolling exposes managed-session history', async ({
   await activePanel(page).getByRole('region', { name: 'Terminal' }).focus();
   await page.keyboard.type(printfEscaped(draftMarker));
   await activePanel(page).locator('.xterm-screen').hover();
+  const textBeforeWheel = await terminalText(page);
   await page.mouse.wheel(0, -120);
+  await expect.poll(() => terminalText(page)).not.toBe(textBeforeWheel);
+  await wheelToLiveView(page);
+  await activePanel(page).getByRole('region', { name: 'Terminal' }).focus();
   await page.keyboard.press('Enter');
   await expectTerminal(page, draftMarker);
   await expect
@@ -165,7 +182,7 @@ test('native xterm scrolling exposes managed-session history', async ({
     .toBe(1);
 });
 
-test('copies selected terminal text', async ({ page }) => {
+test('copies a full terminal row selection', async ({ page }) => {
   await openAuthenticatedWorkspace(page);
   await waitConnected(page);
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {

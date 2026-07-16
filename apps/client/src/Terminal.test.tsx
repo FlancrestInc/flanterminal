@@ -52,6 +52,7 @@ const settings: WorkspaceSettings = {
 class FakeTerminal implements TerminalLike {
   cols = 80;
   rows = 24;
+  hasScrollback = true;
   selection = '';
   readonly loadAddon = vi.fn();
   readonly open = vi.fn();
@@ -315,6 +316,29 @@ describe('Terminal', () => {
     expect(result.terminal.wheel(negative)).toBe(false);
     expect(negative.defaultPrevented).toBe(true);
     expect(result.terminal.scrollLines).toHaveBeenNthCalledWith(2, -1);
+    expect(result.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('delegates ordinary vertical wheels when tmux owns the available history', () => {
+    const result = setup();
+    result.terminal.wheel(
+      wheelEvent({ deltaY: 0.6, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+    result.terminal.hasScrollback = false;
+    const delegated = wheelEvent({
+      deltaY: -1,
+      deltaMode: WheelEvent.DOM_DELTA_LINE,
+    });
+
+    expect(result.terminal.wheel(delegated)).toBe(true);
+    expect(delegated.defaultPrevented).toBe(false);
+    expect(result.terminal.scrollLines).not.toHaveBeenCalled();
+
+    result.terminal.hasScrollback = true;
+    result.terminal.wheel(
+      wheelEvent({ deltaY: 0.5, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+    expect(result.terminal.scrollLines).not.toHaveBeenCalled();
     expect(result.socket.sendInput).not.toHaveBeenCalled();
   });
 

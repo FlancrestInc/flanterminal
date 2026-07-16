@@ -109,7 +109,7 @@ describe('TmuxSessionPreparer', () => {
       '-t',
       SESSION_NAME,
       'mouse',
-      'off',
+      'on',
     ]);
   });
 
@@ -208,7 +208,7 @@ describe('TmuxSessionPreparer', () => {
       '-t',
       SESSION_NAME,
       'mouse',
-      'off',
+      'on',
     ]);
   });
 
@@ -233,7 +233,7 @@ describe('TmuxSessionPreparer', () => {
       '-t',
       SESSION_NAME,
       'mouse',
-      'off',
+      'on',
     ]);
   });
 
