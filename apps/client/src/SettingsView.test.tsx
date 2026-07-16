@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
 
-import type { SettingsResponse, WorkspaceSettings } from '@flanterminal/shared';
+import {
+  terminalPaletteKeys,
+  type SettingsResponse,
+  type WorkspaceSettings,
+} from '@flanterminal/shared';
 import {
   fireEvent,
   render,
@@ -31,14 +35,44 @@ const response = {
     defaultShell: '/bin/bash',
     tmuxHistoryLimit: 20_000,
     staleSessionCleanupHours: 0,
+    customTerminalPalette: {
+      background: '#101827',
+      foreground: '#DCE8FF',
+      cursor: '#82B1FF',
+      cursorAccent: '#101827',
+      selectionBackground: '#294A82',
+      black: '#152238',
+      red: '#FF7B8B',
+      green: '#74D99F',
+      yellow: '#F6CB6C',
+      blue: '#82B1FF',
+      magenta: '#D8A0FF',
+      cyan: '#76D7EA',
+      white: '#DCE8FF',
+      brightBlack: '#4A5D80',
+      brightRed: '#FF9EAA',
+      brightGreen: '#99E9B6',
+      brightYellow: '#FFDA91',
+      brightBlue: '#A8C8FF',
+      brightMagenta: '#EDB9FF',
+      brightCyan: '#A8E8F5',
+      brightWhite: '#FFFFFF',
+    },
   },
   limits: {
-    fontFamilies: ['jetbrains-mono-nerd', 'system-monospace'],
+    fontFamilies: [
+      'jetbrains-mono-nerd',
+      'system-monospace',
+      'dejavu-sans-mono',
+      'noto-sans-mono',
+      'liberation-mono',
+      'courier',
+    ],
     fontSize: { min: 10, max: 24, step: 1 },
     lineHeight: { min: 1, max: 1.5, step: 0.05 },
     letterSpacing: { min: 0, max: 2, step: 1 },
     scrollback: { min: 1000, max: 50_000, step: 1000 },
-    themes: ['dark', 'light', 'ubuntu'],
+    themes: ['dark', 'light', 'ubuntu', 'custom'],
     cursorStyles: ['block', 'underline', 'bar'],
     bellBehaviors: ['none', 'visual', 'sound'],
     reconnectBehaviors: ['automatic', 'manual'],
@@ -95,6 +129,146 @@ describe('SettingsView', () => {
       cursorBlink: false,
     });
     expect(screen.queryByLabelText('Current password')).not.toBeInTheDocument();
+  });
+
+  it('labels font availability and edits custom terminal colors', async () => {
+    const onSave = vi.fn<(settings: WorkspaceSettings) => Promise<void>>(
+      async () => undefined,
+    );
+    render(
+      <SettingsView
+        response={response}
+        settingsBusy={false}
+        settingsError={null}
+        passwordBusy={false}
+        passwordError={null}
+        authMode="none"
+        onSave={onSave}
+        onBack={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole('option', {
+        name: 'JetBrains Mono Nerd Font (bundled)',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('option', {
+        name: 'DejaVu Sans Mono — uses system font when available',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('option', {
+        name: 'Noto Sans Mono — uses system font when available',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('option', {
+        name: 'Liberation Mono — uses system font when available',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('option', {
+        name: 'Courier — uses system font when available',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: 'Terminal colors' }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Custom' }));
+    expect(
+      screen.getByRole('heading', { name: 'Terminal colors' }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Background color')).toHaveAttribute(
+      'type',
+      'color',
+    );
+    expect(screen.getByLabelText('Background hex')).toHaveValue('#101827');
+    expect(screen.getByLabelText('Bright White hex')).toHaveValue('#FFFFFF');
+    expect(
+      screen.queryByLabelText('Cursor accent hex'),
+    ).not.toBeInTheDocument();
+    for (const key of terminalPaletteKeys.filter(
+      (paletteKey) => paletteKey !== 'cursorAccent',
+    )) {
+      const label = key
+        .replace(/([a-z])([A-Z])/gu, '$1 $2')
+        .replace(/^./u, (letter) => letter.toUpperCase());
+      expect(screen.getByLabelText(`${label} color`)).toHaveAttribute(
+        'type',
+        'color',
+      );
+      expect(screen.getByLabelText(`${label} hex`)).toBeInTheDocument();
+    }
+
+    fireEvent.change(screen.getByLabelText('Background hex'), {
+      target: { value: '#123456' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
+    expect(onSave.mock.calls[0]![0].customTerminalPalette).toMatchObject({
+      background: '#123456',
+      cursorAccent: '#123456',
+    });
+  });
+
+  it('blocks a malformed custom terminal color with an accessible error', () => {
+    const onSave = vi.fn();
+    render(
+      <SettingsView
+        response={response}
+        settingsBusy={false}
+        settingsError={null}
+        passwordBusy={false}
+        passwordError={null}
+        authMode="none"
+        onSave={onSave}
+        onBack={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('radio', { name: 'Custom' }));
+    fireEvent.change(screen.getByLabelText('Foreground hex'), {
+      target: { value: '#invalid' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Foreground hex')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+    expect(
+      screen.getByText('Enter a six-digit hex color, such as #DCE8FF.'),
+    ).toHaveAttribute('role', 'alert');
+  });
+
+  it('blocks invalid palette values after switching from Custom to a preset', () => {
+    const onSave = vi.fn();
+    render(
+      <SettingsView
+        response={response}
+        settingsBusy={false}
+        settingsError={null}
+        passwordBusy={false}
+        passwordError={null}
+        authMode="none"
+        onSave={onSave}
+        onBack={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('radio', { name: 'Custom' }));
+    fireEvent.change(screen.getByLabelText('Foreground hex'), {
+      target: { value: '#invalid' },
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'Dark' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Terminal colors contain invalid hex values.',
+    );
   });
 
   it('keeps passwords local to the form and clears them after local password change', async () => {

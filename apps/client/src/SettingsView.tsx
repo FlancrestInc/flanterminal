@@ -1,11 +1,24 @@
-import type {
-  AuthMode,
-  NumericSettingLimit,
-  SettingsResponse,
-  WorkspaceSettings,
+import {
+  terminalPaletteKeys,
+  type AuthMode,
+  type NumericSettingLimit,
+  type SettingsResponse,
+  type WorkspaceSettings,
 } from '@flanterminal/shared';
 import { ArrowLeft, Save } from 'lucide-react';
 import { useState, type FormEvent, type ReactNode } from 'react';
+
+type EditableTerminalColorKey = Exclude<
+  keyof WorkspaceSettings['customTerminalPalette'],
+  'cursorAccent'
+>;
+const editableTerminalColorKeys = terminalPaletteKeys.filter(
+  (key): key is EditableTerminalColorKey => key !== 'cursorAccent',
+);
+type ColorErrors = Readonly<Partial<Record<EditableTerminalColorKey, string>>>;
+const hexColorPattern = /^#[0-9A-Fa-f]{6}$/;
+const hexColorError = 'Enter a six-digit hex color, such as #DCE8FF.';
+const paletteValidationError = 'Terminal colors contain invalid hex values.';
 
 export type SettingsViewProps = Readonly<{
   response: SettingsResponse;
@@ -34,18 +47,59 @@ export function SettingsView({
   const [authority, setAuthority] = useState(response);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [colorErrors, setColorErrors] = useState<ColorErrors>({});
+  const [colorValidationError, setColorValidationError] = useState<
+    string | null
+  >(null);
 
   if (authority !== response) {
     setAuthority(response);
     setForm(response.settings);
+    setColorErrors({});
+    setColorValidationError(null);
   }
 
   const set = <K extends keyof WorkspaceSettings>(
     key: K,
     value: WorkspaceSettings[K],
   ) => setForm((current) => ({ ...current, [key]: value }));
+  const setTerminalColor = (key: EditableTerminalColorKey, value: string) => {
+    setForm((current) => ({
+      ...current,
+      customTerminalPalette: {
+        ...current.customTerminalPalette,
+        [key]: value,
+        ...(key === 'background' ? { cursorAccent: value } : {}),
+      },
+    }));
+    setColorErrors((current) => {
+      if (hexColorPattern.test(value) || current[key] === undefined) {
+        const remaining = { ...current };
+        delete remaining[key];
+        return remaining;
+      }
+      return current;
+    });
+  };
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    if (
+      terminalPaletteKeys.some(
+        (key) => !hexColorPattern.test(form.customTerminalPalette[key]),
+      )
+    ) {
+      const nextErrors = Object.fromEntries(
+        editableTerminalColorKeys
+          .filter(
+            (key) => !hexColorPattern.test(form.customTerminalPalette[key]),
+          )
+          .map((key) => [key, hexColorError]),
+      ) as ColorErrors;
+      setColorErrors(nextErrors);
+      setColorValidationError(paletteValidationError);
+      return;
+    }
+    setColorValidationError(null);
     void onSave(form);
   };
   const changePassword = (event: FormEvent) => {
@@ -90,8 +144,15 @@ export function SettingsView({
                 value={form.fontFamily}
                 options={limits.fontFamilies}
                 labels={{
-                  'jetbrains-mono-nerd': 'JetBrainsMono Nerd Font',
-                  'system-monospace': 'System monospace',
+                  'jetbrains-mono-nerd': 'JetBrains Mono Nerd Font (bundled)',
+                  'system-monospace': 'System monospace (system)',
+                  'dejavu-sans-mono':
+                    'DejaVu Sans Mono — uses system font when available',
+                  'noto-sans-mono':
+                    'Noto Sans Mono — uses system font when available',
+                  'liberation-mono':
+                    'Liberation Mono — uses system font when available',
+                  courier: 'Courier — uses system font when available',
                 }}
                 onChange={(value) =>
                   set('fontFamily', value as WorkspaceSettings['fontFamily'])
@@ -141,6 +202,22 @@ export function SettingsView({
                 }
               />
             </SettingsSection>
+
+            {form.theme === 'custom' ? (
+              <SettingsSection title="Terminal colors">
+                <div className="terminal-colors-grid">
+                  {editableTerminalColorKeys.map((key) => (
+                    <TerminalColorField
+                      key={key}
+                      colorKey={key}
+                      value={form.customTerminalPalette[key]}
+                      error={colorErrors[key]}
+                      onChange={(value) => setTerminalColor(key, value)}
+                    />
+                  ))}
+                </div>
+              </SettingsSection>
+            ) : null}
 
             <SettingsSection title="Terminal behavior">
               <NumberField
@@ -203,6 +280,11 @@ export function SettingsView({
           {settingsError ? (
             <p className="settings-error" role="alert">
               {settingsError}
+            </p>
+          ) : null}
+          {colorValidationError ? (
+            <p className="settings-error" role="alert">
+              {colorValidationError}
             </p>
           ) : null}
           <div className="settings-actions">
@@ -391,8 +473,54 @@ function ToggleField({
   );
 }
 
+function TerminalColorField({
+  colorKey,
+  value,
+  error,
+  onChange,
+}: Readonly<{
+  colorKey: EditableTerminalColorKey;
+  value: string;
+  error: string | undefined;
+  onChange: (value: string) => void;
+}>) {
+  const label = humanize(colorKey);
+  const colorLabel = `${label} color`;
+  const hexLabel = `${label} hex`;
+  const errorId = `terminal-color-${colorKey}-error`;
+  const colorValue = hexColorPattern.test(value) ? value : '#000000';
+
+  return (
+    <div className="terminal-color-field">
+      <span className="terminal-color-label">{label}</span>
+      <input
+        aria-label={colorLabel}
+        type="color"
+        value={colorValue}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      />
+      <input
+        aria-label={hexLabel}
+        type="text"
+        value={value}
+        inputMode="text"
+        spellCheck={false}
+        aria-invalid={error === undefined ? undefined : true}
+        aria-describedby={error === undefined ? undefined : errorId}
+        onChange={(event) => onChange(event.currentTarget.value)}
+      />
+      {error === undefined ? null : (
+        <p id={errorId} className="terminal-color-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function humanize(value: string): string {
   return value
     .replaceAll('-', ' ')
+    .replace(/([a-z])([A-Z])/gu, '$1 $2')
     .replace(/^./u, (letter) => letter.toUpperCase());
 }

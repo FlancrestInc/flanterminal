@@ -953,6 +953,73 @@ button {
   gap: 16px 20px;
 }
 
+.terminal-colors-grid {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+
+.terminal-color-field {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) 34px minmax(88px, 0.7fr);
+  gap: 6px 8px;
+  align-items: center;
+}
+
+.terminal-color-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-color-field input[type='color'] {
+  grid-column: 2;
+  width: 34px;
+  height: 34px;
+  padding: 2px;
+  border: 1px solid var(--ui-border);
+  border-radius: 3px;
+  background: var(--ui-surface);
+}
+
+.terminal-color-field input[type='text'] {
+  grid-column: 3;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: 3px;
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  font: inherit;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.terminal-color-field input:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+.terminal-color-field input[aria-invalid='true'] {
+  border-color: var(--ui-danger);
+}
+
+.terminal-color-error {
+  grid-column: 1 / -1;
+  margin: -2px 0 0;
+  color: var(--ui-danger);
+  font-size: 11px;
+}
+
 .settings-field,
 .settings-toggle {
   display: grid;
@@ -1365,6 +1432,14 @@ button {
 
   .settings-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .terminal-colors-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .terminal-color-field {
+    grid-template-columns: minmax(0, 1fr) 34px minmax(76px, 0.55fr);
   }
 
   .settings-field input,
