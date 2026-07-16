@@ -78,8 +78,9 @@ describe('TmuxSessionPreparer', () => {
     );
   });
 
-  it('disables mouse reporting for an existing session', async () => {
+  it('migrates window and mouse settings for an existing session', async () => {
     const runner = runnerWith(
+      { exitCode: 0, stdout: '', stderr: '' },
       { exitCode: 0, stdout: '', stderr: '' },
       { exitCode: 0, stdout: '', stderr: '' },
     );
@@ -97,6 +98,13 @@ describe('TmuxSessionPreparer', () => {
       SESSION_NAME,
     ]);
     expect(runner.run).toHaveBeenNthCalledWith(2, '/usr/bin/tmux', [
+      'set-window-option',
+      '-t',
+      `${SESSION_NAME}:0`,
+      'alternate-screen',
+      'off',
+    ]);
+    expect(runner.run).toHaveBeenNthCalledWith(3, '/usr/bin/tmux', [
       'set-option',
       '-t',
       SESSION_NAME,
@@ -108,6 +116,8 @@ describe('TmuxSessionPreparer', () => {
   it('applies session options before creating the real pane', async () => {
     const runner = runnerWith(
       { exitCode: 1, stdout: '', stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
       { exitCode: 0, stdout: '', stderr: '' },
     );
     const preparer = new TmuxSessionPreparer(
@@ -187,6 +197,13 @@ describe('TmuxSessionPreparer', () => {
       creationArgs?.filter((argument) => argument === SESSION_NAME),
     ).toEqual([SESSION_NAME]);
     expect(runner.run).toHaveBeenNthCalledWith(3, '/usr/bin/tmux', [
+      'set-window-option',
+      '-t',
+      `${SESSION_NAME}:0`,
+      'alternate-screen',
+      'off',
+    ]);
+    expect(runner.run).toHaveBeenNthCalledWith(4, '/usr/bin/tmux', [
       'set-option',
       '-t',
       SESSION_NAME,
@@ -195,7 +212,7 @@ describe('TmuxSessionPreparer', () => {
     ]);
   });
 
-  it('bounds a failed mouse migration for an existing session', async () => {
+  it('bounds a failed window migration for an existing session', async () => {
     const runner = runnerWith(
       { exitCode: 0, stdout: '', stderr: '' },
       { exitCode: 2, stdout: 'private', stderr: 'private' },
@@ -210,11 +227,20 @@ describe('TmuxSessionPreparer', () => {
       '-t',
       SESSION_NAME,
     ]);
+    expect(runner.run).toHaveBeenCalledTimes(2);
+    expect(runner.run).not.toHaveBeenCalledWith('/usr/bin/tmux', [
+      'set-option',
+      '-t',
+      SESSION_NAME,
+      'mouse',
+      'off',
+    ]);
   });
 
   it('does not kill a newly created session when mouse migration fails', async () => {
     const runner = runnerWith(
       { exitCode: 1, stdout: '', stderr: '' },
+      { exitCode: 0, stdout: '', stderr: '' },
       { exitCode: 0, stdout: '', stderr: '' },
       { exitCode: 2, stdout: 'private', stderr: 'private' },
     );
@@ -227,7 +253,7 @@ describe('TmuxSessionPreparer', () => {
     await expect(preparer.prepare(SESSION_ID, settings)).rejects.toThrow(
       /^Tmux command failed$/,
     );
-    expect(runner.run).toHaveBeenCalledTimes(3);
+    expect(runner.run).toHaveBeenCalledTimes(4);
     expect(runner.run).not.toHaveBeenCalledWith('/usr/bin/tmux', [
       'kill-session',
       '-t',
@@ -420,6 +446,7 @@ describe('TmuxSessionPreparer', () => {
       run: vi
         .fn<CommandRunner['run']>()
         .mockReturnValueOnce(probe.promise)
+        .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' })
         .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' })
         .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' }),
     };

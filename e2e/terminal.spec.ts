@@ -29,6 +29,16 @@ async function expectTerminal(page: Page, text: string): Promise<void> {
   await expect.poll(() => terminalText(page)).toContain(text);
 }
 
+function printfEscaped(value: string): string {
+  const escaped = [...value]
+    .map(
+      (character) =>
+        `\\x${character.charCodeAt(0).toString(16).padStart(2, '0')}`,
+    )
+    .join('');
+  return `printf '%b\\n' '${escaped}'`;
+}
+
 async function wheelUntilVisible(
   page: Page,
   text: string,
@@ -116,6 +126,13 @@ test('native xterm scrolling exposes managed-session history', async ({
   await openAuthenticatedWorkspace(page);
   await waitConnected(page);
 
+  await sendCommand(
+    page,
+    `tmux set-window-option -t "$(tmux display-message -p '#S:0')" alternate-screen on; tmux detach-client`,
+  );
+  await page.reload();
+  await waitConnected(page);
+
   const earlyMarker = `SCROLLBACK_EARLY_${marker}`;
   const finalMarker = `SCROLLBACK_FINAL_${marker}`;
   await sendCommand(
@@ -127,9 +144,25 @@ test('native xterm scrolling exposes managed-session history', async ({
   await wheelUntilVisible(page, earlyMarker, -120);
   await wheelUntilVisible(page, finalMarker, 120);
 
-  const afterMarker = `SCROLLBACK_AFTER_${marker}`;
-  await sendCommand(page, `printf '${afterMarker}\\n'`);
-  await wheelUntilVisible(page, afterMarker, 120);
+  const historyMarker = `SCROLLBACK_HISTORY_${marker}`;
+  await sendCommand(page, printfEscaped(historyMarker));
+  await expectTerminal(page, historyMarker);
+
+  const draftMarker = `SCROLLBACK_DRAFT_${marker}`;
+  await activePanel(page).getByRole('region', { name: 'Terminal' }).focus();
+  await page.keyboard.type(printfEscaped(draftMarker));
+  await activePanel(page).locator('.xterm-screen').hover();
+  await page.mouse.wheel(0, -120);
+  await page.keyboard.press('Enter');
+  await expectTerminal(page, draftMarker);
+  await expect
+    .poll(async () => {
+      const matches = (await terminalText(page)).match(
+        new RegExp(historyMarker, 'g'),
+      );
+      return matches?.length ?? 0;
+    })
+    .toBe(1);
 });
 
 test('copies selected terminal text', async ({ page }) => {

@@ -149,6 +149,15 @@ export class TmuxSessionPreparer implements SessionPreparer {
     }
 
     try {
+      const alternateScreen = await this.run([
+        'set-window-option',
+        '-t',
+        `${name}:0`,
+        'alternate-screen',
+        'off',
+      ]);
+      if (alternateScreen.exitCode !== 0) throw new Error();
+
       const mouse = await this.run(['set-option', '-t', name, 'mouse', 'off']);
       if (mouse.exitCode !== 0) throw new Error();
     } catch {
