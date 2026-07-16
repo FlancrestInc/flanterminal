@@ -1,12 +1,37 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
   parseWorkspaceSettings,
   parseWorkspaceSettingsMutation,
   parseWorkspaceSettingsResponse,
   type WorkspaceSettings,
   type WorkspaceSettingsLimits,
 } from './index.js';
+
+const customTerminalPalette = {
+  background: '#101827',
+  foreground: '#DCE8FF',
+  cursor: '#82B1FF',
+  cursorAccent: '#101827',
+  selectionBackground: '#294A82',
+  black: '#152238',
+  red: '#FF7B8B',
+  green: '#74D99F',
+  yellow: '#F6CB6C',
+  blue: '#82B1FF',
+  magenta: '#D8A0FF',
+  cyan: '#76D7EA',
+  white: '#DCE8FF',
+  brightBlack: '#4A5D80',
+  brightRed: '#FF9EAA',
+  brightGreen: '#99E9B6',
+  brightYellow: '#FFDA91',
+  brightBlue: '#A8C8FF',
+  brightMagenta: '#EDB9FF',
+  brightCyan: '#A8E8F5',
+  brightWhite: '#FFFFFF',
+} as const;
 
 const settings: WorkspaceSettings = {
   version: 1,
@@ -25,6 +50,7 @@ const settings: WorkspaceSettings = {
   defaultShell: '/bin/bash',
   tmuxHistoryLimit: 20_000,
   staleSessionCleanupHours: 0,
+  customTerminalPalette,
 };
 
 const limits: WorkspaceSettingsLimits = {
@@ -52,8 +78,29 @@ describe('workspace settings contracts', () => {
   });
 
   it.each([
-    ['fontFamily', ['jetbrains-mono-nerd', 'system-monospace']],
-    ['theme', ['dark', 'light', 'ubuntu']],
+    [
+      'fontFamily',
+      [
+        'jetbrains-mono-nerd',
+        'system-monospace',
+        'dejavu-sans-mono',
+        'noto-sans-mono',
+        'liberation-mono',
+        'courier',
+      ],
+    ],
+    [
+      'theme',
+      [
+        'dark',
+        'light',
+        'ubuntu',
+        'midnight-electric',
+        'aurora-night',
+        'carbon-violet',
+        'custom',
+      ],
+    ],
     ['cursorStyle', ['block', 'underline', 'bar']],
     ['bellBehavior', ['none', 'visual', 'sound']],
     ['reconnectBehavior', ['automatic', 'manual']],
@@ -118,6 +165,99 @@ describe('workspace settings contracts', () => {
     expect(() =>
       parseWorkspaceSettings({ ...settings, secret: 'nope' }),
     ).toThrow();
+  });
+
+  it('rejects incomplete, unknown, and malformed terminal palettes', () => {
+    const missingBrightWhite: Record<string, unknown> = {
+      ...customTerminalPalette,
+    };
+    delete missingBrightWhite.brightWhite;
+
+    expect(() =>
+      parseWorkspaceSettings({
+        ...settings,
+        customTerminalPalette: missingBrightWhite,
+      }),
+    ).toThrow();
+    expect(() =>
+      parseWorkspaceSettings({
+        ...settings,
+        customTerminalPalette: {
+          ...customTerminalPalette,
+          chartreuse: '#00FF00',
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseWorkspaceSettings({
+        ...settings,
+        customTerminalPalette: { ...customTerminalPalette, red: '#f00' },
+      }),
+    ).toThrow();
+  });
+
+  it('normalizes a legacy v1 document without a palette to frozen Midnight Electric', () => {
+    const legacySettings: Record<string, unknown> = { ...settings };
+    delete legacySettings.customTerminalPalette;
+
+    const parsed = parseWorkspaceSettings(legacySettings);
+
+    expect(parsed.customTerminalPalette).toEqual(
+      MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+    );
+    expect(Object.isFrozen(parsed.customTerminalPalette)).toBe(true);
+  });
+
+  it('requires a complete palette when custom is selected', () => {
+    const incompletePalette: Record<string, unknown> = {
+      ...customTerminalPalette,
+    };
+    delete incompletePalette.brightWhite;
+
+    expect(() =>
+      parseWorkspaceSettings({
+        ...settings,
+        theme: 'custom',
+        customTerminalPalette: incompletePalette,
+      }),
+    ).toThrow();
+  });
+
+  it.each([
+    'dark',
+    'light',
+    'ubuntu',
+    'midnight-electric',
+    'aurora-night',
+    'carbon-violet',
+  ] as const)('normalizes the palette for the %s preset', (theme) => {
+    const parsed = parseWorkspaceSettings({
+      ...settings,
+      theme,
+      customTerminalPalette: {
+        ...customTerminalPalette,
+        background: '#FFFFFF',
+        cursorAccent: '#000000',
+      },
+    });
+
+    expect(parsed.customTerminalPalette).toEqual(
+      MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+    );
+  });
+
+  it('derives a custom palette cursor accent from its background', () => {
+    const parsed = parseWorkspaceSettings({
+      ...settings,
+      theme: 'custom',
+      customTerminalPalette: {
+        ...customTerminalPalette,
+        background: '#FFFFFF',
+        cursorAccent: '#000000',
+      },
+    });
+
+    expect(parsed.customTerminalPalette.cursorAccent).toBe('#FFFFFF');
   });
 
   it('parses only a full strict settings mutation', () => {

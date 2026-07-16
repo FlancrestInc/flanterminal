@@ -2,12 +2,102 @@ import { z } from 'zod';
 
 import { safeNormalizedStringSchema } from './safe-string.js';
 
-const fontFamilySchema = z.enum(['jetbrains-mono-nerd', 'system-monospace']);
-const themeSchema = z.enum(['dark', 'light', 'ubuntu']);
+const fontFamilySchema = z.enum([
+  'jetbrains-mono-nerd',
+  'system-monospace',
+  'dejavu-sans-mono',
+  'noto-sans-mono',
+  'liberation-mono',
+  'courier',
+]);
+const themeSchema = z.enum([
+  'dark',
+  'light',
+  'ubuntu',
+  'midnight-electric',
+  'aurora-night',
+  'carbon-violet',
+  'custom',
+]);
 const cursorStyleSchema = z.enum(['block', 'underline', 'bar']);
 const bellBehaviorSchema = z.enum(['none', 'visual', 'sound']);
 const reconnectBehaviorSchema = z.enum(['automatic', 'manual']);
 const workspaceShortcutModeSchema = z.enum(['default', 'disabled']);
+
+export const terminalPaletteKeys = Object.freeze([
+  'background',
+  'foreground',
+  'cursor',
+  'cursorAccent',
+  'selectionBackground',
+  'black',
+  'red',
+  'green',
+  'yellow',
+  'blue',
+  'magenta',
+  'cyan',
+  'white',
+  'brightBlack',
+  'brightRed',
+  'brightGreen',
+  'brightYellow',
+  'brightBlue',
+  'brightMagenta',
+  'brightCyan',
+  'brightWhite',
+] as const);
+
+export const MIDNIGHT_ELECTRIC_TERMINAL_PALETTE = Object.freeze({
+  background: '#101827',
+  foreground: '#DCE8FF',
+  cursor: '#82B1FF',
+  cursorAccent: '#101827',
+  selectionBackground: '#294A82',
+  black: '#152238',
+  red: '#FF7B8B',
+  green: '#74D99F',
+  yellow: '#F6CB6C',
+  blue: '#82B1FF',
+  magenta: '#D8A0FF',
+  cyan: '#76D7EA',
+  white: '#DCE8FF',
+  brightBlack: '#4A5D80',
+  brightRed: '#FF9EAA',
+  brightGreen: '#99E9B6',
+  brightYellow: '#FFDA91',
+  brightBlue: '#A8C8FF',
+  brightMagenta: '#EDB9FF',
+  brightCyan: '#A8E8F5',
+  brightWhite: '#FFFFFF',
+} as const);
+
+const terminalColorSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/);
+const customTerminalPaletteSchema = z
+  .object({
+    background: terminalColorSchema,
+    foreground: terminalColorSchema,
+    cursor: terminalColorSchema,
+    cursorAccent: terminalColorSchema,
+    selectionBackground: terminalColorSchema,
+    black: terminalColorSchema,
+    red: terminalColorSchema,
+    green: terminalColorSchema,
+    yellow: terminalColorSchema,
+    blue: terminalColorSchema,
+    magenta: terminalColorSchema,
+    cyan: terminalColorSchema,
+    white: terminalColorSchema,
+    brightBlack: terminalColorSchema,
+    brightRed: terminalColorSchema,
+    brightGreen: terminalColorSchema,
+    brightYellow: terminalColorSchema,
+    brightBlue: terminalColorSchema,
+    brightMagenta: terminalColorSchema,
+    brightCyan: terminalColorSchema,
+    brightWhite: terminalColorSchema,
+  })
+  .strict();
 
 const absoluteShellSchema = safeNormalizedStringSchema({
   maxUtf8Bytes: 4_096,
@@ -42,6 +132,7 @@ export const workspaceSettingsSchema = z
     defaultShell: absoluteShellSchema,
     tmuxHistoryLimit: z.number().int().min(0).max(1_000_000),
     staleSessionCleanupHours: z.number().int().min(0).max(8_760),
+    customTerminalPalette: customTerminalPaletteSchema,
   })
   .strict();
 
@@ -162,7 +253,9 @@ export function parseWorkspaceSettings(
   value: unknown,
   constraints?: WorkspaceSettingsConstraints,
 ): WorkspaceSettings {
-  const settings = workspaceSettingsSchema.parse(value);
+  const settings = normalizeCursorAccent(
+    workspaceSettingsSchema.parse(normalizeLegacyPalette(value)),
+  );
   if (constraints !== undefined) {
     const parsedConstraints =
       workspaceSettingsConstraintsSchema.parse(constraints);
@@ -175,7 +268,10 @@ export function parseWorkspaceSettingsMutation(
   value: unknown,
   constraints?: WorkspaceSettingsConstraints,
 ): WorkspaceSettingsMutation {
-  const mutation = workspaceSettingsMutationSchema.parse(value);
+  const parsedMutation = workspaceSettingsMutationSchema.parse(value);
+  const mutation = {
+    settings: normalizeCursorAccent(parsedMutation.settings),
+  };
   if (constraints !== undefined) {
     const parsedConstraints =
       workspaceSettingsConstraintsSchema.parse(constraints);
@@ -187,9 +283,59 @@ export function parseWorkspaceSettingsMutation(
 export function parseWorkspaceSettingsResponse(
   value: unknown,
 ): SettingsResponse {
-  const response = workspaceSettingsResponseSchema.parse(value);
+  const parsedResponse = workspaceSettingsResponseSchema.parse(value);
+  const response = {
+    ...parsedResponse,
+    settings: normalizeCursorAccent(parsedResponse.settings),
+  };
   assertWithinDeployment(response.settings, response);
   return immutableCopy(response);
+}
+
+/** Returns true only for an otherwise-valid v1 document missing its palette. */
+export function isLegacyWorkspaceSettingsMissingCustomTerminalPalette(
+  value: unknown,
+): value is Record<string, unknown> {
+  if (!isRecord(value) || 'customTerminalPalette' in value) return false;
+
+  return workspaceSettingsSchema.safeParse({
+    ...value,
+    customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+  }).success;
+}
+
+function normalizeLegacyPalette(value: unknown): unknown {
+  if (!isLegacyWorkspaceSettingsMissingCustomTerminalPalette(value)) {
+    return value;
+  }
+
+  return {
+    ...value,
+    customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+  };
+}
+
+function normalizeCursorAccent<
+  T extends z.infer<typeof workspaceSettingsSchema>,
+>(settings: T): T {
+  if (settings.theme !== 'custom') {
+    return {
+      ...settings,
+      customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+    };
+  }
+
+  return {
+    ...settings,
+    customTerminalPalette: {
+      ...settings.customTerminalPalette,
+      cursorAccent: settings.customTerminalPalette.background,
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function assertWithinDeployment(
