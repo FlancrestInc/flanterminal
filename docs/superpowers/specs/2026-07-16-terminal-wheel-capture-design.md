@@ -7,32 +7,30 @@ buffer and never reach the shell as Up/Down input.
 
 ## Evidence and root cause
 
-The affected environment reports all expected prerequisites: workspace
-scrollback is 10,000 lines, tmux history is 20,000 lines, the managed window
-has `alternate-screen off`, and tmux has `mouse off`. The behavior reproduces
-in Firefox and Chrome, in new tabs, at a plain shell, and after explicitly
-selecting xterm's normal buffer. These observations conflict with the two
-xterm 6 conditions that normally produce terminal input: no active scrollback
-buffer, or an active mouse protocol. The exact internal state discrepancy is
-not observable through the current application boundary.
+The exact reconnect regression established that tmux retains history which a
+new xterm instance does not own: immediately after a full reload,
+`terminal.buffer.active.baseY` is zero while the old output remains in tmux's
+history. With tmux mouse disabled, xterm translates a wheel in that state to
+Up/Down input. With tmux mouse enabled, wheel reaches retained history, but
+xterm disables ordinary drag selection because the terminal mouse protocol is
+active. Prepending `capture-pane` output before `attach-session` was also
+tested and rejected because tmux's attach redraw clears that browser history.
 
-The architectural defect is that FlanTerminal delegates its required wheel
-policy to those internal heuristics. It has no application-level invariant
-that an ordinary vertical wheel gesture is browser-local, so any unexpected
-xterm state can leak the gesture into shell input. The current Chromium-only
-E2E configuration also does not directly cover alternate browser engines, and
-the E2E wrapper silently ignores command-line filters.
+The defect is therefore split ownership without an explicit boundary. Both
+the retained tmux history path and xterm's later browser-local scrollback path
+must be supported, while tmux mouse mode must not regress ordinary selection.
+The Chromium-only E2E configuration and argument-dropping E2E wrapper also hid
+this interaction from alternate browser engines and focused regression runs.
 
 ## Selected approach
 
-Register xterm's `attachCustomWheelEventHandler` after opening each terminal.
-xterm 6 invokes this supported hook before both its native no-scrollback
-translation and active mouse-protocol reporting. For a gesture with no Ctrl,
-Meta, Shift, or Alt modifier whose vertical delta dominates its horizontal
-delta, convert the delta to signed whole terminal lines, call `scrollLines`,
-call `preventDefault`, and return `false` so xterm performs no further wheel
-processing. Delegate modified and primarily horizontal gestures by returning
-`true`.
+Use a hybrid ownership boundary. Managed tmux sessions migrate `mouse` to
+`on`, so a reconnect with no xterm scrollback can navigate retained tmux
+history. Register xterm's supported custom wheel hook and inspect
+`terminal.buffer.active.baseY`: delegate ordinary vertical wheel while it is
+zero; once browser-local scrollback exists, normalize the gesture and call
+`scrollLines`, preventing tmux or the shell from also consuming it. Modified
+and primarily horizontal gestures remain delegated.
 
 Maintain a fractional line remainder per terminal instance. Convert
 `DOM_DELTA_LINE` directly to lines; convert `DOM_DELTA_PAGE` to
@@ -42,28 +40,34 @@ height of the first rendered xterm row, falling back to
 gesture is delegated. Add the converted delta, truncate toward zero, retain
 the unused fraction, and pass only a nonzero integer to `scrollLines`.
 
-Register a fresh handler for each terminal instance; terminal disposal removes
-xterm's owning listeners. This keeps behavior local to the terminal surface
-and preserves keyboard input, selection, links, context menus, and tmux
-configuration.
+Because tmux mouse mode normally disables xterm selection, install a capture
+listener before `terminal.open`. For an ordinary primary-button press, replace
+the event with xterm's platform force-selection modifier (Shift outside macOS,
+Option on macOS with `macOptionClickForcesSelection`). Thus an unmodified user
+drag remains browser selection and never becomes a tmux mouse press. Register
+fresh handlers per terminal and remove the capture listener during cleanup.
 
 ## Alternatives considered
 
-1. Continue changing tmux options. Runtime evidence proves the relevant
-   options are already applied, so further server changes do not address the
-   failing boundary.
-2. Capture wheel events with a separate DOM listener. This duplicates xterm's
-   event ownership and cleanup when its supported custom wheel hook already
-   covers both processing paths.
+1. Keep tmux mouse off and always capture wheel in xterm. This cannot expose
+   retained history after a fresh reconnect because xterm has no such lines.
+2. Replay `capture-pane` before attach. The attach redraw clears the prepended
+   output and leaves xterm without retained scrollback.
+3. Require Shift-drag selection. This changes established ordinary selection
+   behavior and is unnecessary when the app can force selection internally.
 
 ## Testing
 
-- Add client unit coverage that vertical wheel events scroll signed line/page/
+- Add client unit coverage that tmux-owned wheels delegate, while xterm-owned
+  vertical wheel events scroll signed line/page/
   pixel amounts, retain pixel remainders, prevent the browser default, return
   `false`, and never send socket input.
 - Verify modified and horizontal gestures remain delegated.
 - Verify terminal recreation registers a fresh handler owned by the new xterm
   instance.
+- Reproduce retained output created before reload, migration from tmux mouse
+  off, wheel-before-new-browser-history, draft preservation, and ordinary
+  unmodified drag selection in browser E2E coverage.
 - Give the existing setup project `browserName: 'chromium'`; add explicit
   Chromium and Firefox workflow projects that both depend on that one-time
   enrollment project and each set `use.browserName`.

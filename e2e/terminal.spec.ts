@@ -77,9 +77,11 @@ async function sessionAction(page: Page, name: string): Promise<void> {
 }
 
 test('copies selected terminal text', async ({ page, context }, testInfo) => {
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
-    origin: new URL(testInfo.project.use.baseURL as string).origin,
-  });
+  if (testInfo.project.use.browserName === 'chromium') {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], {
+      origin: new URL(testInfo.project.use.baseURL as string).origin,
+    });
+  }
   await openAuthenticatedWorkspace(page);
   await waitConnected(page);
 
@@ -92,30 +94,23 @@ test('copies selected terminal text', async ({ page, context }, testInfo) => {
     .filter({ hasText: copyMarker })
     .last();
   await expect(markerRow).toHaveText(copyMarker);
-  const [screenBox, markerRowBox, cellWidth] = await Promise.all([
+  const [screenBox, markerRowBox] = await Promise.all([
     activePanel(page).locator('.xterm-screen').boundingBox(),
     markerRow.boundingBox(),
-    activePanel(page)
-      .locator('.xterm-helper-textarea')
-      .evaluate((element) =>
-        Number.parseFloat(getComputedStyle(element).width),
-      ),
   ]);
   expect(screenBox).not.toBeNull();
   expect(markerRowBox).not.toBeNull();
-  expect(cellWidth).toBeGreaterThan(0);
   const markerY = markerRowBox!.y + markerRowBox!.height / 2;
-  await page.mouse.move(screenBox!.x + cellWidth / 2, markerY);
+  await page.mouse.move(screenBox!.x + 2, markerY);
   await page.mouse.down();
-  await page.mouse.move(
-    screenBox!.x + cellWidth * copyMarker.length - 1,
-    markerY,
-  );
+  await page.mouse.move(screenBox!.x + screenBox!.width - 2, markerY, {
+    steps: 8,
+  });
   await page.mouse.up();
   await expect
     .poll(() =>
       activePanel(page)
-        .locator('.xterm-selection')
+        .locator('.xterm-selection > div')
         .evaluateAll((elements) =>
           elements.some((element) => {
             const selection = element.getBoundingClientRect();
@@ -124,6 +119,8 @@ test('copies selected terminal text', async ({ page, context }, testInfo) => {
         ),
     )
     .toBe(true);
+
+  if (testInfo.project.use.browserName !== 'chromium') return;
 
   await page.evaluate(() => navigator.clipboard.writeText(''));
   await page.keyboard.press('Control+C');
@@ -138,23 +135,30 @@ test('native xterm scrolling exposes managed-session history', async ({
   await openAuthenticatedWorkspace(page);
   await waitConnected(page);
 
+  const retainedMarker = `SCROLLBACK_RETAINED_${marker}`;
   await sendCommand(
     page,
-    `tmux set-window-option -t "$(tmux display-message -p '#S:0')" alternate-screen on; tmux detach-client`,
+    `printf '${retainedMarker}\\n'; i=1; while [ $i -le 200 ]; do printf 'RETAINED_LINE_%03d\\n' "$i"; i=$((i + 1)); done`,
+  );
+  await expectTerminal(page, 'RETAINED_LINE_200');
+  await sendCommand(
+    page,
+    `tmux set-window-option -t "$(tmux display-message -p '#S:0')" alternate-screen on; tmux set-option -t "$(tmux display-message -p '#S')" mouse off; tmux detach-client`,
   );
   await page.reload();
   await waitConnected(page);
 
-  const earlyMarker = `SCROLLBACK_EARLY_${marker}`;
-  const finalMarker = `SCROLLBACK_FINAL_${marker}`;
+  const migratedSettingsMarker = `MIGRATED_SETTINGS_${marker}`;
   await sendCommand(
     page,
-    `printf '${earlyMarker}\\n'; i=1; while [ $i -le 200 ]; do printf 'SCROLLBACK_LINE_%03d\\n' "$i"; i=$((i + 1)); done; printf '${finalMarker}\\n'`,
+    `printf '${migratedSettingsMarker} alternate=%s mouse=%s\\n' "$(tmux show-window-options -v alternate-screen)" "$(tmux show-options -v mouse)"`,
   );
-  await expectTerminal(page, finalMarker);
+  await expectTerminal(
+    page,
+    `${migratedSettingsMarker} alternate=off mouse=on`,
+  );
 
-  await wheelUntilVisible(page, earlyMarker, -120);
-  await wheelUntilVisible(page, finalMarker, 120);
+  await wheelUntilVisible(page, retainedMarker, -120);
   await wheelToLiveView(page);
 
   const historyMarker = `SCROLLBACK_HISTORY_${marker}`;
@@ -180,56 +184,6 @@ test('native xterm scrolling exposes managed-session history', async ({
       return matches?.length ?? 0;
     })
     .toBe(1);
-});
-
-test('copies a full terminal row selection', async ({ page }) => {
-  await openAuthenticatedWorkspace(page);
-  await waitConnected(page);
-  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
-    origin: new URL(page.url()).origin,
-  });
-
-  const selectionMarker = `TERMINAL_SELECTION_${marker}`;
-  await sendCommand(page, `printf '${selectionMarker}\\n'`);
-
-  const screen = activePanel(page).locator('.xterm-screen');
-  const markerRow = activePanel(page)
-    .locator('.xterm-rows > div')
-    .filter({ hasText: new RegExp(`^${selectionMarker}$`) });
-  await expect(markerRow).toHaveCount(1);
-  await expect(markerRow).toBeVisible();
-  const screenBox = await screen.boundingBox();
-  const markerRowBox = await markerRow.boundingBox();
-  expect(screenBox).not.toBeNull();
-  expect(markerRowBox).not.toBeNull();
-  if (screenBox === null || markerRowBox === null) {
-    throw new Error('Terminal selection target is not visible');
-  }
-
-  const rowCenter = markerRowBox.y + markerRowBox.height / 2;
-  await page.mouse.move(screenBox.x + 2, rowCenter);
-  await page.mouse.down();
-  await page.mouse.move(screenBox.x + screenBox.width - 2, rowCenter, {
-    steps: 8,
-  });
-  await page.mouse.up();
-
-  await expect
-    .poll(() =>
-      activePanel(page)
-        .locator('.xterm-selection > div')
-        .evaluateAll((rectangles) =>
-          rectangles.some((rectangle) => {
-            const bounds = rectangle.getBoundingClientRect();
-            return bounds.width > 0 && bounds.height > 0;
-          }),
-        ),
-    )
-    .toBe(true);
-  await page.keyboard.press('Control+C');
-  await expect
-    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(selectionMarker);
 });
 
 test('multiple terminal tabs preserve independent shells and lifecycle state', async ({

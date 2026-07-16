@@ -247,6 +247,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         fontSize: settings.fontSize,
         letterSpacing: settings.letterSpacing,
         lineHeight: settings.lineHeight,
+        macOptionClickForcesSelection: true,
         rightClickSelectsWord: true,
         scrollback: settings.scrollback,
         theme: terminalTheme,
@@ -255,6 +256,41 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       const webLinksAddon = dependencies.webLinksAddonFactory();
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
+      const forceOrdinarySelection = (event: MouseEvent) => {
+        if (
+          event.button !== 0 ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          event.altKey
+        ) {
+          return;
+        }
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const screen = target.closest('.xterm-screen');
+        if (screen === null || !host.contains(screen)) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const isMac = navigator.platform.startsWith('Mac');
+        target.dispatchEvent(
+          new MouseEvent(event.type, {
+            bubbles: true,
+            cancelable: true,
+            detail: event.detail,
+            screenX: event.screenX,
+            screenY: event.screenY,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            button: event.button,
+            buttons: event.buttons,
+            relatedTarget: event.relatedTarget,
+            altKey: isMac,
+            shiftKey: !isMac,
+          }),
+        );
+      };
+      host.addEventListener('mousedown', forceOrdinarySelection, true);
       terminal.open(host);
       let wheelLineRemainder = 0;
       terminal.attachCustomWheelEventHandler((event) => {
@@ -390,6 +426,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       });
 
       return () => {
+        host.removeEventListener('mousedown', forceOrdinarySelection, true);
         observer.disconnect();
         cancelInitialFit();
         cancelResize();

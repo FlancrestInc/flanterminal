@@ -267,6 +267,7 @@ describe('Terminal', () => {
         fontSize: 15,
         letterSpacing: 0,
         lineHeight: 1.2,
+        macOptionClickForcesSelection: true,
         rightClickSelectsWord: true,
         scrollback: 12_345,
         theme: expect.objectContaining({
@@ -278,6 +279,53 @@ describe('Terminal', () => {
     expect(terminal.loadAddon).toHaveBeenNthCalledWith(1, fitAddon);
     expect(terminal.loadAddon).toHaveBeenNthCalledWith(2, webLinksAddon);
     expect(terminal.open).toHaveBeenCalledWith(getByLabelText('Terminal'));
+  });
+
+  it('turns an ordinary primary press into xterm force-selection input', () => {
+    const result = setup();
+    const host = result.getByLabelText('Terminal');
+    const screen = document.createElement('div');
+    screen.className = 'xterm-screen';
+    host.append(screen);
+    const received: MouseEvent[] = [];
+    screen.addEventListener('mousedown', (event) => received.push(event));
+
+    screen.dispatchEvent(
+      new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        buttons: 1,
+      }),
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual(
+      expect.objectContaining({ button: 0, buttons: 1, shiftKey: true }),
+    );
+    expect(result.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('leaves ordinary primary presses outside the xterm screen untouched', () => {
+    const result = setup();
+    const host = result.getByLabelText('Terminal');
+    const gutter = document.createElement('div');
+    gutter.className = 'xterm-scrollable-element';
+    host.append(gutter);
+    const received: MouseEvent[] = [];
+    gutter.addEventListener('mousedown', (event) => received.push(event));
+    const event = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+    });
+
+    expect(gutter.dispatchEvent(event)).toBe(true);
+
+    expect(received).toEqual([event]);
+    expect(event.defaultPrevented).toBe(false);
+    expect(event.shiftKey).toBe(false);
   });
 
   it('writes only subscribed protocol output and sends input only when connected', () => {
@@ -319,25 +367,16 @@ describe('Terminal', () => {
     expect(result.socket.sendInput).not.toHaveBeenCalled();
   });
 
-  it('delegates ordinary vertical wheels when tmux owns the available history', () => {
+  it('delegates vertical wheels while retained history is tmux-owned', () => {
     const result = setup();
-    result.terminal.wheel(
-      wheelEvent({ deltaY: 0.6, deltaMode: WheelEvent.DOM_DELTA_LINE }),
-    );
     result.terminal.hasScrollback = false;
-    const delegated = wheelEvent({
+    const event = wheelEvent({
       deltaY: -1,
       deltaMode: WheelEvent.DOM_DELTA_LINE,
     });
 
-    expect(result.terminal.wheel(delegated)).toBe(true);
-    expect(delegated.defaultPrevented).toBe(false);
-    expect(result.terminal.scrollLines).not.toHaveBeenCalled();
-
-    result.terminal.hasScrollback = true;
-    result.terminal.wheel(
-      wheelEvent({ deltaY: 0.5, deltaMode: WheelEvent.DOM_DELTA_LINE }),
-    );
+    expect(result.terminal.wheel(event)).toBe(true);
+    expect(event.defaultPrevented).toBe(false);
     expect(result.terminal.scrollLines).not.toHaveBeenCalled();
     expect(result.socket.sendInput).not.toHaveBeenCalled();
   });
