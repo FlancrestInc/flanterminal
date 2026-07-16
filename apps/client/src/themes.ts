@@ -9,11 +9,11 @@ export const FONT_STACKS: Readonly<
   'system-monospace':
     "ui-monospace, 'Noto Sans Mono', 'Segoe UI Symbol', 'Noto Color Emoji', monospace",
   'dejavu-sans-mono':
-    "'DejaVu Sans Mono', 'Noto Sans Mono', 'Liberation Mono', 'Courier New', monospace",
+    "'DejaVu Sans Mono', 'Noto Sans Mono', 'Liberation Mono', 'Courier New', 'Courier', monospace",
   'noto-sans-mono':
-    "'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', monospace",
+    "'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', 'Courier', monospace",
   'liberation-mono':
-    "'Liberation Mono', 'Noto Sans Mono', 'DejaVu Sans Mono', 'Courier New', monospace",
+    "'Liberation Mono', 'Noto Sans Mono', 'DejaVu Sans Mono', 'Courier New', 'Courier', monospace",
   courier:
     "'Courier', 'Courier New', 'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', monospace",
 });

@@ -126,13 +126,13 @@ describe('terminal themes', () => {
 
   it('uses complete ordered practical fallbacks for system font stacks', () => {
     expect(FONT_STACKS['dejavu-sans-mono']).toBe(
-      "'DejaVu Sans Mono', 'Noto Sans Mono', 'Liberation Mono', 'Courier New', monospace",
+      "'DejaVu Sans Mono', 'Noto Sans Mono', 'Liberation Mono', 'Courier New', 'Courier', monospace",
     );
     expect(FONT_STACKS['noto-sans-mono']).toBe(
-      "'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', monospace",
+      "'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', 'Courier', monospace",
     );
     expect(FONT_STACKS['liberation-mono']).toBe(
-      "'Liberation Mono', 'Noto Sans Mono', 'DejaVu Sans Mono', 'Courier New', monospace",
+      "'Liberation Mono', 'Noto Sans Mono', 'DejaVu Sans Mono', 'Courier New', 'Courier', monospace",
     );
     expect(FONT_STACKS.courier).toBe(
       "'Courier', 'Courier New', 'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', monospace",

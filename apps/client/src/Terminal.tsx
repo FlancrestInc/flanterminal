@@ -6,18 +6,25 @@ import {
   type ITerminalOptions,
 } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+} from 'react';
 
 import {
   MAX_COLS,
   MAX_ROWS,
   MIN_COLS,
   MIN_ROWS,
+  terminalPaletteKeys,
   type ClientConfig,
   type WorkspaceSettings,
 } from '@flanterminal/shared';
 
-import { FONT_STACKS, terminalThemeFor } from './themes.js';
+import { FONT_STACKS, themeFor } from './themes.js';
 import type { TerminalSocketController } from './useTerminalSocket.js';
 
 export interface DisposableLike {
@@ -131,6 +138,24 @@ export interface TerminalHandle {
 const BELL_URL = new URL('./assets/sounds/terminal-bell.wav', import.meta.url)
   .href;
 const SOUND_BELL_MIN_INTERVAL_MS = 200;
+const PALETTE_SIGNATURE_SEPARATOR = '\0';
+
+function customPaletteSignature(
+  palette: WorkspaceSettings['customTerminalPalette'],
+) {
+  return terminalPaletteKeys
+    .map((key) => palette[key])
+    .join(PALETTE_SIGNATURE_SEPARATOR);
+}
+
+function customPaletteFromSignature(
+  signature: string,
+): WorkspaceSettings['customTerminalPalette'] {
+  const colors = signature.split(PALETTE_SIGNATURE_SEPARATOR);
+  return Object.fromEntries(
+    terminalPaletteKeys.map((key, index) => [key, colors[index]!]),
+  ) as WorkspaceSettings['customTerminalPalette'];
+}
 
 function isSelectedCopyShortcut(event: KeyboardEvent) {
   if (
@@ -165,7 +190,18 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
     const syncResizeRef = useRef<(force: boolean) => void>(() => undefined);
     const cancelResizeRef = useRef<() => void>(() => undefined);
     const { sendInput, sendResize, subscribeOutput } = socket;
-    const terminalTheme = terminalThemeFor(settings);
+    const selectedTheme = settings.theme;
+    const terminalThemeSignature =
+      selectedTheme === 'custom'
+        ? customPaletteSignature(settings.customTerminalPalette)
+        : selectedTheme;
+    const terminalTheme = useMemo(
+      () =>
+        selectedTheme === 'custom'
+          ? customPaletteFromSignature(terminalThemeSignature)
+          : themeFor(selectedTheme).terminal,
+      [selectedTheme, terminalThemeSignature],
+    );
 
     useImperativeHandle(
       ref,

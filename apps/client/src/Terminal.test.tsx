@@ -589,6 +589,33 @@ describe('Terminal', () => {
     );
   });
 
+  it('preserves xterm for value-equivalent custom palettes from fresh settings', () => {
+    const palette = { ...MIDNIGHT_ELECTRIC_TERMINAL_PALETTE };
+    const result = setup('connected', {
+      theme: 'custom',
+      customTerminalPalette: palette,
+    });
+
+    act(() => result.output('buffer contents'));
+    result.rerender(
+      <Terminal
+        config={config}
+        settings={{
+          ...result.settings,
+          staleSessionCleanupHours: 24,
+          customTerminalPalette: { ...palette },
+        }}
+        socket={result.socket}
+        dependencies={result.dependencies}
+      />,
+    );
+
+    expect(result.terminalFactory).toHaveBeenCalledOnce();
+    expect(result.terminals).toEqual([result.terminal]);
+    expect(result.terminal.dispose).not.toHaveBeenCalled();
+    expect(result.terminal.write).toHaveBeenCalledWith('buffer contents');
+  });
+
   it('uses only the local bell asset and never stores bell or output data', async () => {
     const storage = vi.spyOn(Storage.prototype, 'setItem');
     const sound = setup('connected', { bellBehavior: 'sound' });
