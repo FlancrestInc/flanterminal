@@ -51,15 +51,15 @@ workspace defaults use DejaVu Sans Mono and Midnight Electric.
 Midnight Electric is the reference palette and must use these exact xterm
 values:
 
-| Key | Value | Key | Value |
-| --- | --- | --- | --- |
-| background | `#101827` | foreground | `#DCE8FF` |
-| cursor | `#82B1FF` | cursorAccent | `#101827` |
-| selectionBackground | `#294A82` | black / brightBlack | `#152238` / `#4A5D80` |
-| red / brightRed | `#FF7B8B` / `#FF9EAA` | green / brightGreen | `#74D99F` / `#99E9B6` |
-| yellow / brightYellow | `#F6CB6C` / `#FFDA91` | blue / brightBlue | `#82B1FF` / `#A8C8FF` |
-| magenta / brightMagenta | `#D8A0FF` / `#EDB9FF` | cyan / brightCyan | `#76D7EA` / `#A8E8F5` |
-| white / brightWhite | `#DCE8FF` / `#FFFFFF` | | |
+| Key                     | Value                 | Key                 | Value                 |
+| ----------------------- | --------------------- | ------------------- | --------------------- |
+| background              | `#101827`             | foreground          | `#DCE8FF`             |
+| cursor                  | `#82B1FF`             | cursorAccent        | `#101827`             |
+| selectionBackground     | `#294A82`             | black / brightBlack | `#152238` / `#4A5D80` |
+| red / brightRed         | `#FF7B8B` / `#FF9EAA` | green / brightGreen | `#74D99F` / `#99E9B6` |
+| yellow / brightYellow   | `#F6CB6C` / `#FFDA91` | blue / brightBlue   | `#82B1FF` / `#A8C8FF` |
+| magenta / brightMagenta | `#D8A0FF` / `#EDB9FF` | cyan / brightCyan   | `#76D7EA` / `#A8E8F5` |
+| white / brightWhite     | `#DCE8FF` / `#FFFFFF` |                     |                       |
 
 The other new dark choices use the same key order and Midnight UI tokens. Their
 complete terminal palettes are fixed as follows (keys appear in canonical
