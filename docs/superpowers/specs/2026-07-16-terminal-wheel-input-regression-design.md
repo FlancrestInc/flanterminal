@@ -51,8 +51,10 @@ the buffer has scrollback.
 
 - Add a server unit test that an existing managed session receives the
   window-scoped `alternate-screen off` command before attach.
-- Extend the browser test to reuse a managed session created without that
-  option, verify that wheel-up reveals retained output, then type and submit a
-  unique command to prove the wheel gesture did not replace the draft with a
-  command from history.
+- Extend the browser test by seeding a managed session whose initial window
+  has `alternate-screen on`, detaching it, and reconnecting so `prepare()`
+  migrates that existing session. Verify that wheel-up reveals retained output.
+  Before wheeling, seed a distinct history command and type an unsubmitted
+  unique draft; press Enter after the wheel action and assert that the draft,
+  not the history command, ran.
 - Run focused server tests, typecheck, lint, and the wheel-scroll E2E flow.
