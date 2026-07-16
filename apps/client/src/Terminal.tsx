@@ -45,6 +45,8 @@ export interface TerminalLike extends DisposableLike {
   hasSelection(): boolean;
   getSelection(): string;
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void;
+  attachCustomWheelEventHandler(handler: (event: WheelEvent) => boolean): void;
+  scrollLines(amount: number): void;
   focus(): void;
   clear(): void;
   write(data: string): void;
@@ -96,6 +98,9 @@ const defaultDependencies: TerminalDependencies = {
       getSelection: () => terminal.getSelection(),
       attachCustomKeyEventHandler: (handler) =>
         terminal.attachCustomKeyEventHandler(handler),
+      attachCustomWheelEventHandler: (handler) =>
+        terminal.attachCustomWheelEventHandler(handler),
+      scrollLines: (amount) => terminal.scrollLines(amount),
       focus: () => terminal.focus(),
       clear: () => terminal.clear(),
       write: (data) => terminal.write(data),
@@ -247,6 +252,51 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
       terminal.open(host);
+      let wheelLineRemainder = 0;
+      terminal.attachCustomWheelEventHandler((event) => {
+        if (
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          event.altKey ||
+          event.deltaY === 0 ||
+          Math.abs(event.deltaX) >= Math.abs(event.deltaY)
+        ) {
+          wheelLineRemainder = 0;
+          return true;
+        }
+
+        let deltaLines: number;
+        if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+          deltaLines = event.deltaY;
+        } else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+          deltaLines = event.deltaY * Math.max(terminal.rows - 1, 1);
+        } else {
+          const renderedRowHeight = host
+            .querySelector<HTMLElement>('.xterm-rows > div')
+            ?.getBoundingClientRect().height;
+          const rowHeight =
+            renderedRowHeight !== undefined &&
+            Number.isFinite(renderedRowHeight) &&
+            renderedRowHeight > 0
+              ? renderedRowHeight
+              : settings.fontSize * settings.lineHeight;
+          deltaLines = event.deltaY / rowHeight;
+        }
+
+        if (
+          wheelLineRemainder !== 0 &&
+          Math.sign(deltaLines) !== Math.sign(wheelLineRemainder)
+        ) {
+          wheelLineRemainder = 0;
+        }
+        wheelLineRemainder += deltaLines;
+        const wholeLines = Math.trunc(wheelLineRemainder);
+        wheelLineRemainder -= wholeLines;
+        if (wholeLines !== 0) terminal.scrollLines(wholeLines);
+        event.preventDefault();
+        return false;
+      });
       terminal.attachCustomKeyEventHandler((event) => {
         if (!isCopyShortcut(event)) return true;
         if (!terminal.hasSelection()) {

@@ -58,10 +58,12 @@ class FakeTerminal implements TerminalLike {
   readonly focus = vi.fn();
   readonly clear = vi.fn();
   readonly write = vi.fn();
+  readonly scrollLines = vi.fn();
   readonly dispose = vi.fn();
   readonly dataListeners = new Set<(data: string) => void>();
   readonly bellListeners = new Set<() => void>();
   keyHandler: ((event: KeyboardEvent) => boolean) | undefined;
+  wheelHandler: ((event: WheelEvent) => boolean) | undefined;
 
   onData(listener: (data: string) => void) {
     this.dataListeners.add(listener);
@@ -80,6 +82,9 @@ class FakeTerminal implements TerminalLike {
   attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
     this.keyHandler = handler;
   }
+  attachCustomWheelEventHandler(handler: (event: WheelEvent) => boolean) {
+    this.wheelHandler = handler;
+  }
   bell() {
     for (const listener of this.bellListeners) listener();
   }
@@ -89,6 +94,9 @@ class FakeTerminal implements TerminalLike {
   }
   key(event: KeyboardEvent) {
     return this.keyHandler?.(event) ?? true;
+  }
+  wheel(event: WheelEvent) {
+    return this.wheelHandler?.(event) ?? true;
   }
   forwardAcceptedControlC(event: KeyboardEvent) {
     const accepted = this.key(event);
@@ -137,6 +145,14 @@ function keyEvent(init: KeyboardEventInit) {
     bubbles: true,
     cancelable: true,
     key: 'c',
+    ...init,
+  });
+}
+
+function wheelEvent(init: WheelEventInit) {
+  return new WheelEvent('wheel', {
+    bubbles: true,
+    cancelable: true,
     ...init,
   });
 }
@@ -273,6 +289,177 @@ describe('Terminal', () => {
     const disconnected = setup('reconnecting');
     act(() => disconnected.terminal.input('do not replay'));
     expect(disconnected.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('captures signed fractional line wheels locally and scrolls only whole lines', () => {
+    const result = setup();
+    const first = wheelEvent({
+      deltaY: 0.6,
+      deltaMode: WheelEvent.DOM_DELTA_LINE,
+    });
+    const second = wheelEvent({
+      deltaY: 0.6,
+      deltaMode: WheelEvent.DOM_DELTA_LINE,
+    });
+    const negative = wheelEvent({
+      deltaY: -1.7,
+      deltaMode: WheelEvent.DOM_DELTA_LINE,
+    });
+
+    expect(result.terminal.wheel(first)).toBe(false);
+    expect(first.defaultPrevented).toBe(true);
+    expect(result.terminal.scrollLines).not.toHaveBeenCalled();
+    expect(result.terminal.wheel(second)).toBe(false);
+    expect(second.defaultPrevented).toBe(true);
+    expect(result.terminal.scrollLines).toHaveBeenNthCalledWith(1, 1);
+    expect(result.terminal.wheel(negative)).toBe(false);
+    expect(negative.defaultPrevented).toBe(true);
+    expect(result.terminal.scrollLines).toHaveBeenNthCalledWith(2, -1);
+    expect(result.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('converts page wheels to rows minus one with a one-row minimum', () => {
+    const result = setup();
+    result.terminal.rows = 5;
+
+    result.terminal.wheel(
+      wheelEvent({ deltaY: 0.5, deltaMode: WheelEvent.DOM_DELTA_PAGE }),
+    );
+    expect(result.terminal.scrollLines).toHaveBeenCalledWith(2);
+
+    result.terminal.rows = 1;
+    result.terminal.wheel(
+      wheelEvent({ deltaY: 1, deltaMode: WheelEvent.DOM_DELTA_PAGE }),
+    );
+    expect(result.terminal.scrollLines).toHaveBeenLastCalledWith(1);
+  });
+
+  it('converts pixel wheels using rendered row height', () => {
+    const rendered = setup();
+    const rows = document.createElement('div');
+    rows.className = 'xterm-rows';
+    const row = document.createElement('div');
+    vi.spyOn(row, 'getBoundingClientRect').mockReturnValue({
+      height: 20,
+    } as DOMRect);
+    rows.append(row);
+    rendered.getByLabelText('Terminal').append(rows);
+
+    rendered.terminal.wheel(
+      wheelEvent({ deltaY: 40, deltaMode: WheelEvent.DOM_DELTA_PIXEL }),
+    );
+    expect(rendered.terminal.scrollLines).toHaveBeenCalledWith(2);
+  });
+
+  it.each([0, Number.NaN, Number.POSITIVE_INFINITY])(
+    'falls back to settings row height for invalid rendered height %s',
+    (renderedHeight) => {
+      const fallback = setup('connected', { fontSize: 10, lineHeight: 1.5 });
+      const rows = document.createElement('div');
+      rows.className = 'xterm-rows';
+      const row = document.createElement('div');
+      vi.spyOn(row, 'getBoundingClientRect').mockReturnValue({
+        height: renderedHeight,
+      } as DOMRect);
+      rows.append(row);
+      fallback.getByLabelText('Terminal').append(rows);
+
+      fallback.terminal.wheel(
+        wheelEvent({ deltaY: 30, deltaMode: WheelEvent.DOM_DELTA_PIXEL }),
+      );
+      expect(fallback.terminal.scrollLines).toHaveBeenCalledWith(2);
+    },
+  );
+
+  it('retains pixel-mode fractions and resets them on direction changes', () => {
+    const fallback = setup('connected', { fontSize: 10, lineHeight: 1.5 });
+
+    fallback.terminal.wheel(
+      wheelEvent({ deltaY: 9, deltaMode: WheelEvent.DOM_DELTA_PIXEL }),
+    );
+    fallback.terminal.wheel(
+      wheelEvent({ deltaY: 9, deltaMode: WheelEvent.DOM_DELTA_PIXEL }),
+    );
+    expect(fallback.terminal.scrollLines).toHaveBeenNthCalledWith(1, 1);
+
+    fallback.terminal.wheel(
+      wheelEvent({ deltaY: -9, deltaMode: WheelEvent.DOM_DELTA_PIXEL }),
+    );
+    expect(fallback.terminal.scrollLines).toHaveBeenCalledTimes(1);
+    fallback.terminal.wheel(
+      wheelEvent({ deltaY: -9, deltaMode: WheelEvent.DOM_DELTA_PIXEL }),
+    );
+    expect(fallback.terminal.scrollLines).toHaveBeenNthCalledWith(2, -1);
+  });
+
+  it('retains same-direction fractions and resets them on direction changes', () => {
+    const result = setup();
+
+    result.terminal.wheel(
+      wheelEvent({ deltaY: 1.6, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+    result.terminal.wheel(
+      wheelEvent({ deltaY: 0.5, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+    expect(result.terminal.scrollLines).toHaveBeenNthCalledWith(1, 1);
+    expect(result.terminal.scrollLines).toHaveBeenNthCalledWith(2, 1);
+
+    result.terminal.wheel(
+      wheelEvent({ deltaY: -0.6, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+    expect(result.terminal.scrollLines).toHaveBeenCalledTimes(2);
+    result.terminal.wheel(
+      wheelEvent({ deltaY: -0.5, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+    expect(result.terminal.scrollLines).toHaveBeenNthCalledWith(3, -1);
+  });
+
+  it.each([
+    ['Ctrl', { ctrlKey: true, deltaY: 1 }],
+    ['Meta', { metaKey: true, deltaY: 1 }],
+    ['Shift', { shiftKey: true, deltaY: 1 }],
+    ['Alt', { altKey: true, deltaY: 1 }],
+    ['zero vertical', { deltaY: 0 }],
+    ['horizontal', { deltaX: 1, deltaY: 1 }],
+  ])('delegates %s wheel gestures and resets the fraction', (_name, init) => {
+    const result = setup();
+    result.terminal.wheel(
+      wheelEvent({ deltaY: 0.6, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+    const delegated = wheelEvent({
+      deltaMode: WheelEvent.DOM_DELTA_LINE,
+      ...init,
+    });
+
+    expect(result.terminal.wheel(delegated)).toBe(true);
+    expect(delegated.defaultPrevented).toBe(false);
+    result.terminal.wheel(
+      wheelEvent({ deltaY: 0.5, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+    expect(result.terminal.scrollLines).not.toHaveBeenCalled();
+  });
+
+  it('installs a fresh wheel handler when settings recreate the terminal', () => {
+    const result = setup();
+    result.terminal.wheel(
+      wheelEvent({ deltaY: 0.6, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+
+    result.rerender(
+      <Terminal
+        config={config}
+        settings={{ ...result.settings, fontSize: 16 }}
+        socket={result.socket}
+        dependencies={result.dependencies}
+      />,
+    );
+    const replacement = result.terminals[1]!;
+    expect(replacement.wheelHandler).toBeDefined();
+    expect(replacement.wheelHandler).not.toBe(result.terminal.wheelHandler);
+    replacement.wheel(
+      wheelEvent({ deltaY: 0.5, deltaMode: WheelEvent.DOM_DELTA_LINE }),
+    );
+    expect(replacement.scrollLines).not.toHaveBeenCalled();
   });
 
   it.each([
