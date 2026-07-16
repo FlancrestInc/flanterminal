@@ -669,7 +669,7 @@ type ServicesStage = ProductionServices &
     cleanupPort: DeferredCleanupPort;
   }>;
 
-function workspaceSettingsConstraints(
+export function workspaceSettingsConstraints(
   config: ReturnType<typeof loadConfig>,
 ): WorkspaceSettingsConstraints {
   return Object.freeze({
@@ -732,7 +732,7 @@ function workspaceSettingsConstraints(
   });
 }
 
-function defaultWorkspaceSettings(
+export function defaultWorkspaceSettings(
   config: ReturnType<typeof loadConfig>,
 ): WorkspaceSettings {
   return Object.freeze({

@@ -1,18 +1,55 @@
 import { EventEmitter, once } from 'node:events';
 import { createServer } from 'node:http';
 
+import { MIDNIGHT_ELECTRIC_TERMINAL_PALETTE } from '@flanterminal/shared';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
   createProductionRuntime,
   createProductionRuntimeMetrics,
   createServerLifecycle,
+  defaultWorkspaceSettings,
   initializeProductionAuthentication,
   registerShutdownSignals,
   type ProductionRuntimeFactory,
   verifyRuntimeExecutables,
+  workspaceSettingsConstraints,
 } from './index.js';
 import { loadConfig } from './config.js';
+
+describe('production workspace appearance settings', () => {
+  it('publishes the configured appearance options and defaults', () => {
+    const config = loadConfig({ AUTH_MODE: 'none' });
+
+    const constraints = workspaceSettingsConstraints(config);
+    const defaults = defaultWorkspaceSettings(config);
+
+    expect(constraints.limits.fontFamilies).toEqual([
+      'jetbrains-mono-nerd',
+      'system-monospace',
+      'dejavu-sans-mono',
+      'noto-sans-mono',
+      'liberation-mono',
+      'courier',
+    ]);
+    expect(constraints.limits.themes).toEqual([
+      'dark',
+      'light',
+      'ubuntu',
+      'midnight-electric',
+      'aurora-night',
+      'carbon-violet',
+      'custom',
+    ]);
+    expect(defaults).toMatchObject({
+      fontFamily: 'dejavu-sans-mono',
+      theme: 'midnight-electric',
+    });
+    expect(defaults.customTerminalPalette).toEqual(
+      MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+    );
+  });
+});
 
 describe('server lifecycle', () => {
   it('allows one pending start attempt and rejects a concurrent start stably', async () => {
