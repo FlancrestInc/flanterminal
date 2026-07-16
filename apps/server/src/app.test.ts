@@ -6,10 +6,11 @@ import { tmpdir } from 'node:os';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type {
-  TabView,
-  WorkspaceSettings,
-  WorkspaceSettingsConstraints,
+import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+  type TabView,
+  type WorkspaceSettings,
+  type WorkspaceSettingsConstraints,
 } from '@flanterminal/shared';
 
 import { createApp } from './app.js';
@@ -966,6 +967,7 @@ const DEFAULT_SETTINGS: WorkspaceSettings = {
   defaultShell: '/bin/bash',
   tmuxHistoryLimit: 50_000,
   staleSessionCleanupHours: 24,
+  customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
 };
 
 const SETTINGS_CONSTRAINTS: WorkspaceSettingsConstraints = {

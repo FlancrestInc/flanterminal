@@ -2,6 +2,7 @@ import { once } from 'node:events';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 
 import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
   type WorkspaceSettings,
   type WorkspaceSettingsConstraints,
 } from '@flanterminal/shared';
@@ -40,6 +41,7 @@ const defaults: WorkspaceSettings = {
   defaultShell: '/bin/bash',
   tmuxHistoryLimit: 50_000,
   staleSessionCleanupHours: 24,
+  customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
 };
 
 const constraints: WorkspaceSettingsConstraints = {

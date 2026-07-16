@@ -1,6 +1,7 @@
 import { isAbsolute, join } from 'node:path';
 
 import {
+  isLegacyWorkspaceSettingsMissingCustomTerminalPalette,
   parseWorkspaceSettings,
   type WorkspaceSettings,
   type WorkspaceSettingsConstraints,
@@ -83,7 +84,24 @@ export class SettingsStore {
           MAX_SECURE_JSON_BYTES,
         );
         if (persisted !== undefined) {
-          this.current = parseWorkspaceSettings(persisted, this.constraints);
+          const legacy =
+            isLegacyWorkspaceSettingsMissingCustomTerminalPalette(persisted);
+          const parsed = parseWorkspaceSettings(persisted, this.constraints);
+          if (legacy) {
+            const result = await this.secureFile.replace(
+              this.settingsPath,
+              parsed,
+              0o600,
+            );
+            if (result.state === 'not_committed') {
+              throw new Error('not committed');
+            }
+            this.current = parsed;
+            this.ready = result.state === 'committed';
+            if (!this.ready) this.emitDurabilityEvent();
+            return;
+          }
+          this.current = parsed;
           this.ready = true;
           return;
         }

@@ -1,8 +1,17 @@
-import { chmod, lstat, mkdtemp, readdir, rm } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
   type WorkspaceSettings,
   type WorkspaceSettingsConstraints,
 } from '@flanterminal/shared';
@@ -28,6 +37,7 @@ const defaults: WorkspaceSettings = {
   defaultShell: '/bin/bash',
   tmuxHistoryLimit: 50_000,
   staleSessionCleanupHours: 24,
+  customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
 };
 
 const constraints: WorkspaceSettingsConstraints = {
@@ -90,6 +100,26 @@ describe.sequential('SettingsStore real filesystem', () => {
     const stat = await lstat(join(dataDir, 'settings.json'));
     expect(stat.isFile()).toBe(true);
     expect(stat.mode & 0o7777).toBe(0o600);
+  });
+
+  it('rewrites a valid legacy settings document with the canonical palette', async () => {
+    const legacy = structuredClone(defaults) as Record<string, unknown>;
+    delete legacy.customTerminalPalette;
+    await writeFile(join(dataDir, 'settings.json'), JSON.stringify(legacy), {
+      mode: 0o600,
+    });
+
+    const first = createStore(dataDir);
+    await first.initialize();
+    expect(first.snapshot()).toEqual(defaults);
+
+    expect(
+      JSON.parse(await readFile(join(dataDir, 'settings.json'), 'utf8')),
+    ).toEqual(defaults);
+
+    const restarted = createStore(dataDir);
+    await restarted.initialize();
+    expect(restarted.snapshot()).toEqual(defaults);
   });
 });
 

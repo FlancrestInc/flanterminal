@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
   type WorkspaceSettings,
   type WorkspaceSettingsConstraints,
 } from '@flanterminal/shared';
@@ -27,6 +28,7 @@ const defaults: WorkspaceSettings = {
   defaultShell: '/bin/bash',
   tmuxHistoryLimit: 50_000,
   staleSessionCleanupHours: 24,
+  customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
 };
 
 const constraints: WorkspaceSettingsConstraints = {
@@ -95,6 +97,50 @@ describe('SettingsStore initialization', () => {
     expect(store.snapshot()).not.toBe(persisted);
     expect(store.durabilityReady()).toBe(true);
     expect(file.calls).toEqual([`read ${SETTINGS_PATH} 1048576`]);
+  });
+
+  it.each([
+    ['committed', true],
+    ['committed_durability_uncertain', false],
+  ] as const)(
+    'migrates a valid legacy document with a %s replacement',
+    async (state, ready) => {
+      const legacy = structuredClone(defaults) as Record<string, unknown>;
+      delete legacy.customTerminalPalette;
+      const durability = vi.fn();
+      const file = new ScriptedSecureJsonFile();
+      file.readResults.push(legacy);
+      file.replaceResults.push({ state });
+      const store = createStore(file, defaults, durability);
+
+      await store.initialize();
+
+      expect(store.snapshot()).toEqual(defaults);
+      expect(store.durabilityReady()).toBe(ready);
+      expect(file.calls).toEqual([
+        `read ${SETTINGS_PATH} 1048576`,
+        `replace ${SETTINGS_PATH} 384`,
+      ]);
+      expect(file.replacedValues).toEqual([defaults]);
+      expect(durability).toHaveBeenCalledTimes(
+        state === 'committed_durability_uncertain' ? 1 : 0,
+      );
+    },
+  );
+
+  it('does not publish a legacy migration when replacement is not committed', async () => {
+    const legacy = structuredClone(defaults) as Record<string, unknown>;
+    delete legacy.customTerminalPalette;
+    const durability = vi.fn();
+    const file = new ScriptedSecureJsonFile();
+    file.readResults.push(legacy);
+    file.replaceResults.push({ state: 'not_committed' });
+    const store = createStore(file, defaults, durability);
+
+    await expect(store.initialize()).rejects.toBeInstanceOf(SettingsStoreError);
+
+    expect(() => store.snapshot()).toThrow(SettingsStoreError);
+    expect(durability).not.toHaveBeenCalled();
   });
 
   it.each([

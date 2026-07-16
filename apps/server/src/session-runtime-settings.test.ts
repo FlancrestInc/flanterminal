@@ -1,6 +1,7 @@
-import type {
-  WorkspaceSettings,
-  WorkspaceSettingsConstraints,
+import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+  type WorkspaceSettings,
+  type WorkspaceSettingsConstraints,
 } from '@flanterminal/shared';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -23,6 +24,7 @@ const settings: WorkspaceSettings = {
   defaultShell: '/bin/zsh',
   tmuxHistoryLimit: 40_000,
   staleSessionCleanupHours: 0,
+  customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
 };
 
 const constraints: WorkspaceSettingsConstraints = {

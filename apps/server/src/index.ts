@@ -40,10 +40,11 @@ import {
 } from './websocket.js';
 import { WorkspaceBootstrap } from './workspace-bootstrap.js';
 
-import type {
-  CleanupResult,
-  WorkspaceSettings,
-  WorkspaceSettingsConstraints,
+import {
+  MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
+  type CleanupResult,
+  type WorkspaceSettings,
+  type WorkspaceSettingsConstraints,
 } from '@flanterminal/shared';
 
 const TMUX_EXECUTABLE = '/usr/bin/tmux';
@@ -676,6 +677,10 @@ function workspaceSettingsConstraints(
       fontFamilies: Object.freeze([
         'jetbrains-mono-nerd' as const,
         'system-monospace' as const,
+        'dejavu-sans-mono' as const,
+        'noto-sans-mono' as const,
+        'liberation-mono' as const,
+        'courier' as const,
       ]),
       fontSize: Object.freeze({ min: 8, max: config.maxFontSize, step: 1 }),
       lineHeight: Object.freeze({ min: 1, max: 2, step: 0.05 }),
@@ -689,6 +694,10 @@ function workspaceSettingsConstraints(
         'dark' as const,
         'light' as const,
         'ubuntu' as const,
+        'midnight-electric' as const,
+        'aurora-night' as const,
+        'carbon-violet' as const,
+        'custom' as const,
       ]),
       cursorStyles: Object.freeze([
         'block' as const,
@@ -728,12 +737,12 @@ function defaultWorkspaceSettings(
 ): WorkspaceSettings {
   return Object.freeze({
     version: 1,
-    fontFamily: 'jetbrains-mono-nerd',
+    fontFamily: 'dejavu-sans-mono',
     fontSize: Math.min(config.defaultFontSize, config.maxFontSize),
     lineHeight: 1.2,
     letterSpacing: 0,
     scrollback: Math.min(config.xtermScrollback, config.maxXtermScrollback),
-    theme: 'dark',
+    theme: 'midnight-electric',
     cursorStyle: 'block',
     cursorBlink: true,
     bellBehavior: 'visual',
@@ -746,6 +755,7 @@ function defaultWorkspaceSettings(
       config.maxTmuxHistoryLimit,
     ),
     staleSessionCleanupHours: 0,
+    customTerminalPalette: MIDNIGHT_ELECTRIC_TERMINAL_PALETTE,
   });
 }
 
