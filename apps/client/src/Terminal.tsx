@@ -44,9 +44,7 @@ export interface TerminalLike extends DisposableLike {
   open(element: HTMLElement): void;
   hasSelection(): boolean;
   getSelection(): string;
-  attachCustomKeyEventHandler(
-    handler: (event: KeyboardEvent) => boolean,
-  ): void;
+  attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean): void;
   focus(): void;
   clear(): void;
   write(data: string): void;

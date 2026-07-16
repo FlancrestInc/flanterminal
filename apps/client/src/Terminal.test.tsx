@@ -355,9 +355,12 @@ describe('Terminal', () => {
 
   it.each([
     ['rejects', vi.fn(async () => Promise.reject(new Error('denied')))],
-    ['throws synchronously', vi.fn(() => {
-      throw new Error('denied');
-    })],
+    [
+      'throws synchronously',
+      vi.fn(() => {
+        throw new Error('denied');
+      }),
+    ],
   ])(
     'cancels selected copy when clipboard write %s',
     async (_outcome, writeText) => {
