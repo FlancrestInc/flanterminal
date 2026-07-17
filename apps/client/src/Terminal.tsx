@@ -12,6 +12,7 @@ import {
   useImperativeHandle,
   useMemo,
   useRef,
+  useState,
 } from 'react';
 
 import {
@@ -182,9 +183,12 @@ function isCopyShortcut(event: KeyboardEvent) {
   return isMac ? event.metaKey : event.ctrlKey;
 }
 
-function copySelection(text: string) {
+function copySelection(text: string, onSuccess: () => void) {
   try {
-    void navigator.clipboard?.writeText(text)?.catch(() => undefined);
+    void navigator.clipboard
+      ?.writeText(text)
+      ?.then(onSuccess)
+      .catch(() => undefined);
   } catch {
     // Clipboard permissions and browser support must not affect terminal input.
   }
@@ -201,6 +205,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
     const clearTerminalRef = useRef<() => void>(() => undefined);
     const syncResizeRef = useRef<(force: boolean) => void>(() => undefined);
     const cancelResizeRef = useRef<() => void>(() => undefined);
+    const [copyStatusVisible, setCopyStatusVisible] = useState(false);
     const { sendInput, sendResize, subscribeOutput } = socket;
     const selectedTheme = settings.theme;
     const terminalThemeSignature =
@@ -256,6 +261,17 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
       const webLinksAddon = dependencies.webLinksAddonFactory();
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
+      let copyStatusTimer: ReturnType<typeof setTimeout> | null = null;
+      let isActive = true;
+      const showCopyStatus = () => {
+        if (!isActive) return;
+        setCopyStatusVisible(true);
+        if (copyStatusTimer !== null) dependencies.clearTimer(copyStatusTimer);
+        copyStatusTimer = dependencies.setTimer(() => {
+          copyStatusTimer = null;
+          if (isActive) setCopyStatusVisible(false);
+        }, 1_800);
+      };
       const forceOrdinarySelection = (event: MouseEvent) => {
         if (
           event.button !== 0 ||
@@ -291,6 +307,17 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         );
       };
       host.addEventListener('mousedown', forceOrdinarySelection, true);
+      const copyCompletedSelection = (event: MouseEvent) => {
+        if (event.button !== 0) return;
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const screen = target.closest('.xterm-screen');
+        if (screen === null || !host.contains(screen)) return;
+        const selection = terminal.getSelection();
+        if (selection.length === 0) return;
+        copySelection(selection, showCopyStatus);
+      };
+      host.addEventListener('mouseup', copyCompletedSelection, true);
       terminal.open(host);
       let wheelLineRemainder = 0;
       terminal.attachCustomWheelEventHandler((event) => {
@@ -346,7 +373,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
           return false;
         }
         event.preventDefault();
-        copySelection(terminal.getSelection());
+        copySelection(terminal.getSelection(), showCopyStatus);
         return false;
       });
       focusTerminalRef.current = () => terminal.focus();
@@ -427,6 +454,10 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
 
       return () => {
         host.removeEventListener('mousedown', forceOrdinarySelection, true);
+        host.removeEventListener('mouseup', copyCompletedSelection, true);
+        isActive = false;
+        if (copyStatusTimer !== null) dependencies.clearTimer(copyStatusTimer);
+        setCopyStatusVisible(false);
         observer.disconnect();
         cancelInitialFit();
         cancelResize();
@@ -467,17 +498,24 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
     ]);
 
     return (
-      <div
-        ref={hostRef}
-        className="terminal-host"
-        role="region"
-        aria-label="Terminal"
-        tabIndex={0}
-        onFocus={(event) => {
-          if (event.target === event.currentTarget) focusTerminalRef.current();
-        }}
-        onContextMenu={(event) => event.preventDefault()}
-      />
+      <div className="terminal-host-shell">
+        <div
+          ref={hostRef}
+          className="terminal-host"
+          role="region"
+          aria-label="Terminal"
+          tabIndex={0}
+          onFocus={(event) => {
+            if (event.target === event.currentTarget) focusTerminalRef.current();
+          }}
+          onContextMenu={(event) => event.preventDefault()}
+        />
+        {copyStatusVisible && (
+          <div className="terminal-copy-status" role="status">
+            Copied to clipboard
+          </div>
+        )}
+      </div>
     );
   },
 );

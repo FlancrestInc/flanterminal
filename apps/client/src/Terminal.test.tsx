@@ -115,7 +115,9 @@ const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(
   'platform',
 );
 
-function setClipboard(writeText = vi.fn(async () => undefined)) {
+function setClipboard(
+  writeText: (text: string) => Promise<void> = vi.fn(async () => undefined),
+) {
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
     value: { writeText },
@@ -304,6 +306,95 @@ describe('Terminal', () => {
       expect.objectContaining({ button: 0, buttons: 1, shiftKey: true }),
     );
     expect(result.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('copies a completed primary selection before xterm clears it and reports success', async () => {
+    const clipboardWrite = setClipboard();
+    const result = setup();
+    const host = result.getByLabelText('Terminal');
+    const screen = document.createElement('div');
+    screen.className = 'xterm-screen';
+    host.append(screen);
+    result.terminal.selection = 'copied terminal output';
+    screen.addEventListener('mouseup', () => {
+      result.terminal.selection = '';
+    });
+
+    screen.dispatchEvent(
+      new MouseEvent('mouseup', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+      }),
+    );
+
+    await act(async () => Promise.resolve());
+    expect(clipboardWrite).toHaveBeenCalledWith('copied terminal output');
+    expect(result.getByRole('status')).toHaveTextContent('Copied to clipboard');
+    expect(result.socket.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('dismisses the copy status after 1.8 seconds', async () => {
+    setClipboard();
+    const result = setup();
+    result.terminal.selection = 'copied terminal output';
+
+    result.terminal.key(keyEvent({ ctrlKey: true }));
+
+    await act(async () => Promise.resolve());
+    expect(result.getByRole('status')).toHaveTextContent('Copied to clipboard');
+    act(() => vi.advanceTimersByTime(1_799));
+    expect(result.getByRole('status')).toHaveTextContent('Copied to clipboard');
+    act(() => vi.advanceTimersByTime(1));
+    expect(result.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('resets the copy status dismissal timer after another successful copy', async () => {
+    setClipboard();
+    const result = setup();
+    result.terminal.selection = 'first copied terminal output';
+
+    result.terminal.key(keyEvent({ ctrlKey: true }));
+    await act(async () => Promise.resolve());
+    act(() => vi.advanceTimersByTime(1_000));
+    result.terminal.selection = 'second copied terminal output';
+    result.terminal.key(keyEvent({ ctrlKey: true }));
+
+    await act(async () => Promise.resolve());
+    act(() => vi.advanceTimersByTime(1_799));
+    expect(result.getByRole('status')).toHaveTextContent('Copied to clipboard');
+    act(() => vi.advanceTimersByTime(1));
+    expect(result.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('ignores a pending clipboard success after recreating the terminal', async () => {
+    let resolveWrite: (() => void) | undefined;
+    setClipboard(
+      vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveWrite = resolve;
+          }),
+      ),
+    );
+    const result = setup();
+    result.terminal.selection = 'copied terminal output';
+
+    result.terminal.key(keyEvent({ ctrlKey: true }));
+    result.rerender(
+      <Terminal
+        config={config}
+        settings={{ ...result.settings, fontSize: 16 }}
+        socket={result.socket}
+        dependencies={result.dependencies}
+      />,
+    );
+    await act(async () => {
+      resolveWrite?.();
+      await Promise.resolve();
+    });
+
+    expect(result.queryByRole('status')).not.toBeInTheDocument();
   });
 
   it('leaves ordinary primary presses outside the xterm screen untouched', () => {
@@ -528,7 +619,7 @@ describe('Terminal', () => {
   it.each([
     ['Windows', 'Win32'],
     ['Linux', 'Linux x86_64'],
-  ])('copies selected text for Ctrl+C on %s', (_name, platform) => {
+  ])('copies selected text for Ctrl+C on %s', async (_name, platform) => {
     const clipboardWrite = setClipboard();
     setPlatform(platform);
     const result = setup();
@@ -537,12 +628,14 @@ describe('Terminal', () => {
 
     const accepted = result.terminal.key(event);
 
+    await act(async () => Promise.resolve());
     expect(clipboardWrite).toHaveBeenCalledWith('copied terminal output');
+    expect(result.getByRole('status')).toHaveTextContent('Copied to clipboard');
     expect(event.defaultPrevented).toBe(true);
     expect(accepted).toBe(false);
   });
 
-  it('copies selected text for Cmd+C on macOS', () => {
+  it('copies selected text for Cmd+C on macOS', async () => {
     const clipboardWrite = setClipboard();
     setPlatform('MacIntel');
     const result = setup();
@@ -551,7 +644,9 @@ describe('Terminal', () => {
 
     const accepted = result.terminal.key(event);
 
+    await act(async () => Promise.resolve());
     expect(clipboardWrite).toHaveBeenCalledWith('copied terminal output');
+    expect(result.getByRole('status')).toHaveTextContent('Copied to clipboard');
     expect(event.defaultPrevented).toBe(true);
     expect(accepted).toBe(false);
   });
@@ -624,6 +719,7 @@ describe('Terminal', () => {
       await act(async () => Promise.resolve());
       expect(writeText).toHaveBeenCalledWith('copied terminal output');
       expect(event.defaultPrevented).toBe(true);
+      expect(result.queryByRole('status')).not.toBeInTheDocument();
       expect(result.socket.sendInput).not.toHaveBeenCalled();
     },
   );
@@ -640,6 +736,7 @@ describe('Terminal', () => {
 
     expect(() => result.terminal.key(event)).not.toThrow();
     expect(event.defaultPrevented).toBe(true);
+    expect(result.queryByRole('status')).not.toBeInTheDocument();
     expect(result.socket.sendInput).not.toHaveBeenCalled();
   });
 

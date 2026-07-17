@@ -107,25 +107,17 @@ test('copies selected terminal text', async ({ page, context }, testInfo) => {
     steps: 8,
   });
   await page.mouse.up();
-  await expect
-    .poll(() =>
-      activePanel(page)
-        .locator('.xterm-selection > div')
-        .evaluateAll((elements) =>
-          elements.some((element) => {
-            const selection = element.getBoundingClientRect();
-            return selection.width > 0 && selection.height > 0;
-          }),
-        ),
-    )
-    .toBe(true);
+
+  await expect(
+    activePanel(page).getByRole('status'),
+  ).toHaveText('Copied to clipboard');
 
   if (testInfo.project.use.browserName !== 'chromium') return;
 
-  await page.evaluate(() => navigator.clipboard.writeText(''));
-  await page.keyboard.press('Control+C');
   await expect
-    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .poll(() =>
+      page.evaluate(() => navigator.clipboard.readText()),
+    )
     .toBe(copyMarker);
 });
 
