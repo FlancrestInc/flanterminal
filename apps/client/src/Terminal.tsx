@@ -386,14 +386,19 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(
         dependencies.clearTimer(resizeTimer);
         resizeTimer = null;
       };
+      const isHidden = () => host.closest('[hidden]') !== null;
       const fitAndScheduleResize = (force = false) => {
+        if (isHidden()) {
+          cancelResize();
+          return;
+        }
         fitAddon.fit();
         cancelResize();
         if (statusRef.current !== 'connected') return;
         if (force) lastDimensions = null;
         resizeTimer = dependencies.setTimer(() => {
           resizeTimer = null;
-          if (statusRef.current !== 'connected') return;
+          if (statusRef.current !== 'connected' || isHidden()) return;
           if (
             terminal.cols < MIN_COLS ||
             terminal.cols > MAX_COLS ||

@@ -794,6 +794,26 @@ describe('Terminal', () => {
     expect(socket.sendResize).toHaveBeenLastCalledWith(100, 35);
   });
 
+  it('does not fit hidden panels or send their fallback geometry', () => {
+    const result = setup();
+    const host = result.getByLabelText('Terminal');
+    const wrapper = document.createElement('section');
+    host.replaceWith(wrapper);
+    wrapper.append(host);
+    wrapper.hidden = true;
+
+    act(() => result.initialFit());
+    act(() => vi.advanceTimersByTime(75));
+    expect(result.fitAddon.fit).not.toHaveBeenCalled();
+    expect(result.socket.sendResize).not.toHaveBeenCalled();
+
+    wrapper.hidden = false;
+    act(() => result.resize());
+    act(() => vi.advanceTimersByTime(75));
+    expect(result.fitAddon.fit).toHaveBeenCalledTimes(1);
+    expect(result.socket.sendResize).toHaveBeenLastCalledWith(80, 24);
+  });
+
   it('sends valid dimensions after readiness and resends them after reconnect', () => {
     const result = setup('reconnecting');
     const mutableSocket = result.socket as Mutable<TerminalSocketController>;
