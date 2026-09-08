@@ -187,6 +187,12 @@ describe('TmuxSessionPreparer', () => {
       '-t',
       BUILD_SESSION_NAME,
       SESSION_NAME,
+      ';',
+      'set-window-option',
+      '-t',
+      `${SESSION_NAME}:0`,
+      'window-size',
+      'latest',
     ]);
     const creationArgs = vi.mocked(runner.run).mock.calls[1]?.[1];
     expect(creationArgs).not.toContain('-g');
@@ -201,11 +207,17 @@ describe('TmuxSessionPreparer', () => {
     expect(realPaneIndex).toBeLessThan(
       creationArgs?.indexOf('kill-pane') ?? -1,
     );
-    expect(creationArgs?.slice(-4)).toEqual([
+    expect(creationArgs?.slice(-10)).toEqual([
       'rename-session',
       '-t',
       BUILD_SESSION_NAME,
       SESSION_NAME,
+      ';',
+      'set-window-option',
+      '-t',
+      `${SESSION_NAME}:0`,
+      'window-size',
+      'latest',
     ]);
     expect(
       creationArgs?.filter((argument) => argument === SESSION_NAME),

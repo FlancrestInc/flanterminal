@@ -152,6 +152,14 @@ export class TmuxSessionPreparer implements SessionPreparer {
           '-t',
           buildName,
           name,
+          ';',
+          // Return control to the attached client after bootstrap. The manual
+          // size above is only for splitting safely under a tiny latest client.
+          'set-window-option',
+          '-t',
+          `${name}:0`,
+          'window-size',
+          'latest',
         ]);
         if (creation.exitCode !== 0) throw new Error();
       } catch {
